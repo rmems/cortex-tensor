@@ -31,7 +31,7 @@ jobs:
     - name: Install llvm-tools-preview
       run: rustup component add llvm-tools-preview
     - name: Install cargo-llvm-cov
-      uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f
+      uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b
       with:
         tool: cargo-llvm-cov
     - name: Generate coverage report
