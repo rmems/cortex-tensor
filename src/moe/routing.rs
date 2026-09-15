@@ -81,10 +81,12 @@ pub(super) fn softmax(scores: &[f32]) -> Vec<f32> {
 ///
 /// This helper is pure: the same `(scores, top_k)` pair always yields the same
 /// `Result`. Softmax and normalization kernels are unchanged here.
+///
+/// Callers must rank these raw scores *before* softmax. Softmax currently maps
+/// a non-finite exponential sum to uniform weights, which would otherwise
+/// hide NaN / `+Inf` from this helper.
 pub(super) fn top_k_indices(scores: &[f32], top_k: usize) -> Result<Vec<usize>> {
-    if let Some(expert_id) = scores.iter().position(|score| score.is_nan()) {
-        return Err(HybridError::NanRoutingScore { expert_id });
-    }
+    reject_nan_routing_scores(scores)?;
 
     let take = top_k.min(scores.len());
     if take == 0 {
@@ -98,6 +100,21 @@ pub(super) fn top_k_indices(scores: &[f32], top_k: usize) -> Result<Vec<usize>> 
         .take(take)
         .map(|(expert_id, _)| expert_id)
         .collect())
+}
+
+/// Reject NaN routing scores without ranking. Used to fail closed before
+/// mutating spiking membrane state.
+pub(super) fn reject_nan_routing_scores(scores: &[f32]) -> Result<()> {
+    if let Some(expert_id) = scores.iter().position(|score| score.is_nan()) {
+        return Err(HybridError::NanRoutingScore { expert_id });
+    }
+    Ok(())
+}
+
+/// Rank raw routing scores, then softmax for the returned expert weights.
+pub(super) fn route_top_k(scores: &[f32], top_k: usize) -> Result<(Vec<f32>, Vec<usize>)> {
+    let selected_experts = top_k_indices(scores, top_k)?;
+    Ok((softmax(scores), selected_experts))
 }
 
 /// Total order for routing: higher score first, then lower expert ID.
@@ -208,6 +225,17 @@ mod tests {
 
     /// Existing finite ranking fixture: strictly decreasing scores keep
     /// their previous selection `[0, 1]` for `top_k = 2`.
+    #[test]
+    fn route_top_k_ranks_raw_scores_before_softmax() {
+        let scores = [0.0_f32, 1.0, f32::INFINITY];
+        let (weights, selected) = route_top_k(&scores, 1).unwrap();
+        assert_eq!(selected, vec![2]);
+        // Softmax of +Inf currently falls back to uniform weights; selection
+        // must still prefer the infinite expert rather than the lowest IDs.
+        let uniform = 1.0 / scores.len() as f32;
+        assert!(weights.iter().all(|weight| (weight - uniform).abs() < 1e-6));
+    }
+
     #[test]
     fn finite_distinct_scores_keep_expected_selection() {
         let scores = [0.9_f32, 0.5, 0.3, 0.1];
