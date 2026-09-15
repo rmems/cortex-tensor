@@ -49,9 +49,13 @@ src/
 | Item | Purpose |
 |---|---|
 | `Tensor` | Row-major `f32` tensor (`data: Vec<f32>`, `shape`, `strides`), `Serialize`/`Deserialize`. |
-| `ops::matmul` / `batched_matmul` | Cache-friendly tiled CPU matmul. |
+| `Tensor::try_from_vec` | Fallible constructor: checked `numel` and stride arithmetic, no giant overflow allocations. |
+| `ops::try_matmul` / `try_batched_matmul` | Checked CPU matmul; rank, inner-dim, and size errors are typed. |
+| `ops::try_embedding` | Embedding lookup that returns `CortexError::TokenIndex` for OOV ids. |
+| `ops::try_layer_norm` / `try_rms_norm` | Normalization that rejects zero-width axes and non-positive/non-finite `eps`. |
+| `ops::matmul` / `batched_matmul` | Pre-1.0 panic-style wrappers around the `try_*` ops. |
 | `ops::causal_mask` | Additive mask for auto-regressive attention. |
-| `ops::softmax` / `layer_norm` | Standard building blocks. |
+| `ops::softmax` / `layer_norm` | Standard building blocks (`layer_norm` wraps `try_layer_norm`). |
 
 ### `transformer`
 
@@ -190,13 +194,15 @@ cortex-tensor = { git = "https://github.com/rmems/cortex-tensor", branch = "main
 ## Quick start
 
 ```rust
-use cortex_tensor::tensor::ops::matmul;
+use cortex_tensor::tensor::ops::{matmul, try_matmul};
 use cortex_tensor::Tensor;
 
-let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
-let b = Tensor::from_vec(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
-let c = matmul(&a, &b);
+let a = Tensor::try_from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+let b = Tensor::try_from_vec(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]).unwrap();
+let c = try_matmul(&a, &b).unwrap();
 assert_eq!(c.shape(), &[2, 2]);
+// Panic-style wrappers (`from_vec`, `matmul`) remain for pre-1.0 compatibility.
+let _ = matmul(&a, &b);
 ```
 
 Building a transformer block:
