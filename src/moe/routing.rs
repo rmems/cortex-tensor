@@ -4,6 +4,7 @@
 
 use super::checkpoint::{GgufTensorInfo, MappedGgufCheckpoint};
 use crate::error::{HybridError, Result};
+use crate::tensor::finite::{l2_normalize, softmax_vec};
 use crate::types::EMBEDDING_DIM;
 use std::cmp::Ordering;
 
@@ -41,23 +42,7 @@ pub(super) fn synthetic_gate_scores(num_experts: usize, embedding: &[f32]) -> Ve
 }
 
 pub(super) fn softmax(scores: &[f32]) -> Vec<f32> {
-    if scores.is_empty() {
-        return Vec::new();
-    }
-
-    let max_score = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let exp_scores: Vec<f32> = scores
-        .iter()
-        .map(|&score| (score - max_score).exp())
-        .collect();
-    let sum_exp: f32 = exp_scores.iter().sum();
-    if sum_exp <= 0.0 || !sum_exp.is_finite() {
-        return vec![1.0 / scores.len() as f32; scores.len()];
-    }
-    exp_scores
-        .into_iter()
-        .map(|value| value / sum_exp)
-        .collect()
+    softmax_vec(scores)
 }
 
 pub(super) fn top_k_indices(weights: &[f32], top_k: usize) -> Vec<usize> {
@@ -101,12 +86,7 @@ pub(super) fn resample_embedding(input: &[f32], target_len: usize) -> Vec<f32> {
 }
 
 pub(super) fn normalize_l2(values: &mut [f32]) {
-    let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
-    if norm > 1e-8 {
-        for value in values {
-            *value /= norm;
-        }
-    }
+    l2_normalize(values);
 }
 
 pub(super) fn normalize_to_internal_embedding_dim(input: &[f32]) -> Vec<f32> {
@@ -149,6 +129,32 @@ mod tests {
         assert_eq!(out.len(), 8);
         assert!((out[0] - 0.0).abs() < 1e-6);
         assert!((out[7] + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn softmax_empty_scores_are_empty() {
+        assert!(softmax(&[]).is_empty());
+    }
+
+    #[test]
+    fn softmax_all_masked_is_uniform() {
+        let y = softmax(&[f32::NEG_INFINITY, f32::NEG_INFINITY]);
+        assert!((y[0] - 0.5).abs() < 1e-6);
+        assert!((y[1] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn softmax_two_pos_inf_split() {
+        let y = softmax(&[f32::INFINITY, 0.0, f32::INFINITY]);
+        assert_eq!(y, vec![0.5, 0.0, 0.5]);
+    }
+
+    #[test]
+    fn l2_normalize_unit_vector() {
+        let mut v = vec![3.0f32, 4.0];
+        normalize_l2(&mut v);
+        assert!((v[0] - 0.6).abs() < 1e-6);
+        assert!((v[1] - 0.8).abs() < 1e-6);
     }
 
     #[test]

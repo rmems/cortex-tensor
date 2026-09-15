@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::Tensor;
+use super::finite::{layer_norm_row, rms_norm_row, validate_norm_eps};
+use crate::error::{CortexError, Result};
 
 /// Matrix multiply: [M×K] × [K×N] → [M×N]
 ///
@@ -82,54 +84,101 @@ pub fn batched_matmul(a: &Tensor, b: &Tensor) -> Tensor {
     Tensor::from_vec(out, &[batch, m, n])
 }
 
-/// Layer normalization over the last axis.
-/// Returns (normalized, mean, rstd) for backward pass if needed.
+/// Layer normalization over the last axis of a rank-2 `[batch, dim]` tensor.
+///
+/// Compatibility wrapper around [`try_layer_norm`]. Panics if the arguments
+/// are rejected. Prefer the fallible API when the caller can recover.
+///
+/// See [`super::finite`] for the finite-value policy.
 pub fn layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Tensor {
-    assert_eq!(x.ndim(), 2, "layer_norm: expects 2-D [batch, dim]");
-    let (rows, cols) = (x.shape()[0], x.shape()[1]);
-    assert_eq!(weight.numel(), cols);
-    assert_eq!(bias.numel(), cols);
+    try_layer_norm(x, weight, bias, eps).unwrap_or_else(|err| panic!("{err}"))
+}
 
+/// Fallible LayerNorm. Rejects invalid epsilon and a zero-width last axis.
+pub fn try_layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Result<Tensor> {
+    if x.ndim() != 2 {
+        return Err(CortexError::InvalidConfig(format!(
+            "layer_norm: expects 2-D [batch, dim], got {:?}",
+            x.shape()
+        )));
+    }
+    let rows = x.shape()[0];
+    let cols = x.shape()[1];
+    if cols == 0 {
+        return Err(CortexError::ZeroWidthAxis { op: "layer_norm" });
+    }
+    if weight.numel() != cols {
+        return Err(CortexError::ShapeMismatch {
+            expected: vec![cols],
+            got: weight.shape().to_vec(),
+        });
+    }
+    if bias.numel() != cols {
+        return Err(CortexError::ShapeMismatch {
+            expected: vec![cols],
+            got: bias.shape().to_vec(),
+        });
+    }
+    let eps = validate_norm_eps(eps)?;
     let xd = x.data();
     let wd = weight.data();
     let bd = bias.data();
     let mut out = vec![0.0f32; rows * cols];
-
     for r in 0..rows {
         let off = r * cols;
-        let row = &xd[off..off + cols];
-
-        let mean: f32 = row.iter().sum::<f32>() / cols as f32;
-        let var: f32 = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / cols as f32;
-        let rstd = 1.0 / (var + eps).sqrt();
-
-        for c in 0..cols {
-            out[off + c] = (row[c] - mean) * rstd * wd[c] + bd[c];
-        }
+        layer_norm_row(&xd[off..off + cols], wd, bd, eps, &mut out[off..off + cols]);
     }
-    Tensor::from_vec(out, &[rows, cols])
+    Ok(Tensor::from_vec(out, &[rows, cols]))
 }
 
 /// RMS normalization (used by LLaMA-family models).
+///
+/// Compatibility wrapper around [`try_rms_norm`]. Panics if the arguments
+/// are rejected. See [`super::finite`] for the finite-value policy.
 pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f32) -> Tensor {
-    assert_eq!(x.ndim(), 2);
-    let (rows, cols) = (x.shape()[0], x.shape()[1]);
-    assert_eq!(weight.numel(), cols);
+    try_rms_norm(x, weight, eps).unwrap_or_else(|err| panic!("{err}"))
+}
 
+/// Fallible RMSNorm. Rejects invalid epsilon and a zero-width last axis.
+pub fn try_rms_norm(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+    if x.ndim() != 2 {
+        return Err(CortexError::InvalidConfig(format!(
+            "rms_norm: expects 2-D [batch, dim], got {:?}",
+            x.shape()
+        )));
+    }
+    let rows = x.shape()[0];
+    let cols = x.shape()[1];
+    if cols == 0 {
+        return Err(CortexError::ZeroWidthAxis { op: "rms_norm" });
+    }
+    if weight.numel() != cols {
+        return Err(CortexError::ShapeMismatch {
+            expected: vec![cols],
+            got: weight.shape().to_vec(),
+        });
+    }
+    let eps = validate_norm_eps(eps)?;
     let xd = x.data();
     let wd = weight.data();
     let mut out = vec![0.0f32; rows * cols];
-
     for r in 0..rows {
         let off = r * cols;
-        let row = &xd[off..off + cols];
-        let ms: f32 = row.iter().map(|v| v * v).sum::<f32>() / cols as f32;
-        let rstd = 1.0 / (ms + eps).sqrt();
-        for c in 0..cols {
-            out[off + c] = row[c] * rstd * wd[c];
-        }
+        rms_norm_row(&xd[off..off + cols], wd, eps, &mut out[off..off + cols]);
     }
-    Tensor::from_vec(out, &[rows, cols])
+    Ok(Tensor::from_vec(out, &[rows, cols]))
+}
+
+/// Softmax along the last axis of a 1-D or 2-D tensor.
+///
+/// See [`super::finite`] for the NaN / `±Inf` / all-masked policy.
+pub fn softmax(x: &Tensor) -> Tensor {
+    x.softmax_last()
+}
+
+/// Fallible softmax along the last axis. Rejects rank `> 2`.
+pub fn try_softmax(x: &Tensor) -> Result<Tensor> {
+    x.try_softmax_last()
 }
 
 /// Embedding lookup: [vocab_size, dim] indexed by token ids → [seq_len, dim]
@@ -180,6 +229,26 @@ mod tests {
         // Each row should have mean ≈ 0
         let row0_mean: f32 = y.data()[0..3].iter().sum::<f32>() / 3.0;
         assert!(row0_mean.abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_softmax_op_matches_tensor_softmax_last() {
+        let t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 0.0], &[2, 2]);
+        let a = softmax(&t);
+        let b = t.softmax_last();
+        assert_eq!(a.data(), b.data());
+    }
+
+    #[test]
+    fn test_rms_norm_unit_weight() {
+        let x = Tensor::from_vec(vec![3.0, -4.0], &[1, 2]);
+        let w = Tensor::ones(&[2]);
+        let y = rms_norm(&x, &w, 1e-5);
+        assert!(y.data().iter().all(|v| v.is_finite()));
+        let ms = (9.0f64 + 16.0) / 2.0;
+        let rstd = 1.0 / (ms + 1e-5).sqrt();
+        assert!((f64::from(y.data()[0]) - 3.0 * rstd).abs() < 1e-5);
+        assert!((f64::from(y.data()[1]) + 4.0 * rstd).abs() < 1e-5);
     }
 
     #[test]
