@@ -293,7 +293,7 @@ impl MoeRouter {
     fn simulate_moe_routing(&self, embedding: &[f32]) -> Result<MoeOutput> {
         let gate_scores = self.compute_gate_scores(embedding)?;
         let expert_weights = softmax(&gate_scores);
-        let selected_experts = top_k_indices(&expert_weights, self.top_k);
+        let selected_experts = top_k_indices(&expert_weights, self.top_k)?;
         let selected_mass: f32 = selected_experts
             .iter()
             .map(|&idx| expert_weights[idx])
@@ -332,7 +332,7 @@ impl MoeRouter {
         }
 
         let expert_weights = softmax(&membrane_scores);
-        let selected_experts = top_k_indices(&expert_weights, self.top_k);
+        let selected_experts = top_k_indices(&expert_weights, self.top_k)?;
         let active_mass: f32 = selected_experts
             .iter()
             .map(|&expert_id| expert_spikes[expert_id] * expert_weights[expert_id])
