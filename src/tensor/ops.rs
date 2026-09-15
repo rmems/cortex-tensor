@@ -30,6 +30,9 @@ pub fn try_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     }
     let out_shape = [m, n];
     let mut out = alloc_zeros(&out_shape)?;
+    if out.is_empty() {
+        return Tensor::try_from_vec(out, &out_shape);
+    }
 
     let ad = a.data();
     let bd = b.data();
@@ -104,13 +107,23 @@ pub fn try_batched_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
 
     let out_shape = [batch, m, n];
     let mut out = alloc_zeros(&out_shape)?;
+    if out.is_empty() {
+        return Tensor::try_from_vec(out, &out_shape);
+    }
     let ad = a.data();
     let bd = b.data();
 
     for bi in 0..batch {
-        let a_off = bi * m * k;
-        let b_off = if b_is_batched { bi * k * n } else { 0 };
-        let o_off = bi * m * n;
+        // Output numel being representable does not imply `bi * m * k` is:
+        // a zero axis can make `batch * m * n` fit while a leading product
+        // of the other extents overflows (debug panic / release wrap).
+        let a_off = checked_mul3(bi, m, k, a.shape())?;
+        let b_off = if b_is_batched {
+            checked_mul3(bi, k, n, b.shape())?
+        } else {
+            0
+        };
+        let o_off = checked_mul3(bi, m, n, &out_shape)?;
         for i in 0..m {
             for p in 0..k {
                 let a_ip = ad[a_off + i * k + p];
@@ -298,6 +311,14 @@ fn alloc_zeros(shape: &[usize]) -> Result<Vec<f32>> {
     let numel = checked_numel(shape)?;
     let _ = try_compute_strides(shape)?;
     Ok(vec![0.0; numel])
+}
+
+fn checked_mul3(a: usize, b: usize, c: usize, err_shape: &[usize]) -> Result<usize> {
+    a.checked_mul(b)
+        .and_then(|v| v.checked_mul(c))
+        .ok_or_else(|| CortexError::SizeOverflow {
+            shape: err_shape.to_vec(),
+        })
 }
 
 #[cfg(test)]
@@ -546,6 +567,33 @@ mod tests {
         for case in cases {
             assert!((case.check)(&case.err), "{}: {}", case.name, case.err);
         }
+    }
+
+    #[test]
+    fn try_matmul_empty_output_skips_huge_extent_loop() {
+        let a = Tensor::try_from_vec(vec![], &[usize::MAX, 0]).unwrap();
+        let b = Tensor::try_from_vec(vec![], &[0, 0]).unwrap();
+        let out = try_matmul(&a, &b).unwrap();
+        assert_eq!(out.shape(), &[usize::MAX, 0]);
+        assert_eq!(out.numel(), 0);
+    }
+
+    #[test]
+    fn try_batched_matmul_empty_output_uses_checked_offsets() {
+        let a = Tensor::try_from_vec(vec![], &[3, usize::MAX, 0]).unwrap();
+        let b = Tensor::try_from_vec(vec![], &[3, 0, 0]).unwrap();
+        let out = try_batched_matmul(&a, &b).unwrap();
+        assert_eq!(out.shape(), &[3, usize::MAX, 0]);
+        assert_eq!(out.numel(), 0);
+    }
+
+    #[test]
+    fn try_batched_matmul_zero_inner_dim_is_all_zeros() {
+        let a = Tensor::try_from_vec(vec![], &[2, 2, 0]).unwrap();
+        let b = Tensor::try_from_vec(vec![], &[2, 0, 3]).unwrap();
+        let out = try_batched_matmul(&a, &b).unwrap();
+        assert_eq!(out.shape(), &[2, 2, 3]);
+        assert_eq!(out.data(), &[0.0; 12]);
     }
 
     #[test]

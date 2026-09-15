@@ -306,7 +306,14 @@ impl Tensor {
 }
 
 /// Product of `shape` using checked arithmetic.
+///
+/// Any zero axis yields `0` without multiplying the remaining extents, so a
+/// trailing zero still produces an empty tensor when an earlier product would
+/// overflow (for example `[3, usize::MAX, 0]`).
 pub(crate) fn checked_numel(shape: &[usize]) -> Result<usize> {
+    if shape.contains(&0) {
+        return Ok(0);
+    }
     shape.iter().try_fold(1usize, |acc, &dim| {
         acc.checked_mul(dim)
             .ok_or_else(|| CortexError::SizeOverflow {
@@ -515,6 +522,11 @@ mod tests {
         let cancelled = Tensor::try_from_vec(vec![], &[usize::MAX, 0, 2]).unwrap();
         assert_eq!(cancelled.numel(), 0);
         assert_eq!(cancelled.strides(), &[0, 2, 1]);
+
+        // A trailing zero must not be lost to a left-to-right overflow.
+        let trailing = Tensor::try_from_vec(vec![], &[3, usize::MAX, 0]).unwrap();
+        assert_eq!(trailing.numel(), 0);
+        assert_eq!(trailing.strides(), &[0, 0, 1]);
     }
 
     #[test]
