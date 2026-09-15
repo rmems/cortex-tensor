@@ -6,12 +6,13 @@
 
 //! GGUF checkpoint parsing and mapped tensor access for the router bridge.
 //!
-//! **Frozen for parser work (see #8).** The canonical home for GGUF v3 layout
-//! parsing and per-expert raw weight extraction is `rmems/engram-parser`
-//! (extraction tracked in engram-parser#7, source corinth-canal#115). Do not add
-//! new parser paths, dtypes, or format handling here while that lands — open a
-//! sub-issue under engram-parser#7 instead. What stays in this crate: mmap'd
-//! tensor access, dequantization to f32, routing, and model adapters.
+//! **Frozen for parser work (see #8 / #47).** The canonical home for GGUF v3
+//! layout parsing and per-expert raw weight extraction is `rmems/engram-parser`
+//! (closed engram-parser#7, source corinth-canal#115). Parser/dtype freeze
+//! holds until #47 can wrap `parse_checkpoint_layout` around engram-parser
+//! 0.2.0 (blocked on engram-parser#45). Do not add Q6_K / IQ3_* here. What
+//! stays in this crate: mmap'd tensor access, dequantization to f32, routing,
+//! and model adapters.
 
 use super::dequant;
 use super::{

@@ -13,29 +13,27 @@
 //! - `moe/gguf.rs` for GGUF constants
 //! - `moe/routing.rs` for routing math and embedding resampling
 //!
-//! ## Parser boundary (see #8 coordination)
+//! ## Parser boundary (see #8 / #47)
 //! `rmems/engram-parser` is the parser-layer provider for this
-//! ecosystem: the canonical zero-dependency home for GGUF v3 layout parsing
-//! (header, KV metadata, tensor directory) and MoE per-expert *raw* weight
-//! extraction, being extracted from the `rmems/corinth-canal` reference
-//! implementation (see engram-parser#7 and corinth-canal#115). This crate stays
-//! the consumer: f32 math, `Tensor` ops, routing, dequantization, and model
-//! adapters on top. Until that extraction lands, the in-crate reader in
-//! `moe/checkpoint.rs` / `moe/gguf.rs`, and the dtype coverage it feeds in
-//! `moe/dequant.rs`, are frozen for parser and dtype enhancements — take new
-//! format work to engram-parser#7 instead of adding it here. Dequantization
-//! itself stays owned by this crate; only widening the supported dtype set is
-//! frozen, since new dtypes arrive with the parser's type ids.
-//! Planning/alignment only: no dependency on engram-parser is declared yet.
+//! ecosystem: the canonical home for GGUF v3 layout parsing (header, KV
+//! metadata, tensor directory) and MoE per-expert *raw* weight extraction
+//! (see closed engram-parser#7 and corinth-canal#115). This crate stays the
+//! consumer: f32 math, `Tensor` ops, routing, dequantization, and model
+//! adapters on top. Parser/dtype freeze holds until a consume follow-up can
+//! wrap `parse_checkpoint_layout` around engram-parser 0.2.0 — that work is
+//! #47, blocked on engram-parser#45 (mmap + K-quant). Do not add Q6_K / IQ3_*
+//! here. Dequantization itself stays owned by this crate; only widening the
+//! supported dtype set is frozen, since new dtypes arrive with the parser's
+//! type ids. No dependency on engram-parser is declared yet.
 //!
-//! ## Ecosystem note (see #9 coordination)
-//! Future multi-format support (Safetensors alongside GGUF) will use a dedicated
-//! reusable `safetensors-parser` crate (modeled on engram-parser for GGUF).
-//! The implementation and MoE candidate discovery logic is currently a
-//! reference copy in rmems/corinth-canal (see corinth-canal#116 and
-//! engram-parser#10). This crate will depend on the extracted parser rather
-//! than duplicating header/manifest/candidate logic. Planning/alignment only
-//! for now — no Safetensors backend or dep is implemented here.
+//! ## Ecosystem note (see #9 / #32)
+//! Safetensors header inspection, deterministic manifests, and MoE candidate
+//! discovery belong in `rmems/engram-parser` behind the off-by-default
+//! `safetensors` cargo feature (engram-parser#10, corinth-canal#116). This
+//! crate still does not own that parse surface; the eventual dependency is
+//! one crate (`engram-parser` with `features = ["safetensors"]`), not a
+//! dedicated `safetensors-parser` crate. Planning/alignment only — no
+//! Safetensors backend or dep is implemented here.
 
 mod adapter;
 mod checkpoint;
