@@ -55,7 +55,7 @@ src/
 | `ops::try_layer_norm` / `try_rms_norm` | Normalization that rejects zero-width axes and non-positive/non-finite `eps`. |
 | `ops::matmul` / `batched_matmul` | Pre-1.0 panic-style wrappers around the `try_*` ops. |
 | `ops::causal_mask` | Additive mask for auto-regressive attention. |
-| `ops::softmax` / `layer_norm` | Standard building blocks (`layer_norm` wraps `try_layer_norm`). |
+| `Tensor::softmax_last` / `ops::layer_norm` | Softmax and layer-norm (`layer_norm` wraps `try_layer_norm`). |
 
 ### `transformer`
 

@@ -4,6 +4,7 @@ pub mod ops;
 
 use crate::error::{CortexError, Result, unwrap_compat};
 use serde::{Deserialize, Serialize};
+use std::alloc::Layout;
 use std::fmt;
 
 /// Row-major dense tensor — candle-core replacement.
@@ -103,6 +104,7 @@ impl Tensor {
     pub fn randn(shape: &[usize], mean: f32, std: f32) -> Self {
         use rand::RngExt;
         let numel = unwrap_compat(checked_numel(shape), "Tensor::randn");
+        unwrap_compat(check_f32_alloc(numel, shape), "Tensor::randn");
         let _strides = unwrap_compat(try_compute_strides(shape), "Tensor::randn");
         let mut rng = rand::rng();
         let data: Vec<f32> = (0..numel)
@@ -322,6 +324,15 @@ pub(crate) fn checked_numel(shape: &[usize]) -> Result<usize> {
     })
 }
 
+/// Rejects a `Vec<f32>` length whose byte size exceeds `isize::MAX`.
+pub(crate) fn check_f32_alloc(numel: usize, shape: &[usize]) -> Result<()> {
+    Layout::array::<f32>(numel)
+        .map(|_| ())
+        .map_err(|_| CortexError::SizeOverflow {
+            shape: shape.to_vec(),
+        })
+}
+
 /// Row-major strides using checked arithmetic.
 ///
 /// The last stride is `1`. Earlier strides are the product of all following
@@ -346,6 +357,7 @@ pub(crate) fn try_compute_strides(shape: &[usize]) -> Result<Vec<usize>> {
 /// Allocates a filled buffer only after numel and strides are representable.
 fn try_filled(shape: &[usize], val: f32) -> Result<Tensor> {
     let numel = checked_numel(shape)?;
+    check_f32_alloc(numel, shape)?;
     let strides = try_compute_strides(shape)?;
     Ok(Tensor {
         data: vec![val; numel],

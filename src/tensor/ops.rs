@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use super::{Tensor, checked_numel, try_compute_strides};
+use super::{Tensor, check_f32_alloc, checked_numel, try_compute_strides};
 use crate::error::{CortexError, Result, unwrap_compat};
 
 /// Matrix multiply: [M×K] × [K×N] → [M×N]
@@ -309,6 +309,7 @@ fn check_eps(eps: f32) -> Result<()> {
 /// Allocate an output buffer only after numel and strides are representable.
 fn alloc_zeros(shape: &[usize]) -> Result<Vec<f32>> {
     let numel = checked_numel(shape)?;
+    check_f32_alloc(numel, shape)?;
     let _ = try_compute_strides(shape)?;
     Ok(vec![0.0; numel])
 }
@@ -594,6 +595,20 @@ mod tests {
         let out = try_batched_matmul(&a, &b).unwrap();
         assert_eq!(out.shape(), &[2, 2, 3]);
         assert_eq!(out.data(), &[0.0; 12]);
+    }
+
+    #[test]
+    fn try_matmul_rejects_byte_capacity_overflow() {
+        // usize product fits, but `Vec<f32>` cannot hold more than
+        // `isize::MAX` bytes.
+        let rows = (isize::MAX as usize) / std::mem::size_of::<f32>() + 1;
+        let a = Tensor::try_from_vec(vec![], &[rows, 0]).unwrap();
+        let b = Tensor::try_from_vec(vec![], &[0, 1]).unwrap();
+        let err = try_matmul(&a, &b).unwrap_err();
+        assert!(matches!(
+            err,
+            CortexError::SizeOverflow { shape } if shape == [rows, 1]
+        ));
     }
 
     #[test]
