@@ -52,8 +52,8 @@ src/
 | `Tensor` | Row-major `f32` tensor (`data: Vec<f32>`, `shape`, `strides`), `Serialize`/`Deserialize`. |
 | `ops::matmul` / `batched_matmul` | Cache-friendly tiled CPU matmul. |
 | `ops::causal_mask` | Additive mask for auto-regressive attention. |
-| `ops::softmax` / `layer_norm` / `rms_norm` | Numerically stable kernels under the crate [finite-value policy](#finite-value-policy). |
-| `tensor::finite` | Shared policy + `softmax_row`, `layer_norm_row`, `rms_norm_row`, `l2_normalize`. |
+| `ops::softmax` / `layer_norm` / `rms_norm` | Numerically stable kernels under the crate [finite-value policy](#finite-value-policy). Prefer `try_layer_norm` / `try_rms_norm` / `try_softmax` for typed errors. |
+| `tensor::finite` | Policy docs and public constants (`SOFTMAX_SUM_TOLERANCE`, `L2_NORM_FLOOR`). |
 
 ### `transformer`
 
@@ -215,7 +215,7 @@ RMSNorm moments, and L2 norms accumulate in `f64`.
 - All `-Inf` (fully masked) → uniform `1/n`.
 - Finite logits, including values near `±1e30`, produce non-negative probabilities that sum to 1 within `SOFTMAX_SUM_TOLERANCE` (`1e-5` for rows of length `≤ 4096`).
 
-**LayerNorm / RMSNorm** reject non-positive or non-finite `eps` and a zero-width last axis through `try_layer_norm` / `try_rms_norm` (`CortexError::InvalidEpsilon`, `CortexError::ZeroWidthAxis`). A non-finite data row becomes an all-NaN output row. Finite bounded rows, including constant and large-offset / small-variance rows, stay finite. The existing `layer_norm` / `rms_norm` wrappers panic on those same rejections.
+**LayerNorm / RMSNorm** reject non-positive or non-finite `eps` and a zero-width last axis through `try_layer_norm` / `try_rms_norm` (`CortexError::InvalidEpsilon`, `CortexError::ZeroWidthAxis`). A non-finite data row becomes an all-NaN output row. Finite data with finite affine parameters stay finite; values that overflow `f32` saturate to `±f32::MAX`. The existing `layer_norm` / `rms_norm` wrappers panic on those same rejections.
 
 **L2 routing normalize** fills NaN on any non-finite input, leaves vectors at or below `L2_NORM_FLOOR` unchanged, and otherwise divides by the `f64` Euclidean norm.
 

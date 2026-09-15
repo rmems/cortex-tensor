@@ -40,7 +40,7 @@
 //! | Last-axis width `0` | [`CortexError::ZeroWidthAxis`](crate::CortexError::ZeroWidthAxis). |
 //! | Empty batch (`rows = 0`, `dim > 0`) | Empty output with the same shape. |
 //! | Any non-finite value in a data row | That output row is all NaN. |
-//! | Finite data, including constant or large-offset / small-variance rows | Finite output. Constant rows yield the bias (LayerNorm) or `0` (RMSNorm with finite weight). |
+//! | Finite data and finite affine parameters | Finite output. Values that overflow `f32` saturate to `±f32::MAX`. Constant rows yield the bias (LayerNorm) or `0` (RMSNorm with finite weight). |
 //!
 //! ## L2 routing normalize
 //!
@@ -71,10 +71,55 @@ pub fn validate_norm_eps(eps: f32) -> Result<f64> {
     }
 }
 
+/// Fold an `f32` rounding residual onto the largest mass so a finite simplex
+/// row of length `≤ 4096` sums to 1 within [`SOFTMAX_SUM_TOLERANCE`].
+fn apply_simplex_residual(out: &mut [f32]) {
+    if out.is_empty() {
+        return;
+    }
+    if !out.iter().all(|p| p.is_finite() && *p >= 0.0) {
+        return;
+    }
+    if out.len() == 1 {
+        out[0] = 1.0;
+        return;
+    }
+    let mut sum = 0.0f32;
+    let mut max_i = 0usize;
+    for (i, &p) in out.iter().enumerate() {
+        sum += p;
+        if p > out[max_i] {
+            max_i = i;
+        }
+    }
+    if !sum.is_finite() {
+        return;
+    }
+    let corrected = out[max_i] + (1.0 - sum);
+    if corrected.is_finite() && corrected >= 0.0 {
+        out[max_i] = corrected;
+    }
+}
+
+/// Cast an affine result to `f32`, saturating overflow to `±f32::MAX`.
+fn saturate_f32(y: f64) -> f32 {
+    let y32 = y as f32;
+    if y32.is_finite() {
+        y32
+    } else if y.is_nan() {
+        f32::NAN
+    } else if y.is_sign_positive() {
+        f32::MAX
+    } else {
+        f32::MIN
+    }
+}
+
 /// Max-subtracted softmax of one row according to the crate policy.
 ///
-/// `logits` and `out` must have the same length.
-pub fn softmax_row(logits: &[f32], out: &mut [f32]) {
+/// `logits` and `out` must have the same length. Crate-internal: callers should
+/// use [`crate::tensor::ops::softmax`] or [`crate::tensor::Tensor::softmax_last`].
+pub(crate) fn softmax_row(logits: &[f32], out: &mut [f32]) {
     assert_eq!(
         logits.len(),
         out.len(),
@@ -115,11 +160,13 @@ pub fn softmax_row(logits: &[f32], out: &mut [f32]) {
                 0.0
             };
         }
+        apply_simplex_residual(out);
         return;
     }
 
     if max_v.is_infinite() && max_v.is_sign_negative() {
         out.fill(1.0 / n as f32);
+        apply_simplex_residual(out);
         return;
     }
 
@@ -130,26 +177,36 @@ pub fn softmax_row(logits: &[f32], out: &mut [f32]) {
     }
     if sum == 0.0 || !sum.is_finite() {
         out.fill(1.0 / n as f32);
+        apply_simplex_residual(out);
         return;
     }
     for (dst, &x) in out.iter_mut().zip(logits.iter()) {
         *dst = ((f64::from(x) - max64).exp() / sum) as f32;
     }
+    apply_simplex_residual(out);
 }
 
 /// Allocate and return [`softmax_row`] over `logits`.
-pub fn softmax_vec(logits: &[f32]) -> Vec<f32> {
+pub(crate) fn softmax_vec(logits: &[f32]) -> Vec<f32> {
     let mut out = vec![0.0f32; logits.len()];
     softmax_row(logits, &mut out);
     out
 }
 
 /// LayerNorm one row with `f64` Welford mean/variance.
-pub fn layer_norm_row(x: &[f32], weight: &[f32], bias: &[f32], eps: f64, out: &mut [f32]) {
-    debug_assert_eq!(x.len(), weight.len());
-    debug_assert_eq!(x.len(), bias.len());
-    debug_assert_eq!(x.len(), out.len());
-    debug_assert!(!x.is_empty());
+///
+/// `eps` must already have been accepted by [`validate_norm_eps`]. Lengths
+/// must match and `x` must be non-empty; the public path is
+/// [`crate::tensor::ops::try_layer_norm`].
+pub(crate) fn layer_norm_row(x: &[f32], weight: &[f32], bias: &[f32], eps: f64, out: &mut [f32]) {
+    assert_eq!(
+        x.len(),
+        weight.len(),
+        "layer_norm_row: weight length mismatch"
+    );
+    assert_eq!(x.len(), bias.len(), "layer_norm_row: bias length mismatch");
+    assert_eq!(x.len(), out.len(), "layer_norm_row: out length mismatch");
+    assert!(!x.is_empty(), "layer_norm_row: empty axis");
 
     let n = x.len();
     let mut mean = 0.0f64;
@@ -176,15 +233,22 @@ pub fn layer_norm_row(x: &[f32], weight: &[f32], bias: &[f32], eps: f64, out: &m
         .zip(weight.iter())
         .zip(bias.iter())
     {
-        *dst = ((f64::from(xi) - mean) * rstd * f64::from(w) + f64::from(b)) as f32;
+        *dst = saturate_f32((f64::from(xi) - mean) * rstd * f64::from(w) + f64::from(b));
     }
 }
 
 /// RMSNorm one row with an `f64` mean-square.
-pub fn rms_norm_row(x: &[f32], weight: &[f32], eps: f64, out: &mut [f32]) {
-    debug_assert_eq!(x.len(), weight.len());
-    debug_assert_eq!(x.len(), out.len());
-    debug_assert!(!x.is_empty());
+///
+/// `eps` must already have been accepted by [`validate_norm_eps`]. The public
+/// path is [`crate::tensor::ops::try_rms_norm`].
+pub(crate) fn rms_norm_row(x: &[f32], weight: &[f32], eps: f64, out: &mut [f32]) {
+    assert_eq!(
+        x.len(),
+        weight.len(),
+        "rms_norm_row: weight length mismatch"
+    );
+    assert_eq!(x.len(), out.len(), "rms_norm_row: out length mismatch");
+    assert!(!x.is_empty(), "rms_norm_row: empty axis");
 
     let n = x.len();
     let mut sumsq = 0.0f64;
@@ -202,12 +266,12 @@ pub fn rms_norm_row(x: &[f32], weight: &[f32], eps: f64, out: &mut [f32]) {
         return;
     }
     for ((dst, &xi), &w) in out.iter_mut().zip(x.iter()).zip(weight.iter()) {
-        *dst = (f64::from(xi) * rstd * f64::from(w)) as f32;
+        *dst = saturate_f32(f64::from(xi) * rstd * f64::from(w));
     }
 }
 
 /// L2-normalize `values` in place according to the crate policy.
-pub fn l2_normalize(values: &mut [f32]) {
+pub(crate) fn l2_normalize(values: &mut [f32]) {
     if values.is_empty() {
         return;
     }
@@ -393,6 +457,25 @@ mod tests {
     }
 
     #[test]
+    fn softmax_long_uniform_row_respects_sum_tolerance() {
+        let n = 4051;
+        let y = softmax_vec(&vec![0.0; n]);
+        assert_eq!(y.len(), n);
+        assert!(y.iter().all(|p| p.is_finite() && *p >= 0.0));
+        let sum: f32 = y.iter().copied().sum();
+        assert!(
+            (sum - 1.0).abs() < SOFTMAX_SUM_TOLERANCE,
+            "sum={sum} for n={n}"
+        );
+        let masked = softmax_vec(&vec![f32::NEG_INFINITY; n]);
+        let masked_sum: f32 = masked.iter().copied().sum();
+        assert!((masked_sum - 1.0).abs() < SOFTMAX_SUM_TOLERANCE);
+        let infs = softmax_vec(&vec![f32::INFINITY; 4051]);
+        let inf_sum: f32 = infs.iter().copied().sum();
+        assert!((inf_sum - 1.0).abs() < SOFTMAX_SUM_TOLERANCE);
+    }
+
+    #[test]
     fn softmax_all_neg_inf_is_uniform() {
         let y = softmax_vec(&[f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY]);
         assert!(all_finite(&y));
@@ -574,6 +657,19 @@ mod tests {
         let b = Tensor::zeros(&[3]);
         let y = try_layer_norm(&x, &w, &b, EPS).unwrap();
         assert!(y.data().iter().all(|v| v.is_nan()));
+    }
+
+    #[test]
+    fn layer_norm_extreme_affine_stays_finite() {
+        let x = Tensor::from_vec(vec![1.0, 0.0, 0.0], &[1, 3]);
+        let w = Tensor::from_vec(vec![f32::MAX, 1.0, 1.0], &[3]);
+        let b = Tensor::zeros(&[3]);
+        let y = try_layer_norm(&x, &w, &b, EPS).unwrap();
+        assert!(all_finite(y.data()));
+        assert_eq!(y.data()[0], f32::MAX);
+        let rn = try_rms_norm(&x, &w, EPS).unwrap();
+        assert!(all_finite(rn.data()));
+        assert_eq!(rn.data()[0], f32::MAX);
     }
 
     #[test]
