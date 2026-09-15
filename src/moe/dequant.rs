@@ -2,12 +2,12 @@
 
 //! Quantized tensor dequantization helpers (Q8_0, Q5_K, etc.).
 //!
-//! **Frozen for dtype work (see #8).** Dequantization to `f32` is owned by this
-//! crate, but widening the supported dtype set (`BF16`, `Q6_K`, `IQ3_*`, …) is
-//! frozen while GGUF layout parsing is extracted into
-//! `rmems/engram-parser` — new dtypes arrive with that crate's GGML type
-//! ids, so take them to engram-parser#7 rather than adding a block format here
-//! that `moe/gguf.rs` cannot yet name.
+//! **Frozen for dtype work (see #8 / #47).** Dequantization to `f32` is owned
+//! by this crate, but widening the supported dtype set (`BF16`, `Q6_K`,
+//! `IQ3_*`, …) is frozen until #47 can wrap `parse_checkpoint_layout` around
+//! engram-parser 0.2.0 (blocked on engram-parser#45, mmap + K-quant). New
+//! dtypes arrive with that crate's GGML type ids. Do not add Q6_K / IQ3_*
+//! block formats here that `moe/gguf.rs` cannot yet name.
 
 use crate::error::{HybridError, Result};
 

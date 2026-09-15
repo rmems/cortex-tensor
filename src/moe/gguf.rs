@@ -2,11 +2,13 @@
 
 //! GGUF format constants.
 //!
-//! **Frozen for parser work (see #8).** New GGML type ids and dtype handling
-//! belong in `rmems/engram-parser` (engram-parser#7), not here. Note for
-//! any future port: GGUF wire type 31 is the historical `Q4_0_4_4` layout, not
-//! IQ3_M — see the corinth-canal reference (`src/moe/ggml.rs`) before adding
-//! quant ids.
+//! **Frozen for parser work (see #8 / #47).** New GGML type ids and dtype
+//! handling belong in `rmems/engram-parser`, not here. Parser/dtype freeze
+//! holds until #47 can wrap `parse_checkpoint_layout` around engram-parser
+//! 0.2.0 (blocked on engram-parser#45). Do not add Q6_K / IQ3_* here. Note
+//! for any future port: GGUF wire type 31 is the historical `Q4_0_4_4`
+//! layout, not IQ3_M — see the corinth-canal reference (`src/moe/ggml.rs`)
+//! before adding quant ids.
 
 pub(crate) const GGUF_MAGIC: [u8; 4] = *b"GGUF";
 pub(crate) const GGUF_VERSION: u32 = 3;

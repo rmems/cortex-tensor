@@ -2,7 +2,10 @@
 
 use super::test_fixtures::*;
 use super::*;
+use crate::error::HybridError;
 use std::fs::remove_file;
+use std::mem::size_of;
+use std::path::PathBuf;
 
 fn stub() -> MoeRouter {
     MoeRouter::load_with_mode("", 8, 1, RoutingMode::StubUniform).expect("stub load should succeed")
@@ -79,4 +82,99 @@ fn test_q5k_dequant_smoke_runs_full_block_loop() {
     let out =
         super::dequant::dequantize_row_q5_k(&block, 256).expect("Q5_K row size should be accepted");
     assert_eq!(out.len(), 256);
+}
+
+fn adapter_probe(bytes: &[u8], label: &str) -> (PathBuf, super::checkpoint::MappedGgufCheckpoint) {
+    let path = write_temp_file(bytes, label);
+    let (_metadata, mapped) = super::checkpoint::probe_and_map_checkpoint(path.to_str().unwrap())
+        .expect("synthetic GGUF should map");
+    (path, mapped)
+}
+
+fn adapter_fixture(
+    gate_dims: Vec<usize>,
+    gate_payload: Vec<u8>,
+    token_ggml: u32,
+    token_dims: Vec<usize>,
+    token_payload: Vec<u8>,
+) -> Vec<u8> {
+    build_test_gguf(
+        vec![
+            (
+                "blk.0.ffn_gate_inp.weight",
+                gate_dims,
+                GGML_TYPE_F32,
+                gate_payload,
+            ),
+            (
+                "blk.0.attn_q.weight",
+                vec![EMBEDDING_DIM, EMBEDDING_DIM],
+                GGML_TYPE_IQ3_S,
+                vec![0u8; 16],
+            ),
+            ("token_embd.weight", token_dims, token_ggml, token_payload),
+        ],
+        32,
+    )
+}
+
+#[test]
+fn test_adapter_resolve_routing_insufficient_experts() {
+    let gate_payload = vec![0u8; EMBEDDING_DIM * size_of::<f32>()];
+    let checkpoint = adapter_fixture(
+        vec![EMBEDDING_DIM, 1],
+        gate_payload,
+        GGML_TYPE_F16,
+        vec![EMBEDDING_DIM, 32],
+        vec![0u8; EMBEDDING_DIM * 32 * 2],
+    );
+    let (path, mapped) = adapter_probe(&checkpoint, "routing-insufficient-experts");
+    let result =
+        super::adapter::resolve_adapter(mapped.metadata(), &mapped, None, path.to_str().unwrap());
+    assert!(matches!(
+        result,
+        Err(HybridError::UnsupportedFormat(msg)) if msg.contains("only exposes 1 experts")
+    ));
+    let _ = remove_file(path);
+}
+
+#[test]
+fn test_adapter_resolve_routing_invalid_orientation() {
+    // Enough experts on min(d0, d1), but neither dim equals hidden_size.
+    let gate_payload = vec![0u8; 64 * 128 * size_of::<f32>()];
+    let checkpoint = adapter_fixture(
+        vec![64, 128],
+        gate_payload,
+        GGML_TYPE_F16,
+        vec![EMBEDDING_DIM, 32],
+        vec![0u8; EMBEDDING_DIM * 32 * 2],
+    );
+    let (path, mapped) = adapter_probe(&checkpoint, "routing-invalid-orientation");
+    let result =
+        super::adapter::resolve_adapter(mapped.metadata(), &mapped, None, path.to_str().unwrap());
+    assert!(matches!(
+        result,
+        Err(HybridError::UnsupportedFormat(msg)) if msg.contains("unsupported orientation")
+    ));
+    let _ = remove_file(path);
+}
+
+#[test]
+fn test_adapter_resolve_rejects_iq3_s_token_embedding() {
+    let gate_payload = vec![0u8; EMBEDDING_DIM * 64 * size_of::<f32>()];
+    let checkpoint = adapter_fixture(
+        vec![EMBEDDING_DIM, 64],
+        gate_payload,
+        GGML_TYPE_IQ3_S,
+        vec![EMBEDDING_DIM, 32],
+        vec![0u8; 16],
+    );
+    let (path, mapped) = adapter_probe(&checkpoint, "iq3s-token-embd");
+    let result =
+        super::adapter::resolve_adapter(mapped.metadata(), &mapped, None, path.to_str().unwrap());
+    assert!(matches!(
+        result,
+        Err(HybridError::UnsupportedFormat(msg)) if msg.contains("token embedding tensor")
+    ));
+    let _ = remove_file(path);
 }
