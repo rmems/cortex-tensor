@@ -69,7 +69,7 @@ src/
 | `RoutingMode` | `StubUniform`, `DenseSim`, `SpikingSim` (simulation-only; no GPU dispatch). |
 | `ModelFamily` | `Olmoe`, `Qwen3Moe`, `Gemma4`, `DeepSeek2`, `LlamaMoe`. |
 
-Top-k selection ranks finite scores descending and breaks ties by ascending expert ID. NaN scores are rejected (`NanRoutingScore`); `+Inf` ranks above all finite values and `-Inf` below them. The helper is pure: the same scores always produce the same expert IDs.
+Top-k selection ranks finite scores descending and breaks ties by ascending expert ID. NaN scores are rejected (`NanRoutingScore`); `+Inf` ranks above all finite values and `-Inf` below them. The helper is pure: the same `(scores, top_k)` pair always produces the same expert IDs.
 
 Supported GGUF tensor types: `F32`, `F16`, `Q8_0`, `Q5_K`. `IQ3_S` is detected and rejected (for token embeddings) with a clear error so callers can fall back to `llama.cpp` prompt embeddings. For the preferred GPU synapse tensor (e.g. attn_q on qwen3_moe_iq3_m), unsupported quants now correctly route to a checkpoint-backed `routing-f32` source (using the F32 routing tensor) instead of synthetic fallback. See `synapse_source()`, `real_gpu_synapse_tensor_name()`, and `MoeRouter` metadata.
 

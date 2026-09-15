@@ -310,28 +310,30 @@ impl MoeRouter {
         let gate_scores = self.compute_gate_scores(embedding)?;
         reject_nan_routing_scores(&gate_scores)?;
         let n = self.num_experts;
+        let mut next_membranes = self.expert_membranes.clone();
         let mut membrane_scores = Vec::with_capacity(n);
         let mut expert_spikes = vec![0.0f32; n];
 
         for expert_id in 0..n {
-            self.expert_membranes[expert_id] =
-                self.expert_membranes[expert_id] * self.decay + gate_scores[expert_id] * 0.18;
+            next_membranes[expert_id] =
+                next_membranes[expert_id] * self.decay + gate_scores[expert_id] * 0.18;
 
-            let spike = if self.expert_membranes[expert_id] > self.threshold {
-                self.expert_membranes[expert_id] -= self.threshold;
+            let spike = if next_membranes[expert_id] > self.threshold {
+                next_membranes[expert_id] -= self.threshold;
                 1.0
-            } else if self.expert_membranes[expert_id] < -self.threshold {
-                self.expert_membranes[expert_id] += self.threshold;
+            } else if next_membranes[expert_id] < -self.threshold {
+                next_membranes[expert_id] += self.threshold;
                 -1.0
             } else {
                 0.0
             };
 
             expert_spikes[expert_id] = spike;
-            membrane_scores.push(self.expert_membranes[expert_id] + spike * self.threshold);
+            membrane_scores.push(next_membranes[expert_id] + spike * self.threshold);
         }
 
         let (expert_weights, selected_experts) = route_top_k(&membrane_scores, self.top_k)?;
+        self.expert_membranes = next_membranes;
         let active_mass: f32 = selected_experts
             .iter()
             .map(|&expert_id| expert_spikes[expert_id] * expert_weights[expert_id])

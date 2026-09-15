@@ -237,6 +237,26 @@ mod tests {
     }
 
     #[test]
+    fn route_top_k_preserves_raw_order_when_softmax_underflows() {
+        // After max-subtraction, exp(-150) and exp(-140) both underflow to 0, so
+        // ranking softmax weights would tie experts 1 and 2 and pick ID 1.
+        let scores = [100.0_f32, -50.0, -40.0];
+        let weights = softmax(&scores);
+        assert_eq!(weights[1], 0.0);
+        assert_eq!(weights[2], 0.0);
+        let (_weights, selected) = route_top_k(&scores, 2).unwrap();
+        assert_eq!(selected, vec![0, 2]);
+    }
+
+    #[test]
+    fn top_k_zero_still_rejects_nan() {
+        assert!(matches!(
+            top_k_indices(&[f32::NAN], 0).unwrap_err(),
+            HybridError::NanRoutingScore { expert_id: 0 }
+        ));
+    }
+
+    #[test]
     fn finite_distinct_scores_keep_expected_selection() {
         let scores = [0.9_f32, 0.5, 0.3, 0.1];
         assert_eq!(top_k_indices(&scores, 2).unwrap(), vec![0, 1]);
