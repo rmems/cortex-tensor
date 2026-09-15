@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+pub mod finite;
 pub mod ops;
 
+use crate::error::{CortexError, Result};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -219,30 +221,43 @@ impl Tensor {
             .unwrap_or(0)
     }
 
-    /// Softmax along the last axis (works on 1-D or flattened last dim of 2-D).
+    /// Softmax along the last axis (1-D, 0-D, or each row of a 2-D tensor).
+    ///
+    /// See [`finite`] for the NaN / `±Inf` / all-masked policy. Panics if the
+    /// rank is greater than 2; use [`Self::try_softmax_last`] to recover.
     pub fn softmax_last(&self) -> Self {
-        assert!(self.ndim() <= 2, "softmax_last: max 2-D");
-        if self.ndim() == 1 {
-            let max_v = self.max_val();
-            let exp: Vec<f32> = self.data.iter().map(|x| (x - max_v).exp()).collect();
-            let sum: f32 = exp.iter().sum();
-            let data: Vec<f32> = exp.iter().map(|e| e / sum).collect();
-            return Self::from_vec(data, &self.shape);
+        self.try_softmax_last()
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Fallible softmax along the last axis.
+    ///
+    /// Returns [`CortexError::InvalidConfig`] when `ndim > 2`.
+    pub fn try_softmax_last(&self) -> Result<Self> {
+        if self.ndim() > 2 {
+            return Err(CortexError::InvalidConfig(format!(
+                "softmax_last: max 2-D, got rank {}",
+                self.ndim()
+            )));
         }
-        // 2-D: softmax each row
+        if self.ndim() <= 1 {
+            let mut data = vec![0.0f32; self.data.len()];
+            finite::softmax_row(&self.data, &mut data);
+            return Ok(Self::from_vec(data, &self.shape));
+        }
         let (rows, cols) = (self.shape[0], self.shape[1]);
         let mut data = vec![0.0f32; rows * cols];
+        if cols == 0 {
+            return Ok(Self::from_vec(data, &self.shape));
+        }
         for r in 0..rows {
             let row_start = r * cols;
-            let row = &self.data[row_start..row_start + cols];
-            let max_v = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let exp: Vec<f32> = row.iter().map(|x| (x - max_v).exp()).collect();
-            let sum: f32 = exp.iter().sum();
-            for c in 0..cols {
-                data[row_start + c] = exp[c] / sum;
-            }
+            finite::softmax_row(
+                &self.data[row_start..row_start + cols],
+                &mut data[row_start..row_start + cols],
+            );
         }
-        Self::from_vec(data, &self.shape)
+        Ok(Self::from_vec(data, &self.shape))
     }
 
     // ── Row / slice access ───────────────────────────────────────────
@@ -307,6 +322,34 @@ mod tests {
         let s = t.softmax_last();
         let sum: f32 = s.data().iter().sum();
         assert!((sum - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_softmax_last_rejects_rank_3() {
+        let t = Tensor::from_vec(vec![1.0; 8], &[2, 2, 2]);
+        let err = t.try_softmax_last().unwrap_err();
+        assert!(matches!(err, CortexError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn test_softmax_2d_rows_and_all_masked() {
+        let t = Tensor::from_vec(
+            vec![
+                1.0,
+                2.0,
+                3.0,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+            ],
+            &[2, 3],
+        );
+        let s = t.softmax_last();
+        let row0: f32 = s.data()[0..3].iter().sum();
+        assert!((row0 - 1.0).abs() < 1e-5);
+        for p in &s.data()[3..6] {
+            assert!((p - 1.0 / 3.0).abs() < 1e-6);
+        }
     }
 
     #[test]

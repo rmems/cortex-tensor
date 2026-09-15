@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::tensor::Tensor;
+use crate::tensor::finite::softmax_row;
 use crate::tensor::ops::{batched_matmul, causal_mask, matmul};
 use serde::{Deserialize, Serialize};
 
@@ -164,20 +165,20 @@ fn apply_mask_batched(scores: &Tensor, mask: &Tensor, nh: usize) -> Tensor {
     Tensor::from_vec(out, scores.shape())
 }
 
-/// Row-wise softmax on each [seq, seq] slice of a [nh, seq, seq] tensor
+/// Row-wise softmax on each [seq, seq] slice of a [nh, seq, seq] tensor.
+///
+/// Uses the crate finite-value policy so a fully masked (`-Inf`) row is
+/// uniform rather than NaN, and NaN logits never rank through `f32::max`.
 fn batched_softmax(t: &Tensor, nh: usize, seq: usize) -> Tensor {
     let d = t.data();
     let mut out = vec![0.0f32; nh * seq * seq];
+    if seq == 0 {
+        return Tensor::from_vec(out, t.shape());
+    }
     for h in 0..nh {
         for r in 0..seq {
             let off = h * seq * seq + r * seq;
-            let row = &d[off..off + seq];
-            let max_v = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let exp: Vec<f32> = row.iter().map(|x| (x - max_v).exp()).collect();
-            let sum: f32 = exp.iter().sum();
-            for c in 0..seq {
-                out[off + c] = exp[c] / sum;
-            }
+            softmax_row(&d[off..off + seq], &mut out[off..off + seq]);
         }
     }
     Tensor::from_vec(out, t.shape())

@@ -25,8 +25,9 @@ src/
 ├── error.rs          # CortexError + HybridError alias
 ├── types.rs          # EMBEDDING_DIM, ModelFamily, RoutingMode
 ├── tensor/
+│   ├── finite.rs     # finite-value policy + stable softmax / LayerNorm / RMSNorm / L2 kernels
 │   ├── mod.rs        # row-major Tensor { data, shape, strides }
-│   └── ops.rs        # matmul, batched_matmul, causal_mask, softmax, ...
+│   └── ops.rs        # matmul, batched_matmul, causal_mask, softmax, layer_norm, rms_norm
 ├── transformer/
 │   ├── attention.rs  # MultiHeadAttention (scaled dot-product, causal mask)
 │   ├── block.rs      # TransformerBlock (attn + MLP + LayerNorm)
@@ -51,7 +52,8 @@ src/
 | `Tensor` | Row-major `f32` tensor (`data: Vec<f32>`, `shape`, `strides`), `Serialize`/`Deserialize`. |
 | `ops::matmul` / `batched_matmul` | Cache-friendly tiled CPU matmul. |
 | `ops::causal_mask` | Additive mask for auto-regressive attention. |
-| `ops::softmax` / `layer_norm` | Standard building blocks. |
+| `ops::softmax` / `layer_norm` / `rms_norm` | Numerically stable kernels under the crate [finite-value policy](#finite-value-policy). |
+| `tensor::finite` | Shared policy + `softmax_row`, `layer_norm_row`, `rms_norm_row`, `l2_normalize`. |
 
 ### `transformer`
 
@@ -104,7 +106,7 @@ boundary clean. Cross-links and notes are maintained for alignment.
 This crate **owns**:
 
 - Row-major `f32` `Tensor` and CPU tensor ops (matmul, batched matmul, causal
-  mask, softmax, layer norm).
+  mask, softmax, layer norm, RMSNorm) under a documented finite-value policy.
 - Decoder-only transformer building blocks (attention, block, `TransformerLM`).
 - MoE routing math — gate scores, softmax, top-k selection, L2 normalization,
   embedding resampling — and the simulation routing modes.
@@ -198,6 +200,26 @@ let b = Tensor::from_vec(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
 let c = matmul(&a, &b);
 assert_eq!(c.shape(), &[2, 2]);
 ```
+
+## Finite-value policy
+
+Tensor math and MoE routing helpers share one contract, implemented in
+`tensor::finite`. Public storage remains `f32`; softmax partitions, LayerNorm /
+RMSNorm moments, and L2 norms accumulate in `f64`.
+
+**Softmax** is max-subtracted and total over the input classes:
+
+- Empty row → empty output.
+- Any NaN → the whole row is NaN (NaN is never an argmax or a `partial_cmp` tie).
+- One `+Inf` → one-hot; several `+Inf` maxima share probability equally.
+- All `-Inf` (fully masked) → uniform `1/n`.
+- Finite logits, including values near `±1e30`, produce non-negative probabilities that sum to 1 within `SOFTMAX_SUM_TOLERANCE` (`1e-5` for rows of length `≤ 4096`).
+
+**LayerNorm / RMSNorm** reject non-positive or non-finite `eps` and a zero-width last axis through `try_layer_norm` / `try_rms_norm` (`CortexError::InvalidEpsilon`, `CortexError::ZeroWidthAxis`). A non-finite data row becomes an all-NaN output row. Finite bounded rows, including constant and large-offset / small-variance rows, stay finite. The existing `layer_norm` / `rms_norm` wrappers panic on those same rejections.
+
+**L2 routing normalize** fills NaN on any non-finite input, leaves vectors at or below `L2_NORM_FLOOR` unchanged, and otherwise divides by the `f64` Euclidean norm.
+
+Kernels are sequential, so a given input bit pattern is deterministic across debug/release and supported platforms.
 
 Building a transformer block:
 

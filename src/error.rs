@@ -26,6 +26,12 @@ pub enum CortexError {
         size: usize,
     },
 
+    #[error("invalid epsilon {eps}: must be finite and greater than 0")]
+    InvalidEpsilon { eps: f32 },
+
+    #[error("{op}: cannot normalize a zero-width axis")]
+    ZeroWidthAxis { op: &'static str },
+
     // ── Configuration errors ──────────────────────────────────────────────
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
