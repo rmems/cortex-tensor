@@ -49,6 +49,55 @@ fn test_dense_sim_uses_real_gate_weights() {
 }
 
 #[test]
+fn dense_sim_ranks_raw_gate_scores_before_softmax() {
+    let mut model =
+        MoeRouter::load_with_mode("", 8, 2, RoutingMode::DenseSim).expect("stub dense load");
+    let mut embedding = vec![0.0f32; EMBEDDING_DIM];
+    let chunk = (EMBEDDING_DIM / 8).max(1);
+    embedding[3 * chunk] = f32::INFINITY;
+    let out = model.forward(&embedding).unwrap();
+    assert_eq!(out.selected_experts, vec![3, 0]);
+}
+
+#[test]
+fn dense_sim_rejects_nan_gate_score() {
+    let mut model =
+        MoeRouter::load_with_mode("", 8, 2, RoutingMode::DenseSim).expect("stub dense load");
+    let mut embedding = vec![0.0f32; EMBEDDING_DIM];
+    let chunk = (EMBEDDING_DIM / 8).max(1);
+    embedding[3 * chunk] = f32::NAN;
+    assert!(matches!(
+        model.forward(&embedding).unwrap_err(),
+        HybridError::NanRoutingScore { expert_id: 3 }
+    ));
+}
+
+#[test]
+fn spiking_sim_ranks_raw_membrane_scores_before_softmax() {
+    let mut model =
+        MoeRouter::load_with_mode("", 8, 2, RoutingMode::SpikingSim).expect("stub spiking load");
+    let mut embedding = vec![0.0f32; EMBEDDING_DIM];
+    let chunk = (EMBEDDING_DIM / 8).max(1);
+    embedding[3 * chunk] = f32::INFINITY;
+    let out = model.forward(&embedding).unwrap();
+    assert_eq!(out.selected_experts[0], 3);
+}
+
+#[test]
+fn spiking_sim_rejects_nan_gate_score_before_membrane_update() {
+    let mut model =
+        MoeRouter::load_with_mode("", 8, 2, RoutingMode::SpikingSim).expect("stub spiking load");
+    let mut embedding = vec![0.0f32; EMBEDDING_DIM];
+    let chunk = (EMBEDDING_DIM / 8).max(1);
+    embedding[3 * chunk] = f32::NAN;
+    assert!(matches!(
+        model.forward(&embedding).unwrap_err(),
+        HybridError::NanRoutingScore { expert_id: 3 }
+    ));
+    assert!(!model.has_state_activity());
+}
+
+#[test]
 fn test_spiking_sim_state_can_reset() {
     let mut model = MoeRouter::load_with_mode("", 8, 2, RoutingMode::SpikingSim).unwrap();
     let _ = model.forward(&vec![1.0; EMBEDDING_DIM]).unwrap();
