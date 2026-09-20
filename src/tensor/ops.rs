@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use super::finite::{layer_norm_row, rms_norm_row};
 use super::{Tensor, check_f32_alloc, checked_numel, try_compute_strides};
 use crate::error::{CortexError, Result, unwrap_compat};
 
@@ -136,14 +137,15 @@ pub fn try_batched_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     Tensor::try_from_vec(out, &out_shape)
 }
 
-/// Layer normalization over the last axis.
-/// Returns (normalized, mean, rstd) for backward pass if needed.
+/// Layer normalization over the last axis of a rank-2 `[batch, dim]` tensor.
 ///
 /// # Panics
 ///
 /// Panics if `x` is not rank-2, the last axis is zero-width, `eps` is not
 /// positive and finite, or `weight`/`bias` lengths do not match the last
 /// axis. Prefer [`try_layer_norm`] in new code.
+///
+/// See [`super::finite`] for the finite-value policy.
 pub fn layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Tensor {
     unwrap_compat(try_layer_norm(x, weight, bias, eps), "layer_norm")
 }
@@ -167,18 +169,17 @@ pub fn try_layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> R
     let xd = x.data();
     let wd = weight.data();
     let bd = bias.data();
+    let eps64 = f64::from(eps);
 
     for r in 0..rows {
         let off = r * cols;
-        let row = &xd[off..off + cols];
-
-        let mean: f32 = row.iter().sum::<f32>() / cols as f32;
-        let var: f32 = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / cols as f32;
-        let rstd = 1.0 / (var + eps).sqrt();
-
-        for c in 0..cols {
-            out[off + c] = (row[c] - mean) * rstd * wd[c] + bd[c];
-        }
+        layer_norm_row(
+            &xd[off..off + cols],
+            wd,
+            bd,
+            eps64,
+            &mut out[off..off + cols],
+        );
     }
     Tensor::try_from_vec(out, &out_shape)
 }
@@ -190,6 +191,8 @@ pub fn try_layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> R
 /// Panics if `x` is not rank-2, the last axis is zero-width, `eps` is not
 /// positive and finite, or `weight` length does not match the last axis.
 /// Prefer [`try_rms_norm`] in new code.
+///
+/// See [`super::finite`] for the finite-value policy.
 pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f32) -> Tensor {
     unwrap_compat(try_rms_norm(x, weight, eps), "rms_norm")
 }
@@ -211,17 +214,25 @@ pub fn try_rms_norm(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
     let mut out = alloc_zeros(&out_shape)?;
     let xd = x.data();
     let wd = weight.data();
+    let eps64 = f64::from(eps);
 
     for r in 0..rows {
         let off = r * cols;
-        let row = &xd[off..off + cols];
-        let ms: f32 = row.iter().map(|v| v * v).sum::<f32>() / cols as f32;
-        let rstd = 1.0 / (ms + eps).sqrt();
-        for c in 0..cols {
-            out[off + c] = row[c] * rstd * wd[c];
-        }
+        rms_norm_row(&xd[off..off + cols], wd, eps64, &mut out[off..off + cols]);
     }
     Tensor::try_from_vec(out, &out_shape)
+}
+
+/// Softmax along the last axis of a 1-D or 2-D tensor.
+///
+/// See [`super::finite`] for the NaN / `±Inf` / all-masked policy.
+pub fn softmax(x: &Tensor) -> Tensor {
+    x.softmax_last()
+}
+
+/// Fallible softmax along the last axis. Rejects rank `> 2`.
+pub fn try_softmax(x: &Tensor) -> Result<Tensor> {
+    x.try_softmax_last()
 }
 
 /// Embedding lookup: [vocab_size, dim] indexed by token ids → [seq_len, dim]
@@ -360,6 +371,26 @@ mod tests {
         let tried = try_rms_norm(&x, &w, 1e-5).unwrap();
         assert_eq!(y.data(), tried.data());
         assert_eq!(y.shape(), &[2, 3]);
+    }
+
+    #[test]
+    fn test_softmax_op_matches_tensor_softmax_last() {
+        let t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 0.0], &[2, 2]);
+        let a = softmax(&t);
+        let b = t.softmax_last();
+        assert_eq!(a.data(), b.data());
+    }
+
+    #[test]
+    fn test_rms_norm_unit_weight() {
+        let x = Tensor::from_vec(vec![3.0, -4.0], &[1, 2]);
+        let w = Tensor::ones(&[2]);
+        let y = rms_norm(&x, &w, 1e-5);
+        assert!(y.data().iter().all(|v| v.is_finite()));
+        let ms = (9.0f64 + 16.0) / 2.0;
+        let rstd = 1.0 / (ms + 1e-5).sqrt();
+        assert!((f64::from(y.data()[0]) - 3.0 * rstd).abs() < 1e-5);
+        assert!((f64::from(y.data()[1]) + 4.0 * rstd).abs() < 1e-5);
     }
 
     #[test]

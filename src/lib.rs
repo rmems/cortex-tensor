@@ -9,7 +9,7 @@
 //!
 //! | Module | Role |
 //! |--------|------|
-//! | [`tensor`] | `Tensor` type, fallible construction, and core ops |
+//! | [`tensor`] | `Tensor` type, fallible construction, core ops, finite-value policy |
 //! | [`transformer`] | Transformer building blocks (attention, block, model) |
 //! | [`moe`] | Mixture-of-Experts router + GGUF checkpoint bridge |
 //! | [`types`] | Shared types used by `moe` |

@@ -25,8 +25,9 @@ src/
 ├── error.rs          # CortexError + HybridError alias
 ├── types.rs          # EMBEDDING_DIM, ModelFamily, RoutingMode
 ├── tensor/
+│   ├── finite.rs     # finite-value policy + stable softmax / LayerNorm / RMSNorm / L2 kernels
 │   ├── mod.rs        # row-major Tensor { data, shape, strides }
-│   └── ops.rs        # matmul, batched_matmul, causal_mask, softmax, ...
+│   └── ops.rs        # matmul, batched_matmul, causal_mask, softmax, layer_norm, rms_norm
 ├── transformer/
 │   ├── attention.rs  # MultiHeadAttention (scaled dot-product, causal mask)
 │   ├── block.rs      # TransformerBlock (attn + MLP + LayerNorm)
@@ -55,7 +56,9 @@ src/
 | `ops::try_layer_norm` / `try_rms_norm` | Normalization that rejects zero-width axes and non-positive/non-finite `eps`. |
 | `ops::matmul` / `batched_matmul` | Pre-1.0 panic-style wrappers around the `try_*` ops. |
 | `ops::causal_mask` | Additive mask for auto-regressive attention. |
-| `Tensor::softmax_last` / `ops::layer_norm` | Softmax and layer-norm (`layer_norm` wraps `try_layer_norm`). |
+| `ops::softmax` / `Tensor::softmax_last` | Numerically stable softmax under the [finite-value policy](#finite-value-policy); `try_softmax` / `try_softmax_last` reject rank `> 2`. |
+| `ops::layer_norm` / `rms_norm` | Finite-value LayerNorm / RMSNorm (`try_*` for typed errors). |
+| `tensor::finite` | Policy docs and public constants (`SOFTMAX_SUM_TOLERANCE`, `L2_NORM_FLOOR`). |
 
 ### `transformer`
 
@@ -110,7 +113,7 @@ boundary clean. Cross-links and notes are maintained for alignment.
 This crate **owns**:
 
 - Row-major `f32` `Tensor` and CPU tensor ops (matmul, batched matmul, causal
-  mask, softmax, layer norm).
+  mask, softmax, layer norm, RMSNorm) under a documented finite-value policy.
 - Decoder-only transformer building blocks (attention, block, `TransformerLM`).
 - MoE routing math — gate scores, softmax, top-k selection, L2 normalization,
   embedding resampling — and the simulation routing modes.
@@ -206,6 +209,26 @@ assert_eq!(c.shape(), &[2, 2]);
 // Panic-style wrappers (`from_vec`, `matmul`) remain for pre-1.0 compatibility.
 let _ = matmul(&a, &b);
 ```
+
+## Finite-value policy
+
+Tensor math and MoE routing helpers share one contract, implemented in
+`tensor::finite`. Public storage remains `f32`; softmax partitions, LayerNorm /
+RMSNorm moments, and L2 norms accumulate in `f64`.
+
+**Softmax** is max-subtracted and total over the input classes:
+
+- Empty row → empty output.
+- Any NaN → the whole row is NaN (NaN is never an argmax or a `partial_cmp` tie).
+- One `+Inf` → one-hot; several `+Inf` maxima share probability equally.
+- All `-Inf` (fully masked) → uniform `1/n`.
+- Finite logits, including values near `±1e30`, produce non-negative probabilities that sum to 1 within `SOFTMAX_SUM_TOLERANCE` (`1e-5` for rows of length `≤ 4096`).
+
+**LayerNorm / RMSNorm** reject non-positive or non-finite `eps` and a zero-width last axis through `try_layer_norm` / `try_rms_norm` (`CortexError::InvalidEpsilon`, `CortexError::ZeroWidth`). A non-finite data row becomes an all-NaN output row. Finite data with finite affine parameters stay finite; values that overflow `f32` saturate to `±f32::MAX`. The existing `layer_norm` / `rms_norm` wrappers panic on those same rejections.
+
+**L2 routing normalize** fills NaN on any non-finite input, leaves vectors at or below `L2_NORM_FLOOR` unchanged, and otherwise divides by the `f64` Euclidean norm.
+
+Kernels are sequential, so a given input bit pattern is deterministic across debug/release and supported platforms.
 
 Building a transformer block:
 
