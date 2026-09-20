@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- MoE top-k routing now uses a total order: finite scores descending, ascending expert ID on ties, typed NaN rejection, and explicit ±Inf ranking (RM-1355). Selection ranks raw gate/membrane scores before softmax so non-finite logits cannot be masked into uniform weights.
+
 ### Added
 
 - Fallible, overflow-safe tensor construction (`Tensor::try_from_vec`) and checked ops (`try_matmul`, `try_batched_matmul`, `try_embedding`, `try_layer_norm`, `try_rms_norm`) that validate rank, shape, and size before allocating (RM-1353).
