@@ -47,6 +47,10 @@ pub enum CortexError {
     #[error("router forward pass failed: {0}")]
     OlmoeForward(String),
 
+    /// NaN is rejected before ranking so it never participates in `partial_cmp`.
+    #[error("NaN routing score at expert {expert_id}")]
+    NanRoutingScore { expert_id: usize },
+
     // ── I/O / serde ───────────────────────────────────────────────────────
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),

@@ -47,8 +47,8 @@ pub(crate) mod test_fixtures;
 use self::adapter::{ModelAdapter, resolve_adapter};
 use self::checkpoint::{MappedGgufCheckpoint, probe_and_map_checkpoint};
 use self::routing::{
-    checkpoint_gate_scores, normalize_l2, normalize_to_internal_embedding_dim, resample_embedding,
-    softmax, synthetic_gate_scores, top_k_indices,
+    checkpoint_gate_scores, normalize_l2, normalize_to_internal_embedding_dim,
+    reject_nan_routing_scores, resample_embedding, route_top_k, synthetic_gate_scores,
 };
 use crate::error::{HybridError, Result};
 pub use crate::types::RoutingMode;
@@ -292,8 +292,7 @@ impl MoeRouter {
 
     fn simulate_moe_routing(&self, embedding: &[f32]) -> Result<MoeOutput> {
         let gate_scores = self.compute_gate_scores(embedding)?;
-        let expert_weights = softmax(&gate_scores);
-        let selected_experts = top_k_indices(&expert_weights, self.top_k);
+        let (expert_weights, selected_experts) = route_top_k(&gate_scores, self.top_k)?;
         let selected_mass: f32 = selected_experts
             .iter()
             .map(|&idx| expert_weights[idx])
@@ -309,30 +308,32 @@ impl MoeRouter {
 
     fn spiking_moe_routing(&mut self, embedding: &[f32]) -> Result<MoeOutput> {
         let gate_scores = self.compute_gate_scores(embedding)?;
+        reject_nan_routing_scores(&gate_scores)?;
         let n = self.num_experts;
+        let mut next_membranes = self.expert_membranes.clone();
         let mut membrane_scores = Vec::with_capacity(n);
         let mut expert_spikes = vec![0.0f32; n];
 
         for expert_id in 0..n {
-            self.expert_membranes[expert_id] =
-                self.expert_membranes[expert_id] * self.decay + gate_scores[expert_id] * 0.18;
+            next_membranes[expert_id] =
+                next_membranes[expert_id] * self.decay + gate_scores[expert_id] * 0.18;
 
-            let spike = if self.expert_membranes[expert_id] > self.threshold {
-                self.expert_membranes[expert_id] -= self.threshold;
+            let spike = if next_membranes[expert_id] > self.threshold {
+                next_membranes[expert_id] -= self.threshold;
                 1.0
-            } else if self.expert_membranes[expert_id] < -self.threshold {
-                self.expert_membranes[expert_id] += self.threshold;
+            } else if next_membranes[expert_id] < -self.threshold {
+                next_membranes[expert_id] += self.threshold;
                 -1.0
             } else {
                 0.0
             };
 
             expert_spikes[expert_id] = spike;
-            membrane_scores.push(self.expert_membranes[expert_id] + spike * self.threshold);
+            membrane_scores.push(next_membranes[expert_id] + spike * self.threshold);
         }
 
-        let expert_weights = softmax(&membrane_scores);
-        let selected_experts = top_k_indices(&expert_weights, self.top_k);
+        let (expert_weights, selected_experts) = route_top_k(&membrane_scores, self.top_k)?;
+        self.expert_membranes = next_membranes;
         let active_mass: f32 = selected_experts
             .iter()
             .map(|&expert_id| expert_spikes[expert_id] * expert_weights[expert_id])
