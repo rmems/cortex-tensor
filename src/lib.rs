@@ -9,11 +9,15 @@
 //!
 //! | Module | Role |
 //! |--------|------|
-//! | [`tensor`] | `Tensor` type + core ops |
+//! | [`tensor`] | `Tensor` type, fallible construction, and core ops |
 //! | [`transformer`] | Transformer building blocks (attention, block, model) |
 //! | [`moe`] | Mixture-of-Experts router + GGUF checkpoint bridge |
 //! | [`types`] | Shared types used by `moe` |
 //! | [`error`] | `CortexError` unified error type |
+//!
+//! Panic-style constructors and ops (`Tensor::from_vec`, `ops::matmul`, …)
+//! remain as pre-1.0 compatibility wrappers. New code should use
+//! [`Tensor::try_from_vec`] and the `try_*` functions in [`crate::tensor::ops`].
 
 pub mod error;
 pub mod moe;
