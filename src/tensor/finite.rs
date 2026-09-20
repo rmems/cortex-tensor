@@ -37,7 +37,7 @@
 //! | Case | Behavior |
 //! |----------|----------|
 //! | `eps` not finite or `eps ≤ 0` | [`CortexError::InvalidEpsilon`](crate::CortexError::InvalidEpsilon). |
-//! | Last-axis width `0` | [`CortexError::ZeroWidthAxis`](crate::CortexError::ZeroWidthAxis). |
+//! | Last-axis width `0` | [`CortexError::ZeroWidth`](crate::CortexError::ZeroWidth). |
 //! | Empty batch (`rows = 0`, `dim > 0`) | Empty output with the same shape. |
 //! | Any non-finite value in a data row | That output row is all NaN. |
 //! | Finite data and finite affine parameters | Finite output. Values that overflow `f32` saturate to `±f32::MAX`. Constant rows yield the bias (LayerNorm) or `0` (RMSNorm with finite weight). |
@@ -588,7 +588,10 @@ mod tests {
         let err = try_layer_norm(&x, &w, &b, EPS).unwrap_err();
         assert!(matches!(
             err,
-            CortexError::ZeroWidthAxis { op: "layer_norm" }
+            CortexError::ZeroWidth {
+                op: "layer_norm",
+                axis: 1,
+            }
         ));
     }
 
@@ -597,7 +600,13 @@ mod tests {
         let x = Tensor::from_vec(vec![], &[2, 0]);
         let w = Tensor::from_vec(vec![], &[0]);
         let err = try_rms_norm(&x, &w, EPS).unwrap_err();
-        assert!(matches!(err, CortexError::ZeroWidthAxis { op: "rms_norm" }));
+        assert!(matches!(
+            err,
+            CortexError::ZeroWidth {
+                op: "rms_norm",
+                axis: 1
+            }
+        ));
     }
 
     #[test]

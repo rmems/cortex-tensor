@@ -50,9 +50,14 @@ src/
 | Item | Purpose |
 |---|---|
 | `Tensor` | Row-major `f32` tensor (`data: Vec<f32>`, `shape`, `strides`), `Serialize`/`Deserialize`. |
-| `ops::matmul` / `batched_matmul` | Cache-friendly tiled CPU matmul. |
+| `Tensor::try_from_vec` | Fallible constructor: checked `numel` and stride arithmetic, no giant overflow allocations. |
+| `ops::try_matmul` / `try_batched_matmul` | Checked CPU matmul; rank, inner-dim, and size errors are typed. |
+| `ops::try_embedding` | Embedding lookup that returns `CortexError::TokenIndex` for OOV ids. |
+| `ops::try_layer_norm` / `try_rms_norm` | Normalization that rejects zero-width axes and non-positive/non-finite `eps`. |
+| `ops::matmul` / `batched_matmul` | Pre-1.0 panic-style wrappers around the `try_*` ops. |
 | `ops::causal_mask` | Additive mask for auto-regressive attention. |
-| `ops::softmax` / `layer_norm` / `rms_norm` | Numerically stable kernels under the crate [finite-value policy](#finite-value-policy). Prefer `try_layer_norm` / `try_rms_norm` / `try_softmax` for typed errors. |
+| `ops::softmax` / `Tensor::softmax_last` | Numerically stable softmax under the [finite-value policy](#finite-value-policy); `try_softmax` / `try_softmax_last` reject rank `> 2`. |
+| `ops::layer_norm` / `rms_norm` | Finite-value LayerNorm / RMSNorm (`try_*` for typed errors). |
 | `tensor::finite` | Policy docs and public constants (`SOFTMAX_SUM_TOLERANCE`, `L2_NORM_FLOOR`). |
 
 ### `transformer`
@@ -70,6 +75,8 @@ src/
 | `MoeRouter` | Family-aware MoE router. Loads a GGUF checkpoint, detects model family, and produces top-k expert selections. |
 | `RoutingMode` | `StubUniform`, `DenseSim`, `SpikingSim` (simulation-only; no GPU dispatch). |
 | `ModelFamily` | `Olmoe`, `Qwen3Moe`, `Gemma4`, `DeepSeek2`, `LlamaMoe`. |
+
+Top-k selection ranks finite scores descending and breaks ties by ascending expert ID. NaN scores are rejected (`NanRoutingScore`); `+Inf` ranks above all finite values and `-Inf` below them. The helper is pure: the same `(scores, top_k)` pair always produces the same expert IDs.
 
 Supported GGUF tensor types: `F32`, `F16`, `Q8_0`, `Q5_K`. `IQ3_S` is detected and rejected (for token embeddings) with a clear error so callers can fall back to `llama.cpp` prompt embeddings. For the preferred GPU synapse tensor (e.g. attn_q on qwen3_moe_iq3_m), unsupported quants now correctly route to a checkpoint-backed `routing-f32` source (using the F32 routing tensor) instead of synthetic fallback. See `synapse_source()`, `real_gpu_synapse_tensor_name()`, and `MoeRouter` metadata.
 
@@ -192,13 +199,15 @@ cortex-tensor = { git = "https://github.com/rmems/cortex-tensor", branch = "main
 ## Quick start
 
 ```rust
-use cortex_tensor::tensor::ops::matmul;
+use cortex_tensor::tensor::ops::{matmul, try_matmul};
 use cortex_tensor::Tensor;
 
-let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
-let b = Tensor::from_vec(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
-let c = matmul(&a, &b);
+let a = Tensor::try_from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+let b = Tensor::try_from_vec(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]).unwrap();
+let c = try_matmul(&a, &b).unwrap();
 assert_eq!(c.shape(), &[2, 2]);
+// Panic-style wrappers (`from_vec`, `matmul`) remain for pre-1.0 compatibility.
+let _ = matmul(&a, &b);
 ```
 
 ## Finite-value policy
@@ -215,7 +224,7 @@ RMSNorm moments, and L2 norms accumulate in `f64`.
 - All `-Inf` (fully masked) → uniform `1/n`.
 - Finite logits, including values near `±1e30`, produce non-negative probabilities that sum to 1 within `SOFTMAX_SUM_TOLERANCE` (`1e-5` for rows of length `≤ 4096`).
 
-**LayerNorm / RMSNorm** reject non-positive or non-finite `eps` and a zero-width last axis through `try_layer_norm` / `try_rms_norm` (`CortexError::InvalidEpsilon`, `CortexError::ZeroWidthAxis`). A non-finite data row becomes an all-NaN output row. Finite data with finite affine parameters stay finite; values that overflow `f32` saturate to `±f32::MAX`. The existing `layer_norm` / `rms_norm` wrappers panic on those same rejections.
+**LayerNorm / RMSNorm** reject non-positive or non-finite `eps` and a zero-width last axis through `try_layer_norm` / `try_rms_norm` (`CortexError::InvalidEpsilon`, `CortexError::ZeroWidth`). A non-finite data row becomes an all-NaN output row. Finite data with finite affine parameters stay finite; values that overflow `f32` saturate to `±f32::MAX`. The existing `layer_norm` / `rms_norm` wrappers panic on those same rejections.
 
 **L2 routing normalize** fills NaN on any non-finite input, leaves vectors at or below `L2_NORM_FLOOR` unchanged, and otherwise divides by the `f64` Euclidean norm.
 

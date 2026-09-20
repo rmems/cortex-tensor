@@ -5,10 +5,21 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum CortexError {
     // ── Tensor / math errors ──────────────────────────────────────────────
+    #[error("tensor rank mismatch: expected {expected}, got {got}")]
+    RankMismatch { expected: usize, got: usize },
+
     #[error("tensor shape mismatch: expected {expected:?}, got {got:?}")]
     ShapeMismatch {
         expected: Vec<usize>,
         got: Vec<usize>,
+    },
+
+    #[error("dimension mismatch for {op} on axis {axis}: expected {expected}, got {got}")]
+    DimMismatch {
+        op: &'static str,
+        axis: usize,
+        expected: usize,
+        got: usize,
     },
 
     #[error("dimension mismatch for matmul: [{m}×{k1}] × [{k2}×{n}]")]
@@ -26,11 +37,17 @@ pub enum CortexError {
         size: usize,
     },
 
-    #[error("invalid epsilon {eps}: must be finite and greater than 0")]
+    #[error("token index {index} is out of vocabulary of size {vocab_size}")]
+    TokenIndex { index: usize, vocab_size: usize },
+
+    #[error("invalid epsilon {eps}: must be positive and finite")]
     InvalidEpsilon { eps: f32 },
 
-    #[error("{op}: cannot normalize a zero-width axis")]
-    ZeroWidthAxis { op: &'static str },
+    #[error("zero-width axis {axis} is invalid for {op}")]
+    ZeroWidth { op: &'static str, axis: usize },
+
+    #[error("size overflow computing elements or strides for shape {shape:?}")]
+    SizeOverflow { shape: Vec<usize> },
 
     // ── Configuration errors ──────────────────────────────────────────────
     #[error("invalid configuration: {0}")]
@@ -53,6 +70,10 @@ pub enum CortexError {
     #[error("router forward pass failed: {0}")]
     OlmoeForward(String),
 
+    /// NaN is rejected before ranking so it never participates in `partial_cmp`.
+    #[error("NaN routing score at expert {expert_id}")]
+    NanRoutingScore { expert_id: usize },
+
     // ── I/O / serde ───────────────────────────────────────────────────────
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -68,3 +89,14 @@ pub enum CortexError {
 pub type HybridError = CortexError;
 
 pub type Result<T> = std::result::Result<T, CortexError>;
+
+/// Panic with a pre-1.0 compatibility message. Prefer the corresponding `try_*` API.
+#[inline]
+#[track_caller]
+pub(crate) fn unwrap_compat<T>(result: Result<T>, api: &'static str) -> T {
+    result.unwrap_or_else(|err| {
+        panic!(
+            "{api}: {err}. This panic-style API is retained for pre-1.0 source compatibility; migrate to the corresponding try_* function."
+        )
+    })
+}
