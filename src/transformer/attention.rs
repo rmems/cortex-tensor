@@ -167,8 +167,16 @@ fn apply_mask_batched(scores: &Tensor, mask: &Tensor, nh: usize) -> Tensor {
 
 /// Row-wise softmax on each [seq, seq] slice of a [nh, seq, seq] tensor.
 ///
-/// Uses the crate finite-value policy so a fully masked (`-Inf`) row is
-/// uniform rather than NaN, and NaN logits never rank through `f32::max`.
+/// Uses [`crate::tensor::finite::softmax_row`] (RM-1354): NaN logits poison the
+/// row; a single `+Inf` is one-hot; several `+Inf` values split evenly; an
+/// all-`-Inf` row is uniform `1/seq` over the **entire** row vector.
+///
+/// Causal masking is applied before this step. Typical rows keep at least one
+/// finite logit on indices `0..=query`, so masked future keys stay at zero
+/// probability after softmax. If every logit in the row is `-Inf`, the shared
+/// row policy still assigns `1/seq` to each index—including future masked
+/// slots—by design. Do not rely on softmax alone to zero those positions in
+/// that edge case.
 fn batched_softmax(t: &Tensor, nh: usize, seq: usize) -> Tensor {
     let d = t.data();
     let mut out = vec![0.0f32; nh * seq * seq];
