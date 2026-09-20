@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Documented finite / non-finite policy for tensor math and MoE routing helpers (`tensor::finite`) (RM-1354).
+- Documented finite / non-finite policy for tensor math and MoE routing helpers (`tensor::finite`), including integration notes (public `try_*` vs crate-internal row kernels, `f32` sum residual, causal-attention all-`-Inf` row semantics, MoE vs RM-1355) (RM-1354).
 - Fallible `Tensor::try_softmax_last` / `ops::try_softmax` for rank validation on softmax.
 - Fallible, overflow-safe tensor construction (`Tensor::try_from_vec`) and checked ops (`try_matmul`, `try_batched_matmul`, `try_embedding`, `try_layer_norm`, `try_rms_norm`) that validate rank, shape, and size before allocating (RM-1353).
 - Structured `CortexError` variants for rank mismatch, axis dimension mismatch, out-of-vocabulary token ids, invalid epsilon, zero-width normalization, and `usize` size overflow.
