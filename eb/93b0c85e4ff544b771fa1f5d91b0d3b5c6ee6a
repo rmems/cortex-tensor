@@ -1,0 +1,30 @@
+src/transformer/attention.rs
+  s_4494a996b07068::t_0deba791184f52 43
+  s_4494a996b07068::t_310c682ca671b4 41
+src/tensor/mod.rs
+  s_4494a996b07068::t_43b2156e74ee23 445
+  s_4494a996b07068::t_894cb73a37506d 192
+  s_4494a996b07068::t_20a640d28ab8ef 378
+src/tensor/ops.rs
+  s_4494a996b07068::t_ed309b7899220e 25-26,82-83,159-161,209-210,261
+  s_4494a996b07068::t_484fa80b758a91 363-365,368-375,377,382-389
+  s_4494a996b07068::t_6e1b37543323c5 366-367,376,378-381
+src/transformer/model.rs
+  s_4494a996b07068::t_c5181f866bba4a 90,92-93
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "eb93b0c85e4ff544b771fa1f5d91b0d3b5c6ee6a",
+  "prompts": {},
+  "sessions": {
+    "s_4494a996b07068": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "cloud-dracorex",
+        "model": "unknown"
+      },
+      "human_author": "Raul Cardenas Montoya <montoyaraul34@gmail.com>"
+    }
+  }
+}
