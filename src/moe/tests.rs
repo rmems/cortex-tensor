@@ -255,10 +255,7 @@ fn extract_token_embedding_returns_native_hidden_size() {
     let embedding = router.extract_token_embedding(0).unwrap();
     assert_eq!(embedding.len(), HIDDEN);
     for (dim, &value) in embedding.iter().enumerate() {
-        assert!(
-            (value - dim as f32).abs() <= 1e-6,
-            "dim {dim}: got {value}"
-        );
+        assert!((value - dim as f32).abs() <= 1e-6, "dim {dim}: got {value}");
     }
 
     let l2_sum: f32 = embedding.iter().map(|v| v * v).sum();
@@ -297,12 +294,7 @@ fn extract_f16_neg_zero_keeps_sign_bit_at_native_length() {
                 GGML_TYPE_F16,
                 vec![0u8; HIDDEN * HIDDEN * 2],
             ),
-            (
-                "token_embd.weight",
-                vec![HIDDEN, 1],
-                GGML_TYPE_F16,
-                payload,
-            ),
+            ("token_embd.weight", vec![HIDDEN, 1], GGML_TYPE_F16, payload),
         ],
         32,
         HIDDEN,

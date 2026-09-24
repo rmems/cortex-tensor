@@ -47,8 +47,8 @@ pub(crate) mod test_fixtures;
 use self::adapter::{ModelAdapter, resolve_adapter};
 use self::checkpoint::{MappedGgufCheckpoint, probe_and_map_checkpoint};
 use self::routing::{
-    apply_extract_token_options, checkpoint_gate_scores, normalize_l2,
-    reject_nan_routing_scores, resample_embedding, route_top_k, synthetic_gate_scores,
+    apply_extract_token_options, checkpoint_gate_scores, normalize_l2, reject_nan_routing_scores,
+    resample_embedding, route_top_k, synthetic_gate_scores,
 };
 use crate::error::{HybridError, Result};
 pub use crate::types::RoutingMode;

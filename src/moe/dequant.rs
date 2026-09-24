@@ -191,7 +191,11 @@ mod golden_tests {
                 "idx {idx}: got {value}, expected {expected}"
             );
         }
-        assert!(out[8..].iter().all(|&v| (v - 5.0).abs() <= 1e-4 || (v - 0.0).abs() <= 1e-4));
+        assert!(
+            out[8..]
+                .iter()
+                .all(|&v| (v - 5.0).abs() <= 1e-4 || (v - 0.0).abs() <= 1e-4)
+        );
     }
 
     #[test]
