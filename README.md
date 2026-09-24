@@ -230,6 +230,13 @@ RMSNorm moments, and L2 norms accumulate in `f64`.
 
 Kernels are sequential, so a given input bit pattern is deterministic across debug/release and supported platforms.
 
+### Integration notes (RM-1354)
+
+- **Public API:** Prefer `ops::try_softmax`, `Tensor::try_softmax_last`, `try_layer_norm`, and `try_rms_norm` for rank, shape, `eps`, and allocation checks. Row kernels in `tensor::finite` are crate-internal; they assume valid buffer lengths and (for norms) an `eps` already accepted by `validate_norm_eps`.
+- **Softmax sum tolerance:** After the `f64` partition, an `f32` residual is folded onto the largest mass so finite rows of length `≤ 4096` meet `SOFTMAX_SUM_TOLERANCE` (`1e-5`), including uniform branches (all `-Inf`, degenerate partition).
+- **Causal attention:** `MultiHeadAttention` applies an additive causal mask, then row-wise `softmax_row` over the full `[seq]` logits for each query position. The policy’s all-`-Inf` case is uniform `1/seq` over **every** index in that row. In normal use at least one causal-prefix logit stays finite after masking, so future (masked) slots do not receive mass. If every logit in the row is `-Inf` (for example pathological scores on the whole prefix), uniform softmax can assign probability to masked future positions; fixing that belongs at the attention/mask layer, not in the shared row kernel.
+- **MoE routing:** Gate softmax uses the same row policy. Expert selection ranks **raw** scores before softmax (RM-1355); NaN gate scores return `NanRoutingScore` instead of routing with NaN weights.
+
 Building a transformer block:
 
 ```rust

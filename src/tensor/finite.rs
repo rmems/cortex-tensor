@@ -53,6 +53,21 @@
 //!
 //! Behavior is sequential and therefore identical across debug/release and
 //! supported platforms for a given input bit pattern.
+//!
+//! ## Integration (RM-1354)
+//!
+//! - **Call sites:** [`softmax_row`] and norm row helpers are `pub(crate)`. External
+//!   code should use [`crate::tensor::ops::try_softmax`], [`crate::tensor::Tensor::try_softmax_last`],
+//!   [`crate::tensor::ops::try_layer_norm`], and [`crate::tensor::ops::try_rms_norm`], which
+//!   validate rank, shapes, [`validate_norm_eps`], and output size before calling the kernels.
+//! - **Sum tolerance:** [`apply_simplex_residual`] adjusts the largest `f32` mass after every
+//!   softmax branch so documented rows meet [`SOFTMAX_SUM_TOLERANCE`].
+//! - **Attention:** Causal MHA softmaxes each full score row after the additive mask. An
+//!   all-`-Inf` row is uniform over the row length (see policy table); callers that need zero
+//!   mass on masked keys must ensure at least one finite logit on the attended prefix or apply
+//!   a mask after softmax (see `transformer::attention` module docs).
+//! - **MoE:** Routing softmax shares this kernel; top-k uses raw-score ordering and NaN rejection
+//!   outside this module (RM-1355).
 
 use crate::error::{CortexError, Result};
 
