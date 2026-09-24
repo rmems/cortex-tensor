@@ -9,6 +9,13 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# zizmor/excessive-permissions: default to read-only; steps needing more
+# (e.g. reviewdog PR comments) declare it on the job/step.
+permissions:
+  contents: read
+  # reviewdog posts clippy findings as PR review comments.
+  pull-requests: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,6 +27,15 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
         persist-credentials: false
+
+    # Hosted images ship rustup; track the latest stable toolchain
+    # explicitly instead of whatever version the image happens to carry.
+    - name: Install latest stable Rust
+      run: |
+        rustup update stable
+        rustup default stable
+        rustc --version
+        cargo --version
 
     - name: Build
       run: cargo build --verbose

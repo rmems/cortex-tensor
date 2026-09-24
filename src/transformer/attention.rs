@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::error::{CortexError, Result, unwrap_compat};
 use crate::tensor::Tensor;
 use crate::tensor::finite::softmax_row;
-use crate::tensor::ops::{batched_matmul, causal_mask, matmul};
+use crate::tensor::ops::{try_batched_matmul, try_causal_mask, try_matmul};
 use serde::{Deserialize, Serialize};
 
 /// Multi-head self-attention (replaces candle-nn attention layers).
@@ -26,36 +27,91 @@ pub struct MultiHeadAttention {
 }
 
 impl MultiHeadAttention {
+    /// # Panics
+    ///
+    /// Panics if `num_heads` is zero or does not divide `dim`. Prefer
+    /// [`MultiHeadAttention::try_new`] in new code.
     pub fn new(dim: usize, num_heads: usize) -> Self {
-        assert_eq!(dim % num_heads, 0);
+        unwrap_compat(Self::try_new(dim, num_heads), "MultiHeadAttention::new")
+    }
+
+    /// Fallible constructor: returns [`CortexError::InvalidConfig`] when
+    /// `num_heads` is zero or does not evenly divide `dim`.
+    pub fn try_new(dim: usize, num_heads: usize) -> Result<Self> {
+        if dim == 0 || num_heads == 0 || !dim.is_multiple_of(num_heads) {
+            return Err(CortexError::InvalidConfig(format!(
+                "MultiHeadAttention: dim ({dim}) and num_heads ({num_heads}) must be nonzero, and num_heads must divide dim"
+            )));
+        }
         let head_dim = dim / num_heads;
         let scale = 1.0 / (dim as f32).sqrt();
-        Self {
+        Ok(Self {
             num_heads,
             head_dim,
             dim,
-            wq: Tensor::randn(&[dim, dim], 0.0, scale),
-            wb_q: Tensor::zeros(&[1, dim]),
-            wk: Tensor::randn(&[dim, dim], 0.0, scale),
-            wb_k: Tensor::zeros(&[1, dim]),
-            wv: Tensor::randn(&[dim, dim], 0.0, scale),
-            wb_v: Tensor::zeros(&[1, dim]),
-            wo: Tensor::randn(&[dim, dim], 0.0, scale),
-            wb_o: Tensor::zeros(&[1, dim]),
-        }
+            wq: Tensor::try_randn(&[dim, dim], 0.0, scale)?,
+            wb_q: Tensor::try_zeros(&[1, dim])?,
+            wk: Tensor::try_randn(&[dim, dim], 0.0, scale)?,
+            wb_k: Tensor::try_zeros(&[1, dim])?,
+            wv: Tensor::try_randn(&[dim, dim], 0.0, scale)?,
+            wb_v: Tensor::try_zeros(&[1, dim])?,
+            wo: Tensor::try_randn(&[dim, dim], 0.0, scale)?,
+            wb_o: Tensor::try_zeros(&[1, dim])?,
+        })
     }
 
     /// Forward pass: x is [seq_len, dim] → output [seq_len, dim]
+    ///
+    /// # Panics
+    ///
+    /// Panics on rank/shape mismatches. Prefer [`Self::try_forward`].
     pub fn forward(&self, x: &Tensor) -> Tensor {
+        unwrap_compat(self.try_forward(x), "MultiHeadAttention::forward")
+    }
+
+    /// Fallible forward pass: validates `x` is `[seq_len, dim]` and that all
+    /// intermediate shapes are consistent before computing.
+    pub fn try_forward(&self, x: &Tensor) -> Result<Tensor> {
+        if x.ndim() != 2 {
+            return Err(CortexError::RankMismatch {
+                expected: 2,
+                got: x.ndim(),
+            });
+        }
         let seq_len = x.shape()[0];
-        let _dim = self.dim;
         let nh = self.num_heads;
         let hd = self.head_dim;
+        if x.shape()[1] != self.dim {
+            return Err(CortexError::DimMismatch {
+                op: "MultiHeadAttention::try_forward",
+                axis: 1,
+                expected: self.dim,
+                got: x.shape()[1],
+            });
+        }
+        // Fields are `pub`; a literal-constructed module can violate the
+        // `nh * hd == dim` and `[1, dim]` bias invariants that `try_new`
+        // establishes. The head-reshape helpers below index on those
+        // invariants, so check them before any slicing.
+        if nh == 0 || nh.checked_mul(hd) != Some(self.dim) {
+            return Err(CortexError::InvalidConfig(format!(
+                "MultiHeadAttention: num_heads ({nh}) * head_dim ({hd}) != dim ({})",
+                self.dim
+            )));
+        }
+        for bias in [&self.wb_q, &self.wb_k, &self.wb_v, &self.wb_o] {
+            if bias.shape() != [1, self.dim] {
+                return Err(CortexError::ShapeMismatch {
+                    expected: vec![1, self.dim],
+                    got: bias.shape().to_vec(),
+                });
+            }
+        }
 
         // Project Q, K, V: [seq_len, dim] × [dim, dim] → [seq_len, dim]
-        let q = matmul(x, &self.wq).add(&broadcast_bias(&self.wb_q, seq_len));
-        let k = matmul(x, &self.wk).add(&broadcast_bias(&self.wb_k, seq_len));
-        let v = matmul(x, &self.wv).add(&broadcast_bias(&self.wb_v, seq_len));
+        let q = try_matmul(x, &self.wq)?.try_add(&broadcast_bias(&self.wb_q, seq_len)?)?;
+        let k = try_matmul(x, &self.wk)?.try_add(&broadcast_bias(&self.wb_k, seq_len)?)?;
+        let v = try_matmul(x, &self.wv)?.try_add(&broadcast_bias(&self.wb_v, seq_len)?)?;
 
         // Reshape to [num_heads, seq_len, head_dim] for batched attention
         let q = reshape_heads(&q, seq_len, nh, hd);
@@ -66,23 +122,23 @@ impl MultiHeadAttention {
         // scores = Q × K^T / sqrt(head_dim)  → [nh, seq_len, seq_len]
         let kt = transpose_last_two(&k); // [nh, hd, seq_len]
         let scale = 1.0 / (hd as f32).sqrt();
-        let scores = batched_matmul(&q, &kt).scale(scale);
+        let scores = try_batched_matmul(&q, &kt)?.scale(scale);
 
         // Apply causal mask
-        let mask = causal_mask(seq_len);
+        let mask = try_causal_mask(seq_len)?;
         let scores = apply_mask_batched(&scores, &mask, nh);
 
         // Softmax per row
         let attn = batched_softmax(&scores, nh, seq_len);
 
         // attn × V → [nh, seq_len, hd]
-        let ctx = batched_matmul(&attn, &v);
+        let ctx = try_batched_matmul(&attn, &v)?;
 
         // Reshape back to [seq_len, dim]
         let ctx = merge_heads(&ctx, seq_len, nh, hd);
 
         // Output projection
-        matmul(&ctx, &self.wo).add(&broadcast_bias(&self.wb_o, seq_len))
+        try_matmul(&ctx, &self.wo)?.try_add(&broadcast_bias(&self.wb_o, seq_len)?)
     }
 
     /// Returns flattened parameter count for this layer.
@@ -93,21 +149,35 @@ impl MultiHeadAttention {
 
 // ── Helper functions ─────────────────────────────────────────────────
 
-fn broadcast_bias(bias: &Tensor, seq_len: usize) -> Tensor {
+fn broadcast_bias(bias: &Tensor, seq_len: usize) -> Result<Tensor> {
     // bias is [1, dim], tile to [seq_len, dim]
     let dim = bias.shape()[1];
+    let out_len = seq_len
+        .checked_mul(dim)
+        .ok_or_else(|| CortexError::SizeOverflow {
+            shape: vec![seq_len, dim],
+        })?;
     let bd = bias.data();
-    let mut out = vec![0.0f32; seq_len * dim];
+    if bd.len() != dim {
+        return Err(CortexError::ShapeMismatch {
+            expected: vec![1, dim],
+            got: vec![bd.len()],
+        });
+    }
+    let mut out = vec![0.0f32; out_len];
     for r in 0..seq_len {
         out[r * dim..(r + 1) * dim].copy_from_slice(bd);
     }
-    Tensor::from_vec(out, &[seq_len, dim])
+    Tensor::try_from_vec(out, &[seq_len, dim])
 }
 
 /// [seq_len, dim] → [num_heads, seq_len, head_dim]
 fn reshape_heads(t: &Tensor, seq_len: usize, nh: usize, hd: usize) -> Tensor {
     let d = t.data();
-    let mut out = vec![0.0f32; nh * seq_len * hd];
+    // t.numel() == seq_len * nh * hd for a valid [seq_len, dim] input, and
+    // is already known representable because t exists — computing it as a
+    // fresh product could overflow mid-expression for degenerate dims.
+    let mut out = vec![0.0f32; t.numel()];
     for s in 0..seq_len {
         for h in 0..nh {
             for i in 0..hd {
@@ -122,7 +192,7 @@ fn reshape_heads(t: &Tensor, seq_len: usize, nh: usize, hd: usize) -> Tensor {
 fn merge_heads(t: &Tensor, seq_len: usize, nh: usize, hd: usize) -> Tensor {
     let d = t.data();
     let dim = nh * hd;
-    let mut out = vec![0.0f32; seq_len * dim];
+    let mut out = vec![0.0f32; t.numel()];
     for s in 0..seq_len {
         for h in 0..nh {
             for i in 0..hd {
@@ -139,7 +209,7 @@ fn transpose_last_two(t: &Tensor) -> Tensor {
     let m = t.shape()[1];
     let n = t.shape()[2];
     let d = t.data();
-    let mut out = vec![0.0f32; b * n * m];
+    let mut out = vec![0.0f32; t.numel()];
     for bi in 0..b {
         for i in 0..m {
             for j in 0..n {
@@ -179,7 +249,7 @@ fn apply_mask_batched(scores: &Tensor, mask: &Tensor, nh: usize) -> Tensor {
 /// that edge case.
 fn batched_softmax(t: &Tensor, nh: usize, seq: usize) -> Tensor {
     let d = t.data();
-    let mut out = vec![0.0f32; nh * seq * seq];
+    let mut out = vec![0.0f32; t.numel()];
     if seq == 0 {
         return Tensor::from_vec(out, t.shape());
     }

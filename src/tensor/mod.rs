@@ -70,10 +70,14 @@ impl Tensor {
     /// # Panics
     ///
     /// Panics if the shape product or stride arithmetic overflows `usize`.
-    /// Prefer [`Tensor::try_from_vec`] with a caller-allocated buffer in new
-    /// code.
+    /// Prefer [`Tensor::try_zeros`] in new code.
     pub fn zeros(shape: &[usize]) -> Self {
-        unwrap_compat(try_filled(shape, 0.0), "Tensor::zeros")
+        unwrap_compat(Self::try_zeros(shape), "Tensor::zeros")
+    }
+
+    /// Fallible [`Tensor::zeros`].
+    pub fn try_zeros(shape: &[usize]) -> Result<Self> {
+        try_filled(shape, 0.0)
     }
 
     /// Fills a tensor with ones.
@@ -82,8 +86,14 @@ impl Tensor {
     ///
     /// Panics if the shape product or stride arithmetic overflows `usize`.
     /// See [`Tensor::from_vec`] for the pre-1.0 compatibility policy.
+    /// Prefer [`Tensor::try_ones`] in new code.
     pub fn ones(shape: &[usize]) -> Self {
-        unwrap_compat(try_filled(shape, 1.0), "Tensor::ones")
+        unwrap_compat(Self::try_ones(shape), "Tensor::ones")
+    }
+
+    /// Fallible [`Tensor::ones`].
+    pub fn try_ones(shape: &[usize]) -> Result<Self> {
+        try_filled(shape, 1.0)
     }
 
     /// Fills a tensor with `val`.
@@ -92,8 +102,14 @@ impl Tensor {
     ///
     /// Panics if the shape product or stride arithmetic overflows `usize`.
     /// See [`Tensor::from_vec`] for the pre-1.0 compatibility policy.
+    /// Prefer [`Tensor::try_full`] in new code.
     pub fn full(shape: &[usize], val: f32) -> Self {
-        unwrap_compat(try_filled(shape, val), "Tensor::full")
+        unwrap_compat(Self::try_full(shape, val), "Tensor::full")
+    }
+
+    /// Fallible [`Tensor::full`].
+    pub fn try_full(shape: &[usize], val: f32) -> Result<Self> {
+        try_filled(shape, val)
     }
 
     /// Fills a tensor with i.i.d. normal samples.
@@ -103,10 +119,16 @@ impl Tensor {
     /// Panics if the shape product or stride arithmetic overflows `usize`.
     /// See [`Tensor::from_vec`] for the pre-1.0 compatibility policy.
     pub fn randn(shape: &[usize], mean: f32, std: f32) -> Self {
+        unwrap_compat(Self::try_randn(shape, mean, std), "Tensor::randn")
+    }
+
+    /// Fallible [`Tensor::randn`]: fails on shape/stride overflow before
+    /// allocating.
+    pub fn try_randn(shape: &[usize], mean: f32, std: f32) -> Result<Self> {
         use rand::RngExt;
-        let numel = unwrap_compat(checked_numel(shape), "Tensor::randn");
-        unwrap_compat(check_f32_alloc(numel, shape), "Tensor::randn");
-        let _strides = unwrap_compat(try_compute_strides(shape), "Tensor::randn");
+        let numel = checked_numel(shape)?;
+        check_f32_alloc(numel, shape)?;
+        let _strides = try_compute_strides(shape)?;
         let mut rng = rand::rng();
         let data: Vec<f32> = (0..numel)
             .map(|_| {
@@ -117,7 +139,7 @@ impl Tensor {
                 mean + std * z
             })
             .collect();
-        Self::from_vec(data, shape)
+        Self::try_from_vec(data, shape)
     }
 
     // ── Accessors ────────────────────────────────────────────────────
@@ -154,58 +176,118 @@ impl Tensor {
 
     // ── Reshape / view ───────────────────────────────────────────────
 
+    /// Reshapes to `new_shape`, which must imply the same element count.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the element count changes or the new shape overflows.
+    /// Prefer [`Tensor::try_reshape`] in new code.
     pub fn reshape(&self, new_shape: &[usize]) -> Self {
-        let numel = unwrap_compat(checked_numel(new_shape), "Tensor::reshape");
-        assert_eq!(numel, self.numel(), "reshape: element count mismatch");
-        Self::from_vec(self.data.clone(), new_shape)
+        unwrap_compat(self.try_reshape(new_shape), "Tensor::reshape")
     }
 
+    /// Fallible reshape: `new_shape` must imply exactly `self.numel()`
+    /// elements and have representable strides.
+    pub fn try_reshape(&self, new_shape: &[usize]) -> Result<Self> {
+        self.check_storage()?;
+        let numel = checked_numel(new_shape)?;
+        if numel != self.numel() {
+            return Err(CortexError::ShapeMismatch {
+                expected: self.shape.clone(),
+                got: new_shape.to_vec(),
+            });
+        }
+        Self::try_from_vec(self.data.clone(), new_shape)
+    }
+
+    /// Transposes a 2-D tensor: `[rows, cols]` → `[cols, rows]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self` is not rank-2. Prefer [`Tensor::try_transpose`].
     pub fn transpose(&self) -> Self {
-        assert_eq!(self.ndim(), 2, "transpose requires 2-D tensor");
+        unwrap_compat(self.try_transpose(), "Tensor::transpose")
+    }
+
+    /// Fallible transpose: returns [`CortexError::RankMismatch`] unless
+    /// `self` is rank-2.
+    pub fn try_transpose(&self) -> Result<Self> {
+        self.check_storage()?;
+        if self.ndim() != 2 {
+            return Err(CortexError::RankMismatch {
+                expected: 2,
+                got: self.ndim(),
+            });
+        }
         let (rows, cols) = (self.shape[0], self.shape[1]);
-        let out_len = unwrap_compat(checked_numel(&[rows, cols]), "Tensor::transpose");
+        let out_len = checked_numel(&[rows, cols])?;
         let mut out = vec![0.0f32; out_len];
         for r in 0..rows {
             for c in 0..cols {
                 out[c * rows + r] = self.data[r * cols + c];
             }
         }
-        Self::from_vec(out, &[cols, rows])
+        Self::try_from_vec(out, &[cols, rows])
     }
 
     // ── Element-wise ops ─────────────────────────────────────────────
 
+    /// Element-wise addition. Both tensors must have identical shapes.
+    ///
+    /// # Panics
+    ///
+    /// Panics on shape mismatch. Prefer [`Tensor::try_add`] in new code.
     pub fn add(&self, other: &Tensor) -> Self {
-        assert_eq!(self.shape, other.shape, "add: shape mismatch");
-        let data: Vec<f32> = self
-            .data
-            .iter()
-            .zip(other.data.iter())
-            .map(|(a, b)| a + b)
-            .collect();
-        Self::from_vec(data, &self.shape)
+        unwrap_compat(self.try_add(other), "Tensor::add")
     }
 
+    /// Fallible element-wise addition.
+    pub fn try_add(&self, other: &Tensor) -> Result<Self> {
+        self.try_elementwise(other, |a, b| a + b)
+    }
+
+    /// Element-wise subtraction. Both tensors must have identical shapes.
+    ///
+    /// # Panics
+    ///
+    /// Panics on shape mismatch. Prefer [`Tensor::try_sub`] in new code.
     pub fn sub(&self, other: &Tensor) -> Self {
-        assert_eq!(self.shape, other.shape, "sub: shape mismatch");
-        let data: Vec<f32> = self
-            .data
-            .iter()
-            .zip(other.data.iter())
-            .map(|(a, b)| a - b)
-            .collect();
-        Self::from_vec(data, &self.shape)
+        unwrap_compat(self.try_sub(other), "Tensor::sub")
     }
 
+    /// Fallible element-wise subtraction.
+    pub fn try_sub(&self, other: &Tensor) -> Result<Self> {
+        self.try_elementwise(other, |a, b| a - b)
+    }
+
+    /// Element-wise multiplication. Both tensors must have identical shapes.
+    ///
+    /// # Panics
+    ///
+    /// Panics on shape mismatch. Prefer [`Tensor::try_mul`] in new code.
     pub fn mul(&self, other: &Tensor) -> Self {
-        assert_eq!(self.shape, other.shape, "mul: shape mismatch");
+        unwrap_compat(self.try_mul(other), "Tensor::mul")
+    }
+
+    /// Fallible element-wise multiplication.
+    pub fn try_mul(&self, other: &Tensor) -> Result<Self> {
+        self.try_elementwise(other, |a, b| a * b)
+    }
+
+    fn try_elementwise(&self, other: &Tensor, f: impl Fn(f32, f32) -> f32) -> Result<Self> {
+        if self.shape != other.shape {
+            return Err(CortexError::ShapeMismatch {
+                expected: self.shape.clone(),
+                got: other.shape.clone(),
+            });
+        }
         let data: Vec<f32> = self
             .data
             .iter()
             .zip(other.data.iter())
-            .map(|(a, b)| a * b)
+            .map(|(&a, &b)| f(a, b))
             .collect();
-        Self::from_vec(data, &self.shape)
+        Self::try_from_vec(data, &self.shape)
     }
 
     pub fn scale(&self, s: f32) -> Self {
@@ -263,11 +345,19 @@ impl Tensor {
         self.data.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
     }
 
+    /// Index of the largest element.
+    ///
+    /// NaN policy: elements are ordered with [`f32::total_cmp`] (IEEE 754
+    /// `totalOrder`), which never yields `None`, so this function cannot
+    /// panic on NaN inputs. A positive NaN sorts above `+Inf` and therefore
+    /// wins; a negative NaN sorts below `-Inf`. Returns `0` for an empty
+    /// tensor. Callers that need NaN rejection should screen inputs with
+    /// [`f32::is_nan`] first.
     pub fn argmax(&self) -> usize {
         self.data
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
             .map(|(i, _)| i)
             .unwrap_or(0)
     }
@@ -285,6 +375,7 @@ impl Tensor {
     ///
     /// Returns [`CortexError::InvalidConfig`] when `ndim > 2`.
     pub fn try_softmax_last(&self) -> Result<Self> {
+        self.check_storage()?;
         if self.ndim() > 2 {
             return Err(CortexError::InvalidConfig(format!(
                 "softmax_last: max 2-D, got rank {}",
@@ -313,11 +404,53 @@ impl Tensor {
 
     // ── Row / slice access ───────────────────────────────────────────
 
+    /// Copies row `idx` of a 2-D tensor into a 1-D tensor.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self` is not rank-2 or `idx` is out of bounds. Prefer
+    /// [`Tensor::try_row`] in new code.
     pub fn row(&self, idx: usize) -> Self {
-        assert_eq!(self.ndim(), 2);
-        let cols = self.shape[1];
+        unwrap_compat(self.try_row(idx), "Tensor::row")
+    }
+
+    /// Fallible row access: returns [`CortexError::RankMismatch`] unless
+    /// `self` is rank-2 and [`CortexError::IndexOutOfBounds`] when
+    /// `idx >= shape[0]`.
+    pub fn try_row(&self, idx: usize) -> Result<Self> {
+        self.check_storage()?;
+        if self.ndim() != 2 {
+            return Err(CortexError::RankMismatch {
+                expected: 2,
+                got: self.ndim(),
+            });
+        }
+        let (rows, cols) = (self.shape[0], self.shape[1]);
+        if idx >= rows {
+            return Err(CortexError::IndexOutOfBounds {
+                axis: 0,
+                index: idx,
+                size: rows,
+            });
+        }
         let start = idx * cols;
-        Self::from_vec(self.data[start..start + cols].to_vec(), &[cols])
+        Self::try_from_vec(self.data[start..start + cols].to_vec(), &[cols])
+    }
+
+    /// Rejects tensors whose stored `data` length disagrees with `shape`.
+    ///
+    /// `Tensor` derives `Deserialize` without invariant validation, so a
+    /// malformed serialized value can reach methods that index `data`
+    /// directly. Fallible methods that slice call this first.
+    pub(crate) fn check_storage(&self) -> Result<()> {
+        let expected = checked_numel(&self.shape).unwrap_or(usize::MAX);
+        if self.data.len() != expected {
+            return Err(CortexError::ShapeMismatch {
+                expected: self.shape.clone(),
+                got: vec![self.data.len()],
+            });
+        }
+        Ok(())
     }
 }
 
@@ -461,6 +594,107 @@ mod tests {
         for p in &s.data()[3..6] {
             assert!((p - 1.0 / 3.0).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn try_elementwise_ops_report_shape_mismatch() {
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        let b = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        for (name, err) in [
+            ("add", a.try_add(&b).unwrap_err()),
+            ("sub", a.try_sub(&b).unwrap_err()),
+            ("mul", a.try_mul(&b).unwrap_err()),
+        ] {
+            assert!(
+                matches!(
+                    err,
+                    CortexError::ShapeMismatch { ref expected, ref got }
+                        if expected == &[2, 2] && got == &[2, 3]
+                ),
+                "{name}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn try_reshape_and_transpose_validate() {
+        let t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        assert!(matches!(
+            t.try_reshape(&[4, 2]).unwrap_err(),
+            CortexError::ShapeMismatch { .. }
+        ));
+        assert_eq!(t.try_reshape(&[3, 2]).unwrap().shape(), &[3, 2]);
+        assert!(matches!(
+            Tensor::from_vec(vec![1.0, 2.0], &[2])
+                .try_transpose()
+                .unwrap_err(),
+            CortexError::RankMismatch {
+                expected: 2,
+                got: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn try_row_bounds_check() {
+        let t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        assert_eq!(t.try_row(1).unwrap().data(), &[3.0, 4.0]);
+        assert!(matches!(
+            t.try_row(9).unwrap_err(),
+            CortexError::IndexOutOfBounds {
+                axis: 0,
+                index: 9,
+                size: 2
+            }
+        ));
+        let rank1 = Tensor::from_vec(vec![1.0], &[1]);
+        assert!(matches!(
+            rank1.try_row(0).unwrap_err(),
+            CortexError::RankMismatch {
+                expected: 2,
+                got: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn corrupted_storage_is_rejected_not_sliced() {
+        // Deserialize skips invariant validation: shape [2,2] with one
+        // element must not reach direct indexing in try_row/try_transpose.
+        let json = r#"{"data":[1.0],"shape":[2,2],"strides":[2,1]}"#;
+        let t: Tensor = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            t.try_row(0),
+            Err(CortexError::ShapeMismatch { .. })
+        ));
+        assert!(matches!(
+            t.try_transpose(),
+            Err(CortexError::ShapeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn argmax_nan_uses_ieee_total_order_without_panic() {
+        // total_cmp: positive NaN sorts above +Inf, so NaN wins argmax.
+        let t = Tensor::from_vec(vec![1.0, f32::NAN, 3.0], &[3]);
+        assert_eq!(t.argmax(), 1);
+        // Negative NaN sorts below -Inf and never wins.
+        let neg = f32::from_bits(0xffc0_0000);
+        let t = Tensor::from_vec(vec![neg, 1.0, 3.0], &[3]);
+        assert_eq!(t.argmax(), 2);
+        // All-NaN input is still panic-free.
+        let t = Tensor::from_vec(vec![f32::NAN, f32::NAN], &[2]);
+        let _ = t.argmax();
+        // Empty tensor returns 0.
+        let t = Tensor::try_from_vec(vec![], &[0]).unwrap();
+        assert_eq!(t.argmax(), 0);
+    }
+
+    #[test]
+    fn softmax_last_all_neg_inf_is_uniform() {
+        let t = Tensor::from_vec(vec![f32::NEG_INFINITY, f32::NEG_INFINITY], &[2]);
+        let s = t.softmax_last();
+        assert!(s.data().iter().all(|p| (p - 0.5).abs() < 1e-6));
     }
 
     #[test]
