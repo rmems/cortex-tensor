@@ -189,6 +189,7 @@ impl Tensor {
     /// Fallible reshape: `new_shape` must imply exactly `self.numel()`
     /// elements and have representable strides.
     pub fn try_reshape(&self, new_shape: &[usize]) -> Result<Self> {
+        self.check_storage()?;
         let numel = checked_numel(new_shape)?;
         if numel != self.numel() {
             return Err(CortexError::ShapeMismatch {
@@ -374,6 +375,7 @@ impl Tensor {
     ///
     /// Returns [`CortexError::InvalidConfig`] when `ndim > 2`.
     pub fn try_softmax_last(&self) -> Result<Self> {
+        self.check_storage()?;
         if self.ndim() > 2 {
             return Err(CortexError::InvalidConfig(format!(
                 "softmax_last: max 2-D, got rank {}",
@@ -440,7 +442,7 @@ impl Tensor {
     /// `Tensor` derives `Deserialize` without invariant validation, so a
     /// malformed serialized value can reach methods that index `data`
     /// directly. Fallible methods that slice call this first.
-    fn check_storage(&self) -> Result<()> {
+    pub(crate) fn check_storage(&self) -> Result<()> {
         let expected = checked_numel(&self.shape).unwrap_or(usize::MAX);
         if self.data.len() != expected {
             return Err(CortexError::ShapeMismatch {

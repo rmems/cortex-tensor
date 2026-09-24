@@ -22,6 +22,8 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Tensor {
 ///
 /// Validates ranks, inner dimensions, and output size before allocating.
 pub fn try_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    a.check_storage()?;
+    b.check_storage()?;
     expect_rank(a, 2)?;
     expect_rank(b, 2)?;
     let (m, k1) = (a.shape()[0], a.shape()[1]);
@@ -77,6 +79,8 @@ pub fn batched_matmul(a: &Tensor, b: &Tensor) -> Tensor {
 /// 2-D, it is broadcast across the batch of `a`. Validates every dimension
 /// and the output size before allocating.
 pub fn try_batched_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    a.check_storage()?;
+    b.check_storage()?;
     if a.ndim() == 2 && b.ndim() == 2 {
         return try_matmul(a, b);
     }
@@ -152,6 +156,9 @@ pub fn layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Tenso
 
 /// Fallible layer normalization over the last axis of a rank-2 tensor.
 pub fn try_layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Result<Tensor> {
+    x.check_storage()?;
+    weight.check_storage()?;
+    bias.check_storage()?;
     expect_rank(x, 2)?;
     let (rows, cols) = (x.shape()[0], x.shape()[1]);
     if cols == 0 {
@@ -199,6 +206,8 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f32) -> Tensor {
 
 /// Fallible RMS normalization over the last axis of a rank-2 tensor.
 pub fn try_rms_norm(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+    x.check_storage()?;
+    weight.check_storage()?;
     expect_rank(x, 2)?;
     let (rows, cols) = (x.shape()[0], x.shape()[1]);
     if cols == 0 {
@@ -249,6 +258,7 @@ pub fn embedding(table: &Tensor, ids: &[u32]) -> Tensor {
 ///
 /// Out-of-vocabulary ids return [`CortexError::TokenIndex`] without slicing.
 pub fn try_embedding(table: &Tensor, ids: &[u32]) -> Result<Tensor> {
+    table.check_storage()?;
     expect_rank(table, 2)?;
     let vocab = table.shape()[0];
     let dim = table.shape()[1];
@@ -348,6 +358,34 @@ fn checked_mul3(a: usize, b: usize, c: usize, err_shape: &[usize]) -> Result<usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn try_ops_reject_corrupted_deserialized_storage() {
+        // Deserialize skips invariant validation; ops that index `data`
+        // must reject a short buffer instead of panicking.
+        let bad: Tensor =
+            serde_json::from_str(r#"{"data":[1.0,2.0],"shape":[2,2],"strides":[2,1]}"#).unwrap();
+        let ok = Tensor::from_vec(vec![1.0; 4], &[2, 2]);
+        for (name, err) in [
+            ("matmul lhs", try_matmul(&bad, &ok).unwrap_err()),
+            ("matmul rhs", try_matmul(&ok, &bad).unwrap_err()),
+            ("batched", try_batched_matmul(&bad, &ok).unwrap_err()),
+            ("embedding", try_embedding(&bad, &[0]).unwrap_err()),
+            (
+                "layer_norm",
+                try_layer_norm(&bad, &Tensor::ones(&[2]), &Tensor::zeros(&[2]), 1e-5).unwrap_err(),
+            ),
+            (
+                "rms_norm",
+                try_rms_norm(&bad, &Tensor::ones(&[2]), 1e-5).unwrap_err(),
+            ),
+        ] {
+            assert!(
+                matches!(err, CortexError::ShapeMismatch { .. }),
+                "{name}: {err}"
+            );
+        }
+    }
 
     #[test]
     fn test_matmul_2x2() {

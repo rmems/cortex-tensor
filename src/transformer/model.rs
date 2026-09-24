@@ -87,10 +87,10 @@ impl TransformerLM {
         // Validate the head config up front: with num_layers == 0 the block
         // iterator below never runs, so per-block validation alone would
         // accept invalid configs.
-        if cfg.num_heads == 0 || !cfg.dim.is_multiple_of(cfg.num_heads) {
+        if cfg.dim == 0 || cfg.num_heads == 0 || !cfg.dim.is_multiple_of(cfg.num_heads) {
             return Err(CortexError::InvalidConfig(format!(
-                "TransformerLM: num_heads ({}) must be nonzero and divide dim ({})",
-                cfg.num_heads, cfg.dim
+                "TransformerLM: dim ({}) and num_heads ({}) must be nonzero, and num_heads must divide dim",
+                cfg.dim, cfg.num_heads
             )));
         }
         let scale = 0.02;

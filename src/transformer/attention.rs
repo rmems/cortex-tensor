@@ -38,9 +38,9 @@ impl MultiHeadAttention {
     /// Fallible constructor: returns [`CortexError::InvalidConfig`] when
     /// `num_heads` is zero or does not evenly divide `dim`.
     pub fn try_new(dim: usize, num_heads: usize) -> Result<Self> {
-        if num_heads == 0 || !dim.is_multiple_of(num_heads) {
+        if dim == 0 || num_heads == 0 || !dim.is_multiple_of(num_heads) {
             return Err(CortexError::InvalidConfig(format!(
-                "MultiHeadAttention: num_heads ({num_heads}) must be nonzero and divide dim ({dim})"
+                "MultiHeadAttention: dim ({dim}) and num_heads ({num_heads}) must be nonzero, and num_heads must divide dim"
             )));
         }
         let head_dim = dim / num_heads;
