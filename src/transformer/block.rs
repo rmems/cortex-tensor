@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::attention::MultiHeadAttention;
+use crate::error::{CortexError, Result, unwrap_compat};
 use crate::tensor::Tensor;
-use crate::tensor::ops::{layer_norm, matmul};
+use crate::tensor::ops::{try_layer_norm, try_matmul};
 use serde::{Deserialize, Serialize};
 
 /// Feed-forward network (two linear layers with GELU activation).
@@ -25,14 +26,29 @@ impl FeedForward {
         }
     }
 
+    /// # Panics
+    ///
+    /// Panics on rank/shape mismatches. Prefer [`Self::try_forward`].
     pub fn forward(&self, x: &Tensor) -> Tensor {
+        unwrap_compat(self.try_forward(x), "FeedForward::forward")
+    }
+
+    /// Fallible forward pass: `x` must be `[seq_len, dim]` and consistent
+    /// with the stored weights.
+    pub fn try_forward(&self, x: &Tensor) -> Result<Tensor> {
+        if x.ndim() != 2 {
+            return Err(CortexError::RankMismatch {
+                expected: 2,
+                got: x.ndim(),
+            });
+        }
         let seq_len = x.shape()[0];
         // x @ w1 + b1
-        let h = matmul(x, &self.w1).add(&broadcast_row(&self.b1, seq_len));
+        let h = try_matmul(x, &self.w1)?.try_add(&broadcast_row(&self.b1, seq_len))?;
         // GELU activation
         let h = h.gelu();
         // h @ w2 + b2
-        matmul(&h, &self.w2).add(&broadcast_row(&self.b2, seq_len))
+        try_matmul(&h, &self.w2)?.try_add(&broadcast_row(&self.b2, seq_len))
     }
 
     pub fn param_count(&self) -> usize {
@@ -53,33 +69,55 @@ pub struct TransformerBlock {
 }
 
 impl TransformerBlock {
+    /// # Panics
+    ///
+    /// Panics if `num_heads` is invalid for `dim`. Prefer
+    /// [`TransformerBlock::try_new`].
     pub fn new(dim: usize, num_heads: usize, ff_dim: usize) -> Self {
-        Self {
-            attn: MultiHeadAttention::new(dim, num_heads),
+        unwrap_compat(
+            Self::try_new(dim, num_heads, ff_dim),
+            "TransformerBlock::new",
+        )
+    }
+
+    /// Fallible constructor: returns [`CortexError::InvalidConfig`] when
+    /// `num_heads` is zero or does not evenly divide `dim`.
+    pub fn try_new(dim: usize, num_heads: usize, ff_dim: usize) -> Result<Self> {
+        Ok(Self {
+            attn: MultiHeadAttention::try_new(dim, num_heads)?,
             ffn: FeedForward::new(dim, ff_dim),
             ln1_w: Tensor::ones(&[dim]),
             ln1_b: Tensor::zeros(&[dim]),
             ln2_w: Tensor::ones(&[dim]),
             ln2_b: Tensor::zeros(&[dim]),
             dim,
-        }
+        })
     }
 
     /// Pre-norm transformer block (GPT-style):
     /// x = x + attn(layernorm(x))
     /// x = x + ffn(layernorm(x))
+    ///
+    /// # Panics
+    ///
+    /// Panics on rank/shape mismatches. Prefer [`Self::try_forward`].
     pub fn forward(&self, x: &Tensor) -> Tensor {
+        unwrap_compat(self.try_forward(x), "TransformerBlock::forward")
+    }
+
+    /// Fallible forward pass.
+    pub fn try_forward(&self, x: &Tensor) -> Result<Tensor> {
         let eps = 1e-5;
 
         // Attention sub-layer with residual
-        let normed = layer_norm(x, &self.ln1_w, &self.ln1_b, eps);
-        let attn_out = self.attn.forward(&normed);
-        let x = x.add(&attn_out);
+        let normed = try_layer_norm(x, &self.ln1_w, &self.ln1_b, eps)?;
+        let attn_out = self.attn.try_forward(&normed)?;
+        let x = x.try_add(&attn_out)?;
 
         // FFN sub-layer with residual
-        let normed = layer_norm(&x, &self.ln2_w, &self.ln2_b, eps);
-        let ffn_out = self.ffn.forward(&normed);
-        x.add(&ffn_out)
+        let normed = try_layer_norm(&x, &self.ln2_w, &self.ln2_b, eps)?;
+        let ffn_out = self.ffn.try_forward(&normed)?;
+        x.try_add(&ffn_out)
     }
 
     pub fn param_count(&self) -> usize {

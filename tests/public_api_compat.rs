@@ -5,8 +5,8 @@
 //! wrapper was removed or changed without a SemVer decision (see RM-1353).
 
 use cortex_tensor::tensor::ops::{
-    batched_matmul, embedding, layer_norm, matmul, rms_norm, try_batched_matmul, try_embedding,
-    try_layer_norm, try_matmul, try_rms_norm,
+    batched_matmul, embedding, layer_norm, matmul, rms_norm, try_batched_matmul, try_causal_mask,
+    try_embedding, try_layer_norm, try_matmul, try_rms_norm,
 };
 use cortex_tensor::{Result, Tensor};
 
@@ -32,4 +32,12 @@ fn fallible_apis_are_public() {
     let _: fn(&Tensor, &[u32]) -> Result<Tensor> = try_embedding;
     let _: fn(&Tensor, &Tensor, &Tensor, f32) -> Result<Tensor> = try_layer_norm;
     let _: fn(&Tensor, &Tensor, f32) -> Result<Tensor> = try_rms_norm;
+    let _: fn(usize) -> Result<Tensor> = try_causal_mask;
+    let _: fn(&Tensor, &[usize]) -> Result<Tensor> = Tensor::try_reshape;
+    let _: fn(&Tensor) -> Result<Tensor> = Tensor::try_transpose;
+    let _: fn(&Tensor, &Tensor) -> Result<Tensor> = Tensor::try_add;
+    let _: fn(&Tensor, &Tensor) -> Result<Tensor> = Tensor::try_sub;
+    let _: fn(&Tensor, &Tensor) -> Result<Tensor> = Tensor::try_mul;
+    let _: fn(&Tensor, usize) -> Result<Tensor> = Tensor::try_row;
+    let _: fn(&Tensor) -> Result<Tensor> = Tensor::try_softmax_last;
 }

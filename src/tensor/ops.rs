@@ -274,15 +274,27 @@ pub fn try_embedding(table: &Tensor, ids: &[u32]) -> Result<Tensor> {
 }
 
 /// Causal attention mask: upper triangle = -inf, lower triangle + diagonal = 0.
+///
+/// # Panics
+///
+/// Panics if `seq_len * seq_len` overflows `usize`. Prefer
+/// [`try_causal_mask`] in new code.
 pub fn causal_mask(seq_len: usize) -> Tensor {
-    let out_len = unwrap_compat(checked_numel(&[seq_len, seq_len]), "causal_mask");
+    unwrap_compat(try_causal_mask(seq_len), "causal_mask")
+}
+
+/// Fallible causal mask: returns [`CortexError::SizeOverflow`] when
+/// `seq_len * seq_len` is not representable.
+pub fn try_causal_mask(seq_len: usize) -> Result<Tensor> {
+    let out_len = checked_numel(&[seq_len, seq_len])?;
+    check_f32_alloc(out_len, &[seq_len, seq_len])?;
     let mut data = vec![0.0f32; out_len];
     for i in 0..seq_len {
         for j in (i + 1)..seq_len {
             data[i * seq_len + j] = f32::NEG_INFINITY;
         }
     }
-    Tensor::from_vec(data, &[seq_len, seq_len])
+    Tensor::try_from_vec(data, &[seq_len, seq_len])
 }
 
 fn expect_rank(t: &Tensor, expected: usize) -> Result<()> {

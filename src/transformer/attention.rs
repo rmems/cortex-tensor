@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::error::{CortexError, Result, unwrap_compat};
 use crate::tensor::Tensor;
 use crate::tensor::finite::softmax_row;
-use crate::tensor::ops::{batched_matmul, causal_mask, matmul};
+use crate::tensor::ops::{try_batched_matmul, try_causal_mask, try_matmul};
 use serde::{Deserialize, Serialize};
 
 /// Multi-head self-attention (replaces candle-nn attention layers).
@@ -26,11 +27,25 @@ pub struct MultiHeadAttention {
 }
 
 impl MultiHeadAttention {
+    /// # Panics
+    ///
+    /// Panics if `num_heads` is zero or does not divide `dim`. Prefer
+    /// [`MultiHeadAttention::try_new`] in new code.
     pub fn new(dim: usize, num_heads: usize) -> Self {
-        assert_eq!(dim % num_heads, 0);
+        unwrap_compat(Self::try_new(dim, num_heads), "MultiHeadAttention::new")
+    }
+
+    /// Fallible constructor: returns [`CortexError::InvalidConfig`] when
+    /// `num_heads` is zero or does not evenly divide `dim`.
+    pub fn try_new(dim: usize, num_heads: usize) -> Result<Self> {
+        if num_heads == 0 || !dim.is_multiple_of(num_heads) {
+            return Err(CortexError::InvalidConfig(format!(
+                "MultiHeadAttention: num_heads ({num_heads}) must be nonzero and divide dim ({dim})"
+            )));
+        }
         let head_dim = dim / num_heads;
         let scale = 1.0 / (dim as f32).sqrt();
-        Self {
+        Ok(Self {
             num_heads,
             head_dim,
             dim,
@@ -42,20 +57,53 @@ impl MultiHeadAttention {
             wb_v: Tensor::zeros(&[1, dim]),
             wo: Tensor::randn(&[dim, dim], 0.0, scale),
             wb_o: Tensor::zeros(&[1, dim]),
-        }
+        })
     }
 
     /// Forward pass: x is [seq_len, dim] → output [seq_len, dim]
+    ///
+    /// # Panics
+    ///
+    /// Panics on rank/shape mismatches. Prefer [`Self::try_forward`].
     pub fn forward(&self, x: &Tensor) -> Tensor {
+        unwrap_compat(self.try_forward(x), "MultiHeadAttention::forward")
+    }
+
+    /// Fallible forward pass: validates `x` is `[seq_len, dim]` and that all
+    /// intermediate shapes are consistent before computing.
+    pub fn try_forward(&self, x: &Tensor) -> Result<Tensor> {
+        if x.ndim() != 2 {
+            return Err(CortexError::RankMismatch {
+                expected: 2,
+                got: x.ndim(),
+            });
+        }
         let seq_len = x.shape()[0];
-        let _dim = self.dim;
         let nh = self.num_heads;
         let hd = self.head_dim;
+        // Fields are `pub`; a literal-constructed module can violate the
+        // `nh * hd == dim` and `[1, dim]` bias invariants that `try_new`
+        // establishes. The head-reshape helpers below index on those
+        // invariants, so check them before any slicing.
+        if nh.checked_mul(hd) != Some(self.dim) {
+            return Err(CortexError::InvalidConfig(format!(
+                "MultiHeadAttention: num_heads ({nh}) * head_dim ({hd}) != dim ({})",
+                self.dim
+            )));
+        }
+        for bias in [&self.wb_q, &self.wb_k, &self.wb_v, &self.wb_o] {
+            if bias.shape() != [1, self.dim] {
+                return Err(CortexError::ShapeMismatch {
+                    expected: vec![1, self.dim],
+                    got: bias.shape().to_vec(),
+                });
+            }
+        }
 
         // Project Q, K, V: [seq_len, dim] × [dim, dim] → [seq_len, dim]
-        let q = matmul(x, &self.wq).add(&broadcast_bias(&self.wb_q, seq_len));
-        let k = matmul(x, &self.wk).add(&broadcast_bias(&self.wb_k, seq_len));
-        let v = matmul(x, &self.wv).add(&broadcast_bias(&self.wb_v, seq_len));
+        let q = try_matmul(x, &self.wq)?.try_add(&broadcast_bias(&self.wb_q, seq_len))?;
+        let k = try_matmul(x, &self.wk)?.try_add(&broadcast_bias(&self.wb_k, seq_len))?;
+        let v = try_matmul(x, &self.wv)?.try_add(&broadcast_bias(&self.wb_v, seq_len))?;
 
         // Reshape to [num_heads, seq_len, head_dim] for batched attention
         let q = reshape_heads(&q, seq_len, nh, hd);
@@ -66,23 +114,23 @@ impl MultiHeadAttention {
         // scores = Q × K^T / sqrt(head_dim)  → [nh, seq_len, seq_len]
         let kt = transpose_last_two(&k); // [nh, hd, seq_len]
         let scale = 1.0 / (hd as f32).sqrt();
-        let scores = batched_matmul(&q, &kt).scale(scale);
+        let scores = try_batched_matmul(&q, &kt)?.scale(scale);
 
         // Apply causal mask
-        let mask = causal_mask(seq_len);
+        let mask = try_causal_mask(seq_len)?;
         let scores = apply_mask_batched(&scores, &mask, nh);
 
         // Softmax per row
         let attn = batched_softmax(&scores, nh, seq_len);
 
         // attn × V → [nh, seq_len, hd]
-        let ctx = batched_matmul(&attn, &v);
+        let ctx = try_batched_matmul(&attn, &v)?;
 
         // Reshape back to [seq_len, dim]
         let ctx = merge_heads(&ctx, seq_len, nh, hd);
 
         // Output projection
-        matmul(&ctx, &self.wo).add(&broadcast_bias(&self.wb_o, seq_len))
+        try_matmul(&ctx, &self.wo)?.try_add(&broadcast_bias(&self.wb_o, seq_len))
     }
 
     /// Returns flattened parameter count for this layer.
