@@ -15,7 +15,7 @@ Design goals:
 - **Zero GPU coupling.** No `cust`, no `libc` pinned-host registration, no `#[cfg(feature = "gpu")]` branches.
 - **Zero framework dependency.** No `candle`, no `tch`, no `ort`. The tensor type is a row-major `Vec<f32>` with explicit shape + strides.
 - **Small, auditable dependency set.** `serde`, `serde_json`, `thiserror`, `rand`, `rayon`, `memmap2`, `half` — nothing else.
-- **Inference-ready MoE.** A GGUF checkpoint bridge with family-aware adapter resolution for OLMoE, Qwen3-MoE, Gemma-4, DeepSeek-2, and Llama-MoE.
+- **Inference-ready MoE.** A GGUF checkpoint bridge with family-aware adapter resolution for reference MoE checkpoints, Qwen3-MoE, Gemma-4, DeepSeek-2, and Llama-MoE.
 
 ## Architecture
 
@@ -74,7 +74,8 @@ src/
 |---|---|
 | `MoeRouter` | Family-aware MoE router. Loads a GGUF checkpoint, detects model family, and produces top-k expert selections. |
 | `RoutingMode` | `StubUniform`, `DenseSim`, `SpikingSim` (simulation-only; no GPU dispatch). |
-| `ModelFamily` | `Olmoe`, `Qwen3Moe`, `Gemma4`, `DeepSeek2`, `LlamaMoe`. |
+| `ModelFamily` | `ReferenceMoe`, `Qwen3Moe`, `Gemma4`, `DeepSeek2`, `LlamaMoe`. |
+| `ExtractTokenOptions` | Optional resample / L2 when extracting token rows (`for_projector_forward()` matches legacy 2048 + L2). |
 
 Top-k selection ranks finite scores descending and breaks ties by ascending expert ID. NaN scores are rejected (`NanRoutingScore`); `+Inf` ranks above all finite values and `-Inf` below them. The helper is pure: the same `(scores, top_k)` pair always produces the same expert IDs.
 
@@ -117,8 +118,8 @@ This crate **owns**:
 - Decoder-only transformer building blocks (attention, block, `TransformerLM`).
 - MoE routing math — gate scores, softmax, top-k selection, L2 normalization,
   embedding resampling — and the simulation routing modes.
-- Model-family adapters and tensor selection (`Olmoe`, `Qwen3Moe`, `Gemma4`,
-  `DeepSeek2`, `LlamaMoe`), including synapse-source resolution.
+- Model-family adapters and tensor selection (`ReferenceMoe`, `Qwen3Moe`,
+  `Gemma4`, `DeepSeek2`, `LlamaMoe`), including synapse-source resolution.
 - Dequantization of supported GGUF quants to `f32` (`Q8_0`, `Q5_K`, `F16`).
 - The consumer-side GGUF bridge it needs today: mmap'd tensor access and
   token-embedding extraction.
@@ -138,7 +139,7 @@ This crate **does not own**:
 - Tokenization and automatic differentiation (see [Non-goals](#non-goals)).
 
 **Allowed dependencies:** the current small set — `serde`, `serde_json`,
-`thiserror`, `rand`, `rayon`, `memmap2`, `half`, plus optional `sentry` — and,
+`thiserror`, `rand`, `rayon`, `memmap2`, `half` — and,
 in future, the zero-dependency rmems parser crates.
 
 **Forbidden dependencies:** GPU backends (`cust`), inference frameworks
@@ -249,7 +250,7 @@ let block = TransformerBlock::new(/* dim */ 512, /* num_heads */ 8, /* mlp_dim *
 Loading a family-aware MoE GGUF and running the router:
 
 ```rust
-use cortex_tensor::moe::{MoeRouter, RoutingMode};
+use cortex_tensor::moe::{ExtractTokenOptions, MoeRouter, RoutingMode};
 
 fn main() -> cortex_tensor::Result<()> {
     let mut router = MoeRouter::load_with_mode(
@@ -258,43 +259,18 @@ fn main() -> cortex_tensor::Result<()> {
         /* top_k */ 2,
         RoutingMode::DenseSim,
     )?;
-    let embedding = vec![0.0f32; cortex_tensor::types::EMBEDDING_DIM]; // or extract_token_embedding
+    let native = router.extract_token_embedding(0)?; // checkpoint hidden_size
+    let _ = native;
+    let embedding = router.extract_token_embedding_with_options(
+        0,
+        ExtractTokenOptions::for_projector_forward(),
+    )?; // resampled to EMBEDDING_DIM + L2 for forward()
     let out = router.forward(&embedding)?;
     // out.selected_experts, out.expert_weights, out.hidden
     let _ = out;
     Ok(())
 }
 ```
-
-## Optional Sentry monitoring
-
-Enable with the `sentry` feature (uses sentry-rust 0.48):
-
-```toml
-[dependencies]
-cortex-tensor = { git = "...", features = ["sentry"] }
-```
-
-Init guard example (call early in main or lib init; keep guard alive for duration of process).
-Note: the consuming crate/binary must explicitly enable the `sentry` feature on its `cortex-tensor` dependency
-(transitive features do not auto-activate). Then use the re-exported path (or add `sentry` as direct dep):
-
-```rust
-#[cfg(feature = "sentry")]
-let _sentry_guard = cortex_tensor::sentry::init((
-    "https://<key>@sentry.io/<project>",
-    cortex_tensor::sentry::ClientOptions {
-        release: cortex_tensor::sentry::release_name!(),
-        environment: Some("production".into()),
-        ..Default::default()
-    },
-));
-
-// Your app code; errors auto captured when panics or cortex_tensor::sentry::capture_message etc used.
-// (The re-export brings the full sentry crate API under the feature gate.)
-```
-
-When the feature is off the re-export is not present (guarded).
 
 ## Non-goals
 

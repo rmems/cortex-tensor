@@ -30,10 +30,10 @@ jobs:
 
     # Hosted images ship rustup; track the latest stable toolchain
     # explicitly instead of whatever version the image happens to carry.
-    - name: Install latest stable Rust
+    - name: Install Rust 1.98.1
       run: |
-        rustup update stable
-        rustup default stable
+        rustup toolchain install 1.98.1 --component rustfmt --component clippy
+        rustup default 1.98.1
         rustc --version
         cargo --version
 

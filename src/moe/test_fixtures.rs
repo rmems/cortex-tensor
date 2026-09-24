@@ -127,6 +127,7 @@ pub(crate) fn push_kv_array_u32(out: &mut Vec<u8>, key: &str, values: &[u32]) {
 pub(crate) fn build_test_gguf(
     tensors: Vec<(&str, Vec<usize>, u32, Vec<u8>)>,
     alignment: u32,
+    hidden_size: usize,
 ) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&super::GGUF_MAGIC);
@@ -135,11 +136,15 @@ pub(crate) fn build_test_gguf(
     push_u64(&mut out, 7);
     push_kv_u32(&mut out, "general.alignment", alignment);
     push_kv_u32(&mut out, "general.file_type", 1);
-    push_kv_string(&mut out, "general.architecture", "olmoe");
-    push_kv_u32(&mut out, "olmoe.embedding_length", EMBEDDING_DIM as u32);
-    push_kv_u32(&mut out, "olmoe.block_count", 16);
-    push_kv_u32(&mut out, "olmoe.expert_count", 64);
-    push_kv_u32(&mut out, "olmoe.expert_used_count", 8);
+    push_kv_string(&mut out, "general.architecture", "reference_moe");
+    push_kv_u32(
+        &mut out,
+        "reference_moe.embedding_length",
+        hidden_size as u32,
+    );
+    push_kv_u32(&mut out, "reference_moe.block_count", 16);
+    push_kv_u32(&mut out, "reference_moe.expert_count", 64);
+    push_kv_u32(&mut out, "reference_moe.expert_used_count", 8);
 
     let mut data_offset = 0usize;
     let mut tensor_payloads = Vec::new();
@@ -189,5 +194,6 @@ pub(crate) fn build_real_size_checkpoint(gate_payload: Vec<u8>) -> Vec<u8> {
             ),
         ],
         32,
+        EMBEDDING_DIM,
     )
 }

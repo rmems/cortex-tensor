@@ -651,7 +651,7 @@ mod tests {
             &32u16.to_le_bytes(),
         );
         push_kv_i8(&mut out, "general.file_type", 1);
-        push_kv_string(&mut out, "general.architecture", "olmoe");
+        push_kv_string(&mut out, "general.architecture", "reference_moe");
         push_kv_raw(
             &mut out,
             "custom.u8",
@@ -676,7 +676,7 @@ mod tests {
         push_kv_i64(&mut out, "custom.i64", 1_000_000);
 
         let parsed = parse_checkpoint_layout(&out, "test").unwrap();
-        assert_eq!(parsed.metadata.architecture, "olmoe");
+        assert_eq!(parsed.metadata.architecture, "reference_moe");
         assert_eq!(parsed.metadata.numeric("custom.u8"), Some(7));
         assert_eq!(parsed.metadata.numeric("custom.u16"), Some(1234));
         assert_eq!(parsed.metadata.numeric("custom.u64"), Some(42));
@@ -695,7 +695,7 @@ mod tests {
         push_u64(&mut out, 6);
         push_kv_u32(&mut out, "general.alignment", 32);
         push_kv_u32(&mut out, "general.file_type", 0);
-        push_kv_string(&mut out, "general.architecture", "olmoe");
+        push_kv_string(&mut out, "general.architecture", "reference_moe");
         push_kv_bool(&mut out, "custom.bool", true);
         push_kv_f32(&mut out, "custom.float32", 1.5);
         push_kv_f64(&mut out, "custom.float64", 2.5);

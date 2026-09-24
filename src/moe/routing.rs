@@ -9,7 +9,7 @@
 use super::checkpoint::{GgufTensorInfo, MappedGgufCheckpoint};
 use crate::error::{HybridError, Result};
 use crate::tensor::finite::{l2_normalize, softmax_vec};
-use crate::types::EMBEDDING_DIM;
+use crate::types::ExtractTokenOptions;
 use std::cmp::Ordering;
 
 pub(super) fn checkpoint_gate_scores(
@@ -152,9 +152,15 @@ pub(super) fn normalize_l2(values: &mut [f32]) {
     l2_normalize(values);
 }
 
-pub(super) fn normalize_to_internal_embedding_dim(input: &[f32]) -> Vec<f32> {
-    let mut out = resample_embedding(input, EMBEDDING_DIM);
-    normalize_l2(&mut out);
+pub(super) fn apply_extract_token_options(input: &[f32], options: ExtractTokenOptions) -> Vec<f32> {
+    let mut out = if let Some(target_dim) = options.target_dim {
+        resample_embedding(input, target_dim)
+    } else {
+        input.to_vec()
+    };
+    if options.l2_normalize {
+        normalize_l2(&mut out);
+    }
     out
 }
 
@@ -223,10 +229,10 @@ mod tests {
     }
 
     #[test]
-    fn normalize_to_internal_dim_returns_2048() {
+    fn projector_forward_options_resample_to_2048() {
         let input = vec![0.5; 3072];
-        let out = normalize_to_internal_embedding_dim(&input);
-        assert_eq!(out.len(), EMBEDDING_DIM);
+        let out = apply_extract_token_options(&input, ExtractTokenOptions::for_projector_forward());
+        assert_eq!(out.len(), crate::types::EMBEDDING_DIM);
     }
 
     /// Existing finite ranking fixture: strictly decreasing scores keep

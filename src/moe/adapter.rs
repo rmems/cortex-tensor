@@ -213,19 +213,14 @@ fn resolve_routing_tensor(
 fn infer_family(
     architecture: &str,
     family_override: Option<ModelFamily>,
-    path: &str,
+    _path: &str,
 ) -> Result<ModelFamily> {
     let inferred = match architecture {
-        "olmoe" => ModelFamily::Olmoe,
         "qwen3moe" => ModelFamily::Qwen3Moe,
         "gemma4" => ModelFamily::Gemma4,
         "deepseek2" => ModelFamily::DeepSeek2,
         "llama" => ModelFamily::LlamaMoe,
-        other => {
-            return Err(HybridError::UnsupportedFormat(format!(
-                "unsupported GGUF architecture '{other}' in '{path}'"
-            )));
-        }
+        _ => ModelFamily::ReferenceMoe,
     };
 
     #[allow(clippy::collapsible_if)]

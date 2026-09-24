@@ -68,7 +68,7 @@ pub enum CortexError {
     InputLengthMismatch { expected: usize, got: usize },
 
     #[error("router forward pass failed: {0}")]
-    OlmoeForward(String),
+    MoeForward(String),
 
     /// NaN is rejected before ranking so it never participates in `partial_cmp`.
     #[error("NaN routing score at expert {expert_id}")]

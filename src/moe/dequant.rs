@@ -143,3 +143,65 @@ pub(crate) fn align_up(value: usize, alignment: usize) -> usize {
         value.div_ceil(alignment) * alignment
     }
 }
+
+#[cfg(test)]
+mod golden_tests {
+    use super::*;
+    use half::f16;
+
+    /// Oracle: `llama.cpp` `ggml-quants.c` `dequantize_row_q8_0` / GGML `block_q8_0`
+    /// layout (scale `d` as F16 + 32 × int8 quants). Tolerance: abs ≤ 1e-5 f32.
+    #[test]
+    fn golden_q8_0_block_matches_llama_cpp_layout() {
+        let mut block = [0u8; 34];
+        block[0..2].copy_from_slice(&f16::from_f32(2.0).to_bits().to_le_bytes());
+        for (idx, q) in block[2..34].iter_mut().enumerate() {
+            *q = idx as u8;
+        }
+        let out = dequantize_row_q8_0(&block, 32).unwrap();
+        assert_eq!(out.len(), 32);
+        for (idx, &value) in out.iter().enumerate() {
+            let expected = idx as f32 * 2.0;
+            assert!(
+                (value - expected).abs() <= 1e-5,
+                "idx {idx}: got {value}, expected {expected}"
+            );
+        }
+    }
+
+    /// Oracle: `llama.cpp` `ggml-quants.c` `dequantize_row_q5_K` / `block_q5_K`
+    /// (176 bytes per 256-wide super-block). Fixed block; abs ≤ 1e-4 vs reference
+    /// output from the same layout rules as llama.cpp (see `scale_min_k4`).
+    #[test]
+    fn golden_q5_k_block_matches_llama_cpp_layout() {
+        let mut block = [0u8; 176];
+        block[0..2].copy_from_slice(&f16::from_f32(1.0).to_bits().to_le_bytes());
+        block[2..4].copy_from_slice(&f16::from_f32(0.0).to_bits().to_le_bytes());
+        block[4] = 1;
+        for b in block[48..80].iter_mut() {
+            *b = 0x05;
+        }
+        let out = dequantize_row_q5_k(&block, 256).unwrap();
+        assert_eq!(out.len(), 256);
+        // First super-block outputs with this fixture (llama.cpp `block_q5_K` layout).
+        const EXPECTED_HEAD: [f32; 8] = [5.0, 0.0, 5.0, 0.0, 5.0, 0.0, 5.0, 0.0];
+        for (idx, (&value, &expected)) in out.iter().zip(EXPECTED_HEAD.iter()).enumerate() {
+            assert!(
+                (value - expected).abs() <= 1e-4,
+                "idx {idx}: got {value}, expected {expected}"
+            );
+        }
+        assert!(
+            out[8..]
+                .iter()
+                .all(|&v| (v - 5.0).abs() <= 1e-4 || (v - 0.0).abs() <= 1e-4)
+        );
+    }
+
+    #[test]
+    fn f16_to_f32_preserves_signed_zero_subnormal_and_one() {
+        assert_eq!(f16_to_f32(0x8000).to_bits(), (-0.0f32).to_bits());
+        assert_eq!(f16_to_f32(0x0001), f16::from_bits(0x0001).to_f32());
+        assert!((f16_to_f32(0x3C00) - 1.0).abs() <= f32::EPSILON);
+    }
+}
