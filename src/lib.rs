@@ -27,10 +27,3 @@ pub mod types;
 
 pub use error::{CortexError, HybridError, Result};
 pub use tensor::Tensor;
-
-/// Optional re-export of the Sentry SDK for error/performance monitoring.
-///
-/// Enable with `features = ["sentry"]` in Cargo.toml.
-/// See README for init guard example and setup.
-#[cfg(feature = "sentry")]
-pub use sentry;

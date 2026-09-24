@@ -19,8 +19,8 @@ Cargo.lock
 .windsurf/
 
 # OLMo model weights and folders
-OLMoE-*/
-olmoe-*/
+gguf-checkpoints/
+moe-fixtures/
 *.gguf
 
 # OS / editor noise

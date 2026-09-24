@@ -3,6 +3,8 @@
 use super::test_fixtures::*;
 use super::*;
 use crate::error::HybridError;
+use crate::types::ExtractTokenOptions;
+use half::f16;
 use std::fs::remove_file;
 use std::mem::size_of;
 use std::path::PathBuf;
@@ -42,7 +44,7 @@ fn test_dense_sim_uses_real_gate_weights() {
     embedding[0] = 1.0;
     let out = model.forward(&embedding).unwrap();
     assert_eq!(out.selected_experts[0], 0);
-    assert_eq!(model.family(), ModelFamily::Olmoe);
+    assert_eq!(model.family(), ModelFamily::ReferenceMoe);
     assert_eq!(model.routing_tensor_name(), "blk.0.ffn_gate_inp.weight");
 
     let _ = remove_file(path);
@@ -164,6 +166,7 @@ fn adapter_fixture(
             ("token_embd.weight", token_dims, token_ggml, token_payload),
         ],
         32,
+        EMBEDDING_DIM,
     )
 }
 
@@ -205,6 +208,114 @@ fn test_adapter_resolve_routing_invalid_orientation() {
         result,
         Err(HybridError::UnsupportedFormat(msg)) if msg.contains("unsupported orientation")
     ));
+    let _ = remove_file(path);
+}
+
+#[test]
+fn extract_token_embedding_returns_native_hidden_size() {
+    const HIDDEN: usize = 32;
+    const VOCAB: usize = 4;
+    let mut payload = Vec::with_capacity(HIDDEN * VOCAB * size_of::<f32>());
+    for token in 0..VOCAB {
+        for dim in 0..HIDDEN {
+            payload.extend_from_slice(&(dim as f32).to_le_bytes());
+        }
+        let _ = token;
+    }
+    let gate_payload = vec![0u8; HIDDEN * 64 * size_of::<f32>()];
+    let checkpoint = build_test_gguf(
+        vec![
+            (
+                "blk.0.ffn_gate_inp.weight",
+                vec![HIDDEN, 64],
+                GGML_TYPE_F32,
+                gate_payload,
+            ),
+            (
+                "blk.0.attn_q.weight",
+                vec![HIDDEN, HIDDEN],
+                GGML_TYPE_F16,
+                vec![0u8; HIDDEN * HIDDEN * 2],
+            ),
+            (
+                "token_embd.weight",
+                vec![HIDDEN, VOCAB],
+                GGML_TYPE_F32,
+                payload,
+            ),
+        ],
+        32,
+        HIDDEN,
+    );
+    let path = write_temp_file(&checkpoint, "native-hidden-32");
+    let mut router =
+        MoeRouter::load_with_mode(path.to_str().unwrap(), 8, 2, RoutingMode::StubUniform).unwrap();
+    assert_eq!(router.hidden_size(), HIDDEN);
+
+    let embedding = router.extract_token_embedding(0).unwrap();
+    assert_eq!(embedding.len(), HIDDEN);
+    for (dim, &value) in embedding.iter().enumerate() {
+        assert!(
+            (value - dim as f32).abs() <= 1e-6,
+            "dim {dim}: got {value}"
+        );
+    }
+
+    let l2_sum: f32 = embedding.iter().map(|v| v * v).sum();
+    assert!(l2_sum > 1.0, "native extract must not L2-normalize");
+
+    let projected = router
+        .extract_token_embedding_with_options(0, ExtractTokenOptions::for_projector_forward())
+        .unwrap();
+    assert_eq!(projected.len(), EMBEDDING_DIM);
+    let norm: f32 = projected.iter().map(|v| v * v).sum::<f32>().sqrt();
+    assert!((norm - 1.0).abs() <= 1e-5);
+
+    let _ = remove_file(path);
+}
+
+#[test]
+fn extract_f16_neg_zero_keeps_sign_bit_at_native_length() {
+    const HIDDEN: usize = 32;
+    let mut payload = vec![0u8; HIDDEN * 2];
+    payload[0..2].copy_from_slice(&f16::from_f32(-0.0).to_bits().to_le_bytes());
+    payload[2..4].copy_from_slice(&f16::from_f32(1.0).to_bits().to_le_bytes());
+    payload[4..6].copy_from_slice(&f16::from_bits(0x0001).to_bits().to_le_bytes());
+
+    let gate_payload = vec![0u8; HIDDEN * 64 * size_of::<f32>()];
+    let checkpoint = build_test_gguf(
+        vec![
+            (
+                "blk.0.ffn_gate_inp.weight",
+                vec![HIDDEN, 64],
+                GGML_TYPE_F32,
+                gate_payload,
+            ),
+            (
+                "blk.0.attn_q.weight",
+                vec![HIDDEN, HIDDEN],
+                GGML_TYPE_F16,
+                vec![0u8; HIDDEN * HIDDEN * 2],
+            ),
+            (
+                "token_embd.weight",
+                vec![HIDDEN, 1],
+                GGML_TYPE_F16,
+                payload,
+            ),
+        ],
+        32,
+        HIDDEN,
+    );
+    let path = write_temp_file(&checkpoint, "f16-neg-zero");
+    let mut router =
+        MoeRouter::load_with_mode(path.to_str().unwrap(), 8, 1, RoutingMode::StubUniform).unwrap();
+    let embedding = router.extract_token_embedding(0).unwrap();
+    assert_eq!(embedding.len(), HIDDEN);
+    assert_eq!(embedding[0].to_bits(), (-0.0f32).to_bits());
+    assert!((embedding[1] - 1.0).abs() <= f32::EPSILON);
+    assert_eq!(embedding[2], f16::from_bits(0x0001).to_f32());
+
     let _ = remove_file(path);
 }
 

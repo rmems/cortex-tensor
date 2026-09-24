@@ -47,12 +47,12 @@ pub(crate) mod test_fixtures;
 use self::adapter::{ModelAdapter, resolve_adapter};
 use self::checkpoint::{MappedGgufCheckpoint, probe_and_map_checkpoint};
 use self::routing::{
-    checkpoint_gate_scores, normalize_l2, normalize_to_internal_embedding_dim,
+    apply_extract_token_options, checkpoint_gate_scores, normalize_l2,
     reject_nan_routing_scores, resample_embedding, route_top_k, synthetic_gate_scores,
 };
 use crate::error::{HybridError, Result};
 pub use crate::types::RoutingMode;
-use crate::types::{EMBEDDING_DIM, ModelFamily};
+pub use crate::types::{EMBEDDING_DIM, ExtractTokenOptions, ModelFamily};
 
 pub(crate) use self::gguf::{
     GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_IQ3_S, GGML_TYPE_Q5_K, GGML_TYPE_Q8_0, GGUF_MAGIC,
@@ -184,7 +184,7 @@ impl MoeRouter {
             top_k: inferred_top_k,
             loaded: false,
             metadata: RouterMetadata {
-                family: family_override.unwrap_or(ModelFamily::Olmoe),
+                family: family_override.unwrap_or(ModelFamily::ReferenceMoe),
                 architecture: "stub".into(),
                 hidden_size: EMBEDDING_DIM,
                 num_layers: 0,
@@ -225,7 +225,17 @@ impl MoeRouter {
         }
     }
 
+    /// Dequantize the checkpoint token row at native `hidden_size` (no resample, no L2).
     pub fn extract_token_embedding(&mut self, token_id: usize) -> Result<Vec<f32>> {
+        self.extract_token_embedding_with_options(token_id, ExtractTokenOptions::default())
+    }
+
+    /// Dequantize a token row, optionally resampling and/or L2-normalizing.
+    pub fn extract_token_embedding_with_options(
+        &mut self,
+        token_id: usize,
+        options: ExtractTokenOptions,
+    ) -> Result<Vec<f32>> {
         let adapter = self
             .adapter
             .as_ref()
@@ -245,7 +255,7 @@ impl MoeRouter {
             &self.model_path,
             token_id,
         )?;
-        Ok(normalize_to_internal_embedding_dim(&embedding))
+        Ok(apply_extract_token_options(&embedding, options))
     }
 
     #[allow(dead_code)]
