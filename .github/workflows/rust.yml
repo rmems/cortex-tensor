@@ -21,6 +21,15 @@ jobs:
       with:
         persist-credentials: false
 
+    # Hosted images ship rustup; track the latest stable toolchain
+    # explicitly instead of whatever version the image happens to carry.
+    - name: Install latest stable Rust
+      run: |
+        rustup update stable
+        rustup default stable
+        rustc --version
+        cargo --version
+
     - name: Build
       run: cargo build --verbose
 
