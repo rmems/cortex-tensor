@@ -70,10 +70,14 @@ impl Tensor {
     /// # Panics
     ///
     /// Panics if the shape product or stride arithmetic overflows `usize`.
-    /// Prefer [`Tensor::try_from_vec`] with a caller-allocated buffer in new
-    /// code.
+    /// Prefer [`Tensor::try_zeros`] in new code.
     pub fn zeros(shape: &[usize]) -> Self {
-        unwrap_compat(try_filled(shape, 0.0), "Tensor::zeros")
+        unwrap_compat(Self::try_zeros(shape), "Tensor::zeros")
+    }
+
+    /// Fallible [`Tensor::zeros`].
+    pub fn try_zeros(shape: &[usize]) -> Result<Self> {
+        try_filled(shape, 0.0)
     }
 
     /// Fills a tensor with ones.
@@ -82,8 +86,14 @@ impl Tensor {
     ///
     /// Panics if the shape product or stride arithmetic overflows `usize`.
     /// See [`Tensor::from_vec`] for the pre-1.0 compatibility policy.
+    /// Prefer [`Tensor::try_ones`] in new code.
     pub fn ones(shape: &[usize]) -> Self {
-        unwrap_compat(try_filled(shape, 1.0), "Tensor::ones")
+        unwrap_compat(Self::try_ones(shape), "Tensor::ones")
+    }
+
+    /// Fallible [`Tensor::ones`].
+    pub fn try_ones(shape: &[usize]) -> Result<Self> {
+        try_filled(shape, 1.0)
     }
 
     /// Fills a tensor with `val`.
@@ -92,8 +102,14 @@ impl Tensor {
     ///
     /// Panics if the shape product or stride arithmetic overflows `usize`.
     /// See [`Tensor::from_vec`] for the pre-1.0 compatibility policy.
+    /// Prefer [`Tensor::try_full`] in new code.
     pub fn full(shape: &[usize], val: f32) -> Self {
-        unwrap_compat(try_filled(shape, val), "Tensor::full")
+        unwrap_compat(Self::try_full(shape, val), "Tensor::full")
+    }
+
+    /// Fallible [`Tensor::full`].
+    pub fn try_full(shape: &[usize], val: f32) -> Result<Self> {
+        try_filled(shape, val)
     }
 
     /// Fills a tensor with i.i.d. normal samples.
@@ -103,10 +119,16 @@ impl Tensor {
     /// Panics if the shape product or stride arithmetic overflows `usize`.
     /// See [`Tensor::from_vec`] for the pre-1.0 compatibility policy.
     pub fn randn(shape: &[usize], mean: f32, std: f32) -> Self {
+        unwrap_compat(Self::try_randn(shape, mean, std), "Tensor::randn")
+    }
+
+    /// Fallible [`Tensor::randn`]: fails on shape/stride overflow before
+    /// allocating.
+    pub fn try_randn(shape: &[usize], mean: f32, std: f32) -> Result<Self> {
         use rand::RngExt;
-        let numel = unwrap_compat(checked_numel(shape), "Tensor::randn");
-        unwrap_compat(check_f32_alloc(numel, shape), "Tensor::randn");
-        let _strides = unwrap_compat(try_compute_strides(shape), "Tensor::randn");
+        let numel = checked_numel(shape)?;
+        check_f32_alloc(numel, shape)?;
+        let _strides = try_compute_strides(shape)?;
         let mut rng = rand::rng();
         let data: Vec<f32> = (0..numel)
             .map(|_| {
@@ -117,7 +139,7 @@ impl Tensor {
                 mean + std * z
             })
             .collect();
-        Self::from_vec(data, shape)
+        Self::try_from_vec(data, shape)
     }
 
     // ── Accessors ────────────────────────────────────────────────────
@@ -189,6 +211,7 @@ impl Tensor {
     /// Fallible transpose: returns [`CortexError::RankMismatch`] unless
     /// `self` is rank-2.
     pub fn try_transpose(&self) -> Result<Self> {
+        self.check_storage()?;
         if self.ndim() != 2 {
             return Err(CortexError::RankMismatch {
                 expected: 2,
@@ -393,6 +416,7 @@ impl Tensor {
     /// `self` is rank-2 and [`CortexError::IndexOutOfBounds`] when
     /// `idx >= shape[0]`.
     pub fn try_row(&self, idx: usize) -> Result<Self> {
+        self.check_storage()?;
         if self.ndim() != 2 {
             return Err(CortexError::RankMismatch {
                 expected: 2,
@@ -409,6 +433,22 @@ impl Tensor {
         }
         let start = idx * cols;
         Self::try_from_vec(self.data[start..start + cols].to_vec(), &[cols])
+    }
+
+    /// Rejects tensors whose stored `data` length disagrees with `shape`.
+    ///
+    /// `Tensor` derives `Deserialize` without invariant validation, so a
+    /// malformed serialized value can reach methods that index `data`
+    /// directly. Fallible methods that slice call this first.
+    fn check_storage(&self) -> Result<()> {
+        let expected = checked_numel(&self.shape).unwrap_or(usize::MAX);
+        if self.data.len() != expected {
+            return Err(CortexError::ShapeMismatch {
+                expected: self.shape.clone(),
+                got: vec![self.data.len()],
+            });
+        }
+        Ok(())
     }
 }
 
@@ -612,6 +652,22 @@ mod tests {
                 expected: 2,
                 got: 1
             }
+        ));
+    }
+
+    #[test]
+    fn corrupted_storage_is_rejected_not_sliced() {
+        // Deserialize skips invariant validation: shape [2,2] with one
+        // element must not reach direct indexing in try_row/try_transpose.
+        let json = r#"{"data":[1.0],"shape":[2,2],"strides":[2,1]}"#;
+        let t: Tensor = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            t.try_row(0),
+            Err(CortexError::ShapeMismatch { .. })
+        ));
+        assert!(matches!(
+            t.try_transpose(),
+            Err(CortexError::ShapeMismatch { .. })
         ));
     }
 

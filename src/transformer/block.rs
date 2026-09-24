@@ -16,14 +16,24 @@ pub struct FeedForward {
 }
 
 impl FeedForward {
+    /// # Panics
+    ///
+    /// Panics if a shape allocation overflows. Prefer
+    /// [`FeedForward::try_new`].
     pub fn new(dim: usize, ff_dim: usize) -> Self {
+        unwrap_compat(Self::try_new(dim, ff_dim), "FeedForward::new")
+    }
+
+    /// Fallible constructor: fails on shape/allocation overflow instead of
+    /// panicking.
+    pub fn try_new(dim: usize, ff_dim: usize) -> Result<Self> {
         let scale = 1.0 / (dim as f32).sqrt();
-        Self {
-            w1: Tensor::randn(&[dim, ff_dim], 0.0, scale),
-            b1: Tensor::zeros(&[1, ff_dim]),
-            w2: Tensor::randn(&[ff_dim, dim], 0.0, scale),
-            b2: Tensor::zeros(&[1, dim]),
-        }
+        Ok(Self {
+            w1: Tensor::try_randn(&[dim, ff_dim], 0.0, scale)?,
+            b1: Tensor::try_zeros(&[1, ff_dim])?,
+            w2: Tensor::try_randn(&[ff_dim, dim], 0.0, scale)?,
+            b2: Tensor::try_zeros(&[1, dim])?,
+        })
     }
 
     /// # Panics
@@ -44,11 +54,11 @@ impl FeedForward {
         }
         let seq_len = x.shape()[0];
         // x @ w1 + b1
-        let h = try_matmul(x, &self.w1)?.try_add(&broadcast_row(&self.b1, seq_len))?;
+        let h = try_matmul(x, &self.w1)?.try_add(&broadcast_row(&self.b1, seq_len)?)?;
         // GELU activation
         let h = h.gelu();
         // h @ w2 + b2
-        try_matmul(&h, &self.w2)?.try_add(&broadcast_row(&self.b2, seq_len))
+        try_matmul(&h, &self.w2)?.try_add(&broadcast_row(&self.b2, seq_len)?)
     }
 
     pub fn param_count(&self) -> usize {
@@ -85,11 +95,11 @@ impl TransformerBlock {
     pub fn try_new(dim: usize, num_heads: usize, ff_dim: usize) -> Result<Self> {
         Ok(Self {
             attn: MultiHeadAttention::try_new(dim, num_heads)?,
-            ffn: FeedForward::new(dim, ff_dim),
-            ln1_w: Tensor::ones(&[dim]),
-            ln1_b: Tensor::zeros(&[dim]),
-            ln2_w: Tensor::ones(&[dim]),
-            ln2_b: Tensor::zeros(&[dim]),
+            ffn: FeedForward::try_new(dim, ff_dim)?,
+            ln1_w: Tensor::try_ones(&[dim])?,
+            ln1_b: Tensor::try_zeros(&[dim])?,
+            ln2_w: Tensor::try_ones(&[dim])?,
+            ln2_b: Tensor::try_zeros(&[dim])?,
             dim,
         })
     }
@@ -125,14 +135,19 @@ impl TransformerBlock {
     }
 }
 
-fn broadcast_row(bias: &Tensor, rows: usize) -> Tensor {
+fn broadcast_row(bias: &Tensor, rows: usize) -> Result<Tensor> {
     let cols = bias.numel();
+    let out_len = rows
+        .checked_mul(cols)
+        .ok_or_else(|| CortexError::SizeOverflow {
+            shape: vec![rows, cols],
+        })?;
     let bd = bias.data();
-    let mut out = vec![0.0f32; rows * cols];
+    let mut out = vec![0.0f32; out_len];
     for r in 0..rows {
         out[r * cols..(r + 1) * cols].copy_from_slice(bd);
     }
-    Tensor::from_vec(out, &[rows, cols])
+    Tensor::try_from_vec(out, &[rows, cols])
 }
 
 #[cfg(test)]

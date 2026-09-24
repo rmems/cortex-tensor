@@ -80,20 +80,31 @@ impl TransformerLM {
     }
 
     /// Fallible constructor: returns [`CortexError::InvalidConfig`] when
-    /// `cfg.num_heads` is zero or does not evenly divide `cfg.dim`.
+    /// `cfg.num_heads` is zero or does not evenly divide `cfg.dim`, and
+    /// [`CortexError::SizeOverflow`] when a configured shape is not
+    /// representable.
     pub fn try_new(cfg: TransformerConfig) -> Result<Self> {
+        // Validate the head config up front: with num_layers == 0 the block
+        // iterator below never runs, so per-block validation alone would
+        // accept invalid configs.
+        if cfg.num_heads == 0 || !cfg.dim.is_multiple_of(cfg.num_heads) {
+            return Err(CortexError::InvalidConfig(format!(
+                "TransformerLM: num_heads ({}) must be nonzero and divide dim ({})",
+                cfg.num_heads, cfg.dim
+            )));
+        }
         let scale = 0.02;
         let blocks: Vec<TransformerBlock> = (0..cfg.num_layers)
             .map(|_| TransformerBlock::try_new(cfg.dim, cfg.num_heads, cfg.ff_dim))
             .collect::<Result<_>>()?;
 
         Ok(Self {
-            tok_embed: Tensor::randn(&[cfg.vocab_size, cfg.dim], 0.0, scale),
-            pos_embed: Tensor::randn(&[cfg.max_seq_len, cfg.dim], 0.0, scale),
+            tok_embed: Tensor::try_randn(&[cfg.vocab_size, cfg.dim], 0.0, scale)?,
+            pos_embed: Tensor::try_randn(&[cfg.max_seq_len, cfg.dim], 0.0, scale)?,
             blocks,
-            final_ln_w: Tensor::ones(&[cfg.dim]),
-            final_ln_b: Tensor::zeros(&[cfg.dim]),
-            lm_head: Tensor::randn(&[cfg.dim, cfg.vocab_size], 0.0, scale),
+            final_ln_w: Tensor::try_ones(&[cfg.dim])?,
+            final_ln_b: Tensor::try_zeros(&[cfg.dim])?,
+            lm_head: Tensor::try_randn(&[cfg.dim, cfg.vocab_size], 0.0, scale)?,
             config: cfg,
         })
     }
@@ -146,9 +157,16 @@ impl TransformerLM {
             });
         }
 
-        // Token + positional embeddings
+        // Token + positional embeddings. `try_from` guards the u32
+        // truncation a literal `as` cast would silently allow.
         let tok = try_embedding(&self.tok_embed, token_ids)?;
-        let pos_ids: Vec<u32> = (0..seq_len as u32).collect();
+        let pos_ids: Vec<u32> = (0..seq_len)
+            .map(u32::try_from)
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|_| CortexError::InputLengthMismatch {
+                expected: u32::MAX as usize,
+                got: seq_len,
+            })?;
         let pos = try_embedding(&self.pos_embed, &pos_ids)?;
         let mut x = tok.try_add(&pos)?;
 
@@ -239,6 +257,32 @@ mod tests {
         assert!(matches!(
             TransformerLM::try_new(cfg),
             Err(CortexError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn try_new_validates_heads_even_with_zero_layers() {
+        let mut cfg = micro_cfg();
+        cfg.num_layers = 0;
+        cfg.num_heads = 0;
+        assert!(matches!(
+            TransformerLM::try_new(cfg.clone()),
+            Err(CortexError::InvalidConfig(_))
+        ));
+        cfg.num_heads = 3;
+        assert!(matches!(
+            TransformerLM::try_new(cfg),
+            Err(CortexError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn try_new_rejects_unrepresentable_shapes() {
+        let mut cfg = micro_cfg();
+        cfg.vocab_size = usize::MAX;
+        assert!(matches!(
+            TransformerLM::try_new(cfg),
+            Err(CortexError::SizeOverflow { .. })
         ));
     }
 }
