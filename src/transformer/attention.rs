@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use super::expect_shape;
 use crate::error::{CortexError, Result, unwrap_compat};
 use crate::tensor::Tensor;
 use crate::tensor::finite::softmax_row;
 use crate::tensor::ops::{try_batched_matmul, try_causal_mask, try_matmul};
-use serde::{Deserialize, Serialize};
 
 /// Multi-head self-attention (replaces candle-nn attention layers).
 ///
 /// Implements scaled dot-product attention with causal masking.
 /// Weights are stored as dense matrices; no external framework needed.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct MultiHeadAttention {
     pub num_heads: usize,
     pub head_dim: usize,
@@ -26,7 +26,41 @@ pub struct MultiHeadAttention {
     pub wb_o: Tensor,
 }
 
+reference_serde!(
+    MultiHeadAttention,
+    AttentionWire {
+        num_heads: usize,
+        head_dim: usize,
+        dim: usize,
+        wq: Tensor,
+        wb_q: Tensor,
+        wk: Tensor,
+        wb_k: Tensor,
+        wv: Tensor,
+        wb_v: Tensor,
+        wo: Tensor,
+        wb_o: Tensor,
+    }
+);
+
 impl MultiHeadAttention {
+    pub(super) fn validate_wire(&self) -> Result<()> {
+        if self.dim == 0
+            || self.num_heads == 0
+            || self.num_heads.checked_mul(self.head_dim) != Some(self.dim)
+        {
+            return Err(CortexError::InvalidConfig(
+                "attention head dimensions disagree".into(),
+            ));
+        }
+        for weight in [&self.wq, &self.wk, &self.wv, &self.wo] {
+            expect_shape(weight, &[self.dim, self.dim])?;
+        }
+        for bias in [&self.wb_q, &self.wb_k, &self.wb_v, &self.wb_o] {
+            expect_shape(bias, &[1, self.dim])?;
+        }
+        Ok(())
+    }
     /// # Panics
     ///
     /// Panics if `num_heads` is zero or does not divide `dim`. Prefer
