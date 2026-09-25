@@ -74,8 +74,11 @@ fn spiking_router(backend: MockBackend) -> SpikingMoeRouter<MockBackend> {
 #[test]
 fn rate_encoder_tiles_signal_across_channels() {
     let mut enc = RateEncoder { gain: 2.0 };
-    assert_eq!(enc.encode(&[0.5, -1.0], 5), vec![1.0, -2.0, 1.0, -2.0, 1.0]);
-    assert_eq!(enc.encode(&[], 3), vec![0.0; 3]);
+    assert_eq!(
+        enc.encode(&[0.5, -1.0], 5).unwrap(),
+        vec![1.0, -2.0, 1.0, -2.0, 1.0]
+    );
+    assert_eq!(enc.encode(&[], 3).unwrap(), vec![0.0; 3]);
 }
 
 #[test]
@@ -178,9 +181,36 @@ fn axon_encoder_adapter_counts_spikes_per_channel() {
     let enc = axon_encoder::prelude::RateEncoder::try_new(0.0, 100.0, (0.0, 1.0), 0.1).unwrap();
     let mut adapter = AxonEncoder::new(enc);
     // 100 Hz * 0.1 s = 10 spikes on channel 0 for input 1.0; input 0.0 stays silent.
-    let stimulus = adapter.encode(&[1.0, 0.0], 8);
+    let stimulus = adapter.encode(&[1.0, 0.0], 8).unwrap();
     assert_eq!(stimulus[0], 10.0);
     assert!(stimulus[1..].iter().all(|&v| v == 0.0));
+}
+
+#[cfg(feature = "axon-encoder")]
+#[test]
+fn axon_encoder_rejects_spikes_outside_channel_space() {
+    let enc = axon_encoder::prelude::RateEncoder::try_new(0.0, 100.0, (0.0, 1.0), 0.1).unwrap();
+    let mut adapter = AxonEncoder::new(enc);
+    // 8 input channels of spikes cannot be represented in a 4-channel stimulus.
+    assert!(matches!(
+        adapter.encode(&[1.0; 8], 4),
+        Err(HybridError::SnnSpikeOutOfRange {
+            channel: 4,
+            channels: 4
+        })
+    ));
+}
+
+#[cfg(feature = "axon-encoder")]
+#[test]
+fn axon_encoder_streams_phase_across_calls() {
+    // 5 Hz * 0.1 s = 0.5 expected spikes per step: the first call accumulates
+    // phase and emits nothing; the second emits the deferred spike — encoder
+    // state advances per call (documented streaming contract, not atomic).
+    let enc = axon_encoder::prelude::RateEncoder::try_new(5.0, 5.0, (0.0, 1.0), 0.1).unwrap();
+    let mut adapter = AxonEncoder::new(enc);
+    assert_eq!(adapter.encode(&[1.0], 1).unwrap()[0], 0.0);
+    assert_eq!(adapter.encode(&[1.0], 1).unwrap()[0], 1.0);
 }
 
 #[cfg(feature = "axon-encoder")]

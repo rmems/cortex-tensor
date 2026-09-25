@@ -14,6 +14,7 @@
 //! matters (rates, timing, plasticity dynamics).
 
 use super::SnnEncoder;
+use crate::error::{CortexError, Result};
 use axon_encoder::Encoder;
 
 /// [`SnnEncoder`] over any `axon_encoder::Encoder` implementation.
@@ -24,8 +25,12 @@ use axon_encoder::Encoder;
 ///
 /// Streaming is the contract: `SnnEncoder::encode` delegates to
 /// [`Encoder::encode_step`], so one forward pass advances the encoder's
-/// internal phase/state by exactly one tick. `reset` on the wrapped encoder
-/// is reachable through [`AxonEncoder::encoder_mut`].
+/// internal phase/state by exactly one tick. That advancement is NOT
+/// failure-atomic: encoder state moves even if a later stage rejects the
+/// forward (NaN stimulus, backend step error). `reset` on the wrapped
+/// encoder — via [`AxonEncoder::encoder_mut`] or
+/// [`SpikingMoeRouter::encoder_mut`](crate::snn::SpikingMoeRouter::encoder_mut)
+/// — restores a clean epoch.
 pub struct AxonEncoder<E> {
     encoder: E,
 }
@@ -50,15 +55,19 @@ impl<E> SnnEncoder for AxonEncoder<E>
 where
     E: Encoder,
 {
-    fn encode(&mut self, ann_signal: &[f32], channels: usize) -> Vec<f32> {
+    fn encode(&mut self, ann_signal: &[f32], channels: usize) -> Result<Vec<f32>> {
         let mut stimulus = vec![0.0f32; channels];
         let output = self.encoder.encode_step(ann_signal);
         for spike in &output.spikes {
             let idx = usize::from(spike.channel);
-            if idx < channels {
-                stimulus[idx] += if spike.polarity { 1.0 } else { -1.0 };
+            if idx >= channels {
+                return Err(CortexError::SnnSpikeOutOfRange {
+                    channel: idx,
+                    channels,
+                });
             }
+            stimulus[idx] += if spike.polarity { 1.0 } else { -1.0 };
         }
-        stimulus
+        Ok(stimulus)
     }
 }

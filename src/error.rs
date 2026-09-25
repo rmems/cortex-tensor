@@ -82,6 +82,10 @@ pub enum CortexError {
     #[error("NaN in SNN {stage}")]
     SnnNan { stage: &'static str },
 
+    /// A spike addressed a channel the backend width cannot represent.
+    #[error("SNN encoder emitted spike at channel {channel}, outside backend width {channels}")]
+    SnnSpikeOutOfRange { channel: usize, channels: usize },
+
     /// NaN is rejected before ranking so it never participates in `partial_cmp`.
     #[error("NaN routing score at expert {expert_id}")]
     NanRoutingScore { expert_id: usize },
