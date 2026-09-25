@@ -63,7 +63,9 @@ pub struct SnnStepOutput {
 /// state unmodified, so callers can fail closed on NaN/length errors before a
 /// tick is consumed.
 pub trait SnnBackend {
-    /// Number of stimulus channels `step` expects.
+    /// Stimulus width `step` expects — and the spike-index space of
+    /// [`SnnStepOutput::spikes`] (`0..channels`). Backends whose output
+    /// width differs must map or reject at construction.
     fn channels(&self) -> usize;
 
     /// Advance one tick with learning-enabled dynamics.

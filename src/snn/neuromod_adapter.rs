@@ -27,19 +27,37 @@ pub struct NeuromodNetwork {
 impl NeuromodNetwork {
     /// Build a network of `num_lif` LIF and `num_izh` Izhikevich neurons over
     /// `num_channels` stimulus channels.
-    pub fn new(num_lif: usize, num_izh: usize, num_channels: usize) -> Self {
-        Self {
-            network: SpikingNetwork::with_dimensions(num_lif, num_izh, num_channels),
-            modulators: NeuroModulators::default(),
-        }
+    ///
+    /// The `SnnBackend` contract uses `channels()` as both the stimulus width
+    /// and the spike-output width, so the neuron count must equal the channel
+    /// count — spike indices would otherwise silently drop or leave channels
+    /// unread.
+    pub fn new(num_lif: usize, num_izh: usize, num_channels: usize) -> Result<Self> {
+        Self::checked(SpikingNetwork::with_dimensions(
+            num_lif,
+            num_izh,
+            num_channels,
+        ))
     }
 
     /// Wrap an already-configured `SpikingNetwork` (e.g. a restored checkpoint).
-    pub fn from_network(network: SpikingNetwork) -> Self {
-        Self {
+    /// Same 1:1 neuron-to-channel requirement as [`Self::new`].
+    pub fn from_network(network: SpikingNetwork) -> Result<Self> {
+        Self::checked(network)
+    }
+
+    fn checked(network: SpikingNetwork) -> Result<Self> {
+        let neurons = network.neurons.len() + network.iz_neurons.len();
+        if neurons != network.num_channels {
+            return Err(CortexError::InvalidConfig(format!(
+                "neuromod SpikingNetwork has {neurons} neurons but {} channels; the SnnBackend contract requires equal widths",
+                network.num_channels
+            )));
+        }
+        Ok(Self {
             network,
             modulators: NeuroModulators::default(),
-        }
+        })
     }
 
     pub fn network(&self) -> &SpikingNetwork {

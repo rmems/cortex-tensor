@@ -175,7 +175,7 @@ fn spiking_forward_rejects_wrong_embedding_length() {
 #[cfg(feature = "neuromod")]
 #[test]
 fn neuromod_adapter_steps_and_reports_capabilities() {
-    let mut net = NeuromodNetwork::new(4, 1, 8);
+    let mut net = NeuromodNetwork::new(7, 1, 8).unwrap();
     assert_eq!(net.channels(), 8);
     let caps = net.capabilities();
     assert_eq!(caps.backend_name, "neuromod::SpikingNetwork");
@@ -183,7 +183,7 @@ fn neuromod_adapter_steps_and_reports_capabilities() {
     assert!(!caps.frozen_evaluation && caps.plasticity && caps.caller_rng && caps.neuromodulation);
 
     let out = net.step(&[0.5; 8]).unwrap();
-    assert!(out.spikes.iter().all(|&i| i < 4));
+    assert!(out.spikes.iter().all(|&i| i < 8));
     let _ = net.step_frozen(&[0.5; 8]).unwrap();
     net.reset();
     assert_eq!(net.network().global_step, 0);
@@ -191,4 +191,10 @@ fn neuromod_adapter_steps_and_reports_capabilities() {
     // Length validation is failure-atomic via neuromod's preflight.
     assert!(net.step(&[0.5; 4]).is_err());
     assert_eq!(net.network().global_step, 0);
+
+    // Neuron count must equal channel count for the 1:1 output contract.
+    assert!(matches!(
+        NeuromodNetwork::new(4, 1, 8),
+        Err(CortexError::InvalidConfig(_))
+    ));
 }
