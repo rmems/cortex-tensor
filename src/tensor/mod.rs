@@ -4,6 +4,7 @@ pub mod finite;
 pub mod ops;
 
 use crate::error::{CortexError, Result, unwrap_compat};
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use std::alloc::Layout;
 use std::fmt;
@@ -42,14 +43,62 @@ use std::fmt;
 ///
 /// # Serialization
 ///
-/// Serialized tensors carry only `data` and `shape`. A legacy `strides` field
-/// from an earlier layout is ignored on deserialize, so older JSON still loads.
-/// `Deserialize` does not re-validate invariants; fallible methods that index
-/// storage call [`Self::check_storage`] first.
-#[derive(Clone, Serialize, Deserialize)]
+/// JSON is a versioned fixture format for this CPU reference backend, not a
+/// universal tensor interchange format. Version 1 carries `schema_version`,
+/// `data`, and `shape`; unknown fields, including legacy `strides`, are rejected.
+/// Non-finite values cannot be serialized to JSON. Deserialization checks the
+/// shape and row-major stride arithmetic through [`Self::try_from_vec`]. Use
+/// [`crate::reference_json::from_slice_with_limit`] for untrusted input.
+#[derive(Clone)]
 pub struct Tensor {
     data: Vec<f32>,
     shape: Vec<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TensorWire {
+    schema_version: u32,
+    data: Vec<f32>,
+    shape: Vec<usize>,
+}
+
+impl Serialize for Tensor {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.check_storage().map_err(serde::ser::Error::custom)?;
+        if self.data.iter().any(|value| !value.is_finite()) {
+            return Err(serde::ser::Error::custom(
+                "non-finite tensor data cannot be serialized",
+            ));
+        }
+        let mut wire = serializer.serialize_struct("Tensor", 3)?;
+        wire.serialize_field("schema_version", &1u32)?;
+        wire.serialize_field("data", &self.data)?;
+        wire.serialize_field("shape", &self.shape)?;
+        wire.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Tensor {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire: TensorWire = crate::reference_json::deserialize_object(deserializer)?;
+        if wire.schema_version != 1 {
+            return Err(serde::de::Error::custom(format!(
+                "unsupported Tensor schema_version {}",
+                wire.schema_version
+            )));
+        }
+        if wire.data.iter().any(|value| !value.is_finite()) {
+            return Err(serde::de::Error::custom("non-finite tensor data"));
+        }
+        Self::try_from_vec(wire.data, &wire.shape).map_err(serde::de::Error::custom)
+    }
 }
 
 impl Tensor {
@@ -535,9 +584,8 @@ impl Tensor {
 
     /// Rejects tensors whose stored `data` length disagrees with `shape`.
     ///
-    /// `Tensor` derives `Deserialize` without invariant validation, so a
-    /// malformed serialized value can reach methods that index `data`
-    /// directly. Fallible methods that slice call this first.
+    /// Deserialization validates this invariant; fallible methods that slice
+    /// retain the check as a guard against internal corruption.
     pub(crate) fn check_storage(&self) -> Result<()> {
         let expected = checked_numel(&self.shape).unwrap_or(usize::MAX);
         if self.data.len() != expected {
@@ -780,14 +828,9 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_ignores_legacy_strides_field() {
-        // Tensors serialized before the strides field was removed still load;
-        // the field is simply ignored and strides are recomputed on demand.
+    fn deserialize_rejects_legacy_strides_field() {
         let json = r#"{"data":[1.0,2.0,3.0,4.0,5.0,6.0],"shape":[2,3],"strides":[3,1]}"#;
-        let t: Tensor = serde_json::from_str(json).unwrap();
-        assert_eq!(t.shape(), &[2, 3]);
-        assert_eq!(t.data(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        assert_eq!(t.row_major_strides(), &[3, 1]);
+        assert!(serde_json::from_str::<Tensor>(json).is_err());
     }
 
     #[test]
@@ -851,20 +894,9 @@ mod tests {
     }
 
     #[test]
-    fn corrupted_storage_is_rejected_not_sliced() {
-        // Deserialize skips invariant validation: shape [2,2] with one
-        // element must not reach direct indexing in try_row/try_transpose.
-        // The legacy "strides" field is accepted and ignored (back-compat).
-        let json = r#"{"data":[1.0],"shape":[2,2],"strides":[2,1]}"#;
-        let t: Tensor = serde_json::from_str(json).unwrap();
-        assert!(matches!(
-            t.try_row(0),
-            Err(CortexError::ShapeMismatch { .. })
-        ));
-        assert!(matches!(
-            t.try_transpose(),
-            Err(CortexError::ShapeMismatch { .. })
-        ));
+    fn corrupted_storage_is_rejected_on_deserialize() {
+        let json = r#"{"schema_version":1,"data":[1.0],"shape":[2,2]}"#;
+        assert!(serde_json::from_str::<Tensor>(json).is_err());
     }
 
     #[test]

@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::block::TransformerBlock;
+use super::expect_shape;
 use crate::error::{CortexError, Result, unwrap_compat};
 use crate::tensor::Tensor;
 use crate::tensor::ops::{try_embedding, try_layer_norm, try_matmul};
-use serde::{Deserialize, Serialize};
 
 /// Configuration for a decoder-only transformer LM.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct TransformerConfig {
     pub vocab_size: usize,
     pub dim: usize,
@@ -17,7 +17,32 @@ pub struct TransformerConfig {
     pub max_seq_len: usize,
 }
 
+reference_serde!(
+    TransformerConfig,
+    ConfigWire {
+        vocab_size: usize,
+        dim: usize,
+        num_heads: usize,
+        num_layers: usize,
+        ff_dim: usize,
+        max_seq_len: usize,
+    }
+);
+
 impl TransformerConfig {
+    fn validate_wire(&self) -> Result<()> {
+        if self.dim == 0 || self.num_heads == 0 || !self.dim.is_multiple_of(self.num_heads) {
+            return Err(CortexError::InvalidConfig(
+                "invalid transformer head configuration".into(),
+            ));
+        }
+        if self.vocab_size == 0 || self.ff_dim == 0 || self.max_seq_len == 0 {
+            return Err(CortexError::InvalidConfig(
+                "vocab_size, ff_dim, and max_seq_len must be nonzero".into(),
+            ));
+        }
+        Ok(())
+    }
     /// A small config for testing (~2M params).
     pub fn tiny() -> Self {
         Self {
@@ -59,7 +84,7 @@ impl TransformerConfig {
 /// Decoder-only transformer language model — candle-free.
 ///
 /// Architecture: token embedding + positional embedding → N × TransformerBlock → LayerNorm → LM head
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct TransformerLM {
     pub config: TransformerConfig,
     pub tok_embed: Tensor, // [vocab_size, dim]
@@ -70,7 +95,39 @@ pub struct TransformerLM {
     pub lm_head: Tensor,    // [dim, vocab_size]
 }
 
+reference_serde!(TransformerLM, ModelWire {
+    config: TransformerConfig, tok_embed: Tensor, pos_embed: Tensor,
+    blocks: Vec<TransformerBlock>, final_ln_w: Tensor, final_ln_b: Tensor,
+    lm_head: Tensor,
+});
+
 impl TransformerLM {
+    fn validate_wire(&self) -> Result<()> {
+        let cfg = &self.config;
+        cfg.validate_wire()?;
+        expect_shape(&self.tok_embed, &[cfg.vocab_size, cfg.dim])?;
+        expect_shape(&self.pos_embed, &[cfg.max_seq_len, cfg.dim])?;
+        expect_shape(&self.final_ln_w, &[cfg.dim])?;
+        expect_shape(&self.final_ln_b, &[cfg.dim])?;
+        expect_shape(&self.lm_head, &[cfg.dim, cfg.vocab_size])?;
+        if self.blocks.len() != cfg.num_layers {
+            return Err(CortexError::InvalidConfig(
+                "block count disagrees with num_layers".into(),
+            ));
+        }
+        for block in &self.blocks {
+            block.validate_wire()?;
+            if block.dim != cfg.dim
+                || block.attn.num_heads != cfg.num_heads
+                || block.ffn.w1.shape() != [cfg.dim, cfg.ff_dim]
+            {
+                return Err(CortexError::InvalidConfig(
+                    "block weights disagree with model configuration".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
     /// # Panics
     ///
     /// Panics if `num_heads` is invalid for `dim` or a shape allocation
@@ -80,7 +137,7 @@ impl TransformerLM {
     }
 
     /// Fallible constructor: returns [`CortexError::InvalidConfig`] when
-    /// `cfg.num_heads` is zero or does not evenly divide `cfg.dim`, and
+    /// any model extent is zero or `cfg.num_heads` does not divide `cfg.dim`, and
     /// [`CortexError::SizeOverflow`] when a configured shape is not
     /// representable.
     pub fn try_new(cfg: TransformerConfig) -> Result<Self> {
@@ -93,6 +150,7 @@ impl TransformerLM {
                 cfg.dim, cfg.num_heads
             )));
         }
+        cfg.validate_wire()?;
         let scale = 0.02;
         let blocks: Vec<TransformerBlock> = (0..cfg.num_layers)
             .map(|_| TransformerBlock::try_new(cfg.dim, cfg.num_heads, cfg.ff_dim))
