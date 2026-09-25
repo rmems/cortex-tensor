@@ -101,6 +101,11 @@ pub trait SnnEncoder {
     /// when the encoding cannot be represented in `channels` (e.g. spikes
     /// outside the channel space).
     fn encode(&mut self, ann_signal: &[f32], channels: usize) -> Result<Vec<f32>>;
+
+    /// Restore the encoder's streaming state (phase/window) to a clean epoch.
+    /// Called by [`SpikingMoeRouter::reset`] alongside the backend reset.
+    /// Stateless encoders use the no-op default.
+    fn reset(&mut self) {}
 }
 
 /// SNN → ANN boundary: map one step of spikes into per-channel f32 readouts.
@@ -278,8 +283,9 @@ where
         self.forward_impl(embedding, true)
     }
 
-    /// Reset the backend epoch; router (ANN) state is untouched.
+    /// Reset the backend and encoder epochs; router (ANN) state is untouched.
     pub fn reset(&mut self) {
+        self.encoder.reset();
         self.backend.reset();
     }
 

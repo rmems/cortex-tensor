@@ -27,10 +27,9 @@ use axon_encoder::Encoder;
 /// [`Encoder::encode_step`], so one forward pass advances the encoder's
 /// internal phase/state by exactly one tick. That advancement is NOT
 /// failure-atomic: encoder state moves even if a later stage rejects the
-/// forward (NaN stimulus, backend step error). `reset` on the wrapped
-/// encoder — via [`AxonEncoder::encoder_mut`] or
-/// [`SpikingMoeRouter::encoder_mut`](crate::snn::SpikingMoeRouter::encoder_mut)
-/// — restores a clean epoch.
+/// forward (NaN stimulus, backend step error). [`SnnEncoder::reset`]
+/// delegates to the wrapped encoder's `reset` and is called automatically
+/// by `SpikingMoeRouter::reset` to restore a clean epoch.
 pub struct AxonEncoder<E> {
     encoder: E,
 }
@@ -69,5 +68,9 @@ where
             stimulus[idx] += if spike.polarity { 1.0 } else { -1.0 };
         }
         Ok(stimulus)
+    }
+
+    fn reset(&mut self) {
+        self.encoder.reset();
     }
 }

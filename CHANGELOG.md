@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Breaking:** `RoutingMode::default()` is now `DenseSim` (was `SpikingSim`) (RM-1824).
-- **Breaking:** `SnnEncoder::encode` takes `&mut self` and returns `Result<Vec<f32>>` (real encoders are stateful — one call is one backend tick, not failure-atomic — and encodings that cannot fit the channel space error instead of silently truncating).
+- **Breaking:** `SnnEncoder::encode` takes `&mut self` and returns `Result<Vec<f32>>` (real encoders are stateful — one call is one backend tick, not failure-atomic — and encodings that cannot fit the channel space error instead of silently truncating). `SnnEncoder::reset` (no-op default; `AxonEncoder` delegates to `Encoder::reset`) is invoked by `SpikingMoeRouter::reset` so encoder and backend epochs reset together.
 
 ### Removed
 

@@ -211,6 +211,9 @@ fn axon_encoder_streams_phase_across_calls() {
     let mut adapter = AxonEncoder::new(enc);
     assert_eq!(adapter.encode(&[1.0], 1).unwrap()[0], 0.0);
     assert_eq!(adapter.encode(&[1.0], 1).unwrap()[0], 1.0);
+    SnnEncoder::reset(&mut adapter);
+    // Clean epoch: accumulated phase is gone, next call accumulates again.
+    assert_eq!(adapter.encode(&[1.0], 1).unwrap()[0], 0.0);
 }
 
 #[cfg(feature = "axon-encoder")]
