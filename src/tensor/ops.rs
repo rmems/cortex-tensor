@@ -372,34 +372,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn try_ops_reject_corrupted_deserialized_storage() {
-        // Deserialize skips invariant validation; ops that index `data`
-        // must reject a short buffer instead of panicking.
-        let bad: Tensor =
-            serde_json::from_str(r#"{"data":[1.0,2.0],"shape":[2,2],"strides":[2,1]}"#).unwrap();
-        let ok = Tensor::from_vec(vec![1.0; 4], &[2, 2]);
-        for (name, err) in [
-            ("matmul lhs", try_matmul(&bad, &ok).unwrap_err()),
-            ("matmul rhs", try_matmul(&ok, &bad).unwrap_err()),
-            ("batched", try_batched_matmul(&bad, &ok).unwrap_err()),
-            ("embedding", try_embedding(&bad, &[0]).unwrap_err()),
-            (
-                "layer_norm",
-                try_layer_norm(&bad, &Tensor::ones(&[2]), &Tensor::zeros(&[2]), 1e-5).unwrap_err(),
-            ),
-            (
-                "rms_norm",
-                try_rms_norm(&bad, &Tensor::ones(&[2]), 1e-5).unwrap_err(),
-            ),
-        ] {
-            assert!(
-                matches!(err, CortexError::ShapeMismatch { .. }),
-                "{name}: {err}"
-            );
-        }
-    }
-
-    #[test]
     fn test_matmul_2x2() {
         let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
         let b = Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]);

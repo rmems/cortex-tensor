@@ -60,6 +60,12 @@ src/
 | `ops::layer_norm` / `rms_norm` | Finite-value LayerNorm / RMSNorm (`try_*` for typed errors). |
 | `tensor::finite` | Policy docs and public constants (`SOFTMAX_SUM_TOLERANCE`, `L2_NORM_FLOOR`). |
 
+#### Reference JSON fixtures
+
+Serde JSON is a **versioned fixture format for this deterministic CPU reference backend**. It is not a tensor interchange format for Candle, Burn, hybrid-fusion, or other backends. Version 1 tensors use `{"schema_version":1,"data":[1.0,2.0],"shape":[2]}`. Strides are derived from the shape and are never stored. Tensor, attention, feed-forward, block, config, and LM values each carry `schema_version: 1`; unknown versions and fields are rejected. Deserialization checks tensor layout and transformer weight shapes. Serialization refuses NaN and infinity, so JSON never silently writes them as `null`; finite signed zero round-trips.
+
+Unversioned pre-1.0 JSON and the older `strides` field must be migrated explicitly before loading. This strict format is for reproducible reference tests and snapshots, not cross-backend persistence.
+
 ### `transformer`
 
 | Item | Purpose |

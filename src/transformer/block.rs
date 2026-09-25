@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::attention::MultiHeadAttention;
+use super::expect_shape;
 use crate::error::{CortexError, Result, unwrap_compat};
 use crate::tensor::Tensor;
 use crate::tensor::ops::{try_layer_norm, try_matmul};
-use serde::{Deserialize, Serialize};
 
 /// Feed-forward network (two linear layers with GELU activation).
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct FeedForward {
     pub w1: Tensor, // [dim, ff_dim]
     pub b1: Tensor, // [1, ff_dim]
@@ -15,7 +15,28 @@ pub struct FeedForward {
     pub b2: Tensor, // [1, dim]
 }
 
+reference_serde!(
+    FeedForward,
+    FeedForwardWire {
+        w1: Tensor,
+        b1: Tensor,
+        w2: Tensor,
+        b2: Tensor,
+    }
+);
+
 impl FeedForward {
+    pub(super) fn validate_wire(&self) -> Result<()> {
+        let [dim, ff_dim] = self.w1.shape() else {
+            return Err(CortexError::RankMismatch {
+                expected: 2,
+                got: self.w1.ndim(),
+            });
+        };
+        expect_shape(&self.b1, &[1, *ff_dim])?;
+        expect_shape(&self.w2, &[*ff_dim, *dim])?;
+        expect_shape(&self.b2, &[1, *dim])
+    }
     /// # Panics
     ///
     /// Panics if a shape allocation overflows. Prefer
@@ -67,7 +88,7 @@ impl FeedForward {
 }
 
 /// Single transformer block: LayerNorm → Attention → Residual → LayerNorm → FFN → Residual
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct TransformerBlock {
     pub attn: MultiHeadAttention,
     pub ffn: FeedForward,
@@ -78,7 +99,34 @@ pub struct TransformerBlock {
     pub dim: usize,
 }
 
+reference_serde!(
+    TransformerBlock,
+    BlockWire {
+        attn: MultiHeadAttention,
+        ffn: FeedForward,
+        ln1_w: Tensor,
+        ln1_b: Tensor,
+        ln2_w: Tensor,
+        ln2_b: Tensor,
+        dim: usize,
+    }
+);
+
 impl TransformerBlock {
+    pub(super) fn validate_wire(&self) -> Result<()> {
+        if self.dim == 0 || self.attn.dim != self.dim {
+            return Err(CortexError::InvalidConfig(
+                "block and attention dimensions disagree".into(),
+            ));
+        }
+        self.attn.validate_wire()?;
+        self.ffn.validate_wire()?;
+        expect_shape(&self.ffn.w1, &[self.dim, self.ffn.w1.shape()[1]])?;
+        for norm in [&self.ln1_w, &self.ln1_b, &self.ln2_w, &self.ln2_b] {
+            expect_shape(norm, &[self.dim])?;
+        }
+        Ok(())
+    }
     /// # Panics
     ///
     /// Panics if `num_heads` is invalid for `dim`. Prefer
