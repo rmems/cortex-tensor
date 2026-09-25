@@ -73,7 +73,7 @@ fn spiking_router(backend: MockBackend) -> SpikingMoeRouter<MockBackend> {
 
 #[test]
 fn rate_encoder_tiles_signal_across_channels() {
-    let enc = RateEncoder { gain: 2.0 };
+    let mut enc = RateEncoder { gain: 2.0 };
     assert_eq!(enc.encode(&[0.5, -1.0], 5), vec![1.0, -2.0, 1.0, -2.0, 1.0]);
     assert_eq!(enc.encode(&[], 3), vec![0.0; 3]);
 }
@@ -170,6 +170,33 @@ fn spiking_forward_rejects_wrong_embedding_length() {
         model.forward(&[0.0; 8]).unwrap_err(),
         HybridError::InputLengthMismatch { .. }
     ));
+}
+
+#[cfg(feature = "axon-encoder")]
+#[test]
+fn axon_encoder_adapter_counts_spikes_per_channel() {
+    let enc = axon_encoder::prelude::RateEncoder::try_new(0.0, 100.0, (0.0, 1.0), 0.1).unwrap();
+    let mut adapter = AxonEncoder::new(enc);
+    // 100 Hz * 0.1 s = 10 spikes on channel 0 for input 1.0; input 0.0 stays silent.
+    let stimulus = adapter.encode(&[1.0, 0.0], 8);
+    assert_eq!(stimulus[0], 10.0);
+    assert!(stimulus[1..].iter().all(|&v| v == 0.0));
+}
+
+#[cfg(feature = "axon-encoder")]
+#[test]
+fn axon_encoder_adapter_drives_spiking_router() {
+    let enc = axon_encoder::prelude::RateEncoder::try_new(0.0, 100.0, (0.0, 1.0), 0.1).unwrap();
+    let router = MoeRouter::load_with_mode("", 8, 2, crate::moe::RoutingMode::DenseSim).unwrap();
+    let mut model = SpikingMoeRouter::new(
+        router,
+        MockBackend::new(8, 0.0),
+        AxonEncoder::new(enc),
+        SpikeCountDecoder,
+    )
+    .unwrap();
+    model.forward(&[1.0; EMBEDDING_DIM]).unwrap();
+    assert_eq!(model.backend().steps, 1);
 }
 
 #[cfg(feature = "neuromod")]

@@ -12,10 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `snn` module: backend-neutral ANN↔SNN execution/interchange contract (`SnnBackend`, `SnnEncoder`/`SnnDecoder`, `SnnStepOutput`, `SnnCapabilities`), default `RateEncoder`/`SpikeCountDecoder`, and `SpikingMoeRouter` composing `MoeRouter` gate scores with an external SNN backend (RM-1824).
 - Optional `neuromod` cargo feature adding `snn::NeuromodNetwork` — `neuromod::SpikingNetwork` behind `SnnBackend`. Frozen evaluation delegates to `step` until a neuromod release ships `step_frozen`; `capabilities().frozen_evaluation` reports `false` meanwhile.
 - `MoeRouter::top_k()` accessor and `CortexError::{SnnBackend, SnnChannelMismatch, SnnNan}` variants.
+- Optional `axon-encoder` cargo feature adding `snn::AxonEncoder<E: axon_encoder::Encoder>` — any axon-encoder encoder behind `snn::SnnEncoder`; spikes net to ±1.0 per channel per tick (RM-1824 follow-up).
 
 ### Changed
 
 - **Breaking:** `RoutingMode::default()` is now `DenseSim` (was `SpikingSim`) (RM-1824).
+- **Breaking:** `SnnEncoder::encode` takes `&mut self` (real encoders are stateful; one call is one backend tick).
 
 ### Removed
 

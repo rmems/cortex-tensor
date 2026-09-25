@@ -34,6 +34,12 @@ mod neuromod_adapter;
 #[cfg(feature = "neuromod")]
 pub use neuromod_adapter::NeuromodNetwork;
 
+#[cfg(feature = "axon-encoder")]
+mod axon_adapter;
+
+#[cfg(feature = "axon-encoder")]
+pub use axon_adapter::AxonEncoder;
+
 /// Capabilities a backend advertises to orchestrators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnnCapabilities {
@@ -85,9 +91,12 @@ pub trait SnnBackend {
 }
 
 /// ANN → SNN boundary: map an ANN-side f32 signal into backend stimuli.
+///
+/// `&mut self` because real encoders are stateful (phase accumulators,
+/// streaming windows); one `encode` call is one backend tick.
 pub trait SnnEncoder {
     /// Produce a stimulus vector of exactly `channels` length.
-    fn encode(&self, ann_signal: &[f32], channels: usize) -> Vec<f32>;
+    fn encode(&mut self, ann_signal: &[f32], channels: usize) -> Vec<f32>;
 }
 
 /// SNN → ANN boundary: map one step of spikes into per-channel f32 readouts.
@@ -112,7 +121,7 @@ impl Default for RateEncoder {
 }
 
 impl SnnEncoder for RateEncoder {
-    fn encode(&self, ann_signal: &[f32], channels: usize) -> Vec<f32> {
+    fn encode(&mut self, ann_signal: &[f32], channels: usize) -> Vec<f32> {
         let mut stimulus = vec![0.0f32; channels];
         if ann_signal.is_empty() {
             return stimulus;

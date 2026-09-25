@@ -38,9 +38,12 @@ jobs:
         cargo --version
 
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --verbose --all-features
 
-    - name: Run tests
+    - name: Run tests (all features)
+      run: cargo test --verbose --all-features
+
+    - name: Run tests (default features)
       run: cargo test --verbose
 
     # Codecov coverage using cargo-llvm-cov (separate codecov.yml per plan; modeled on corinth-canal)
