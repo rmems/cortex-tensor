@@ -1,7 +1,7 @@
-use cortex_tensor::Tensor;
 use cortex_tensor::transformer::{
     MultiHeadAttention, TransformerBlock, TransformerConfig, TransformerLM,
 };
+use cortex_tensor::{CortexError, Tensor, reference_json};
 use serde_json::json;
 
 fn config() -> TransformerConfig {
@@ -70,6 +70,28 @@ fn tensor_rejects_hostile_json() {
             "accepted {wire}"
         );
     }
+    assert!(serde_json::from_str::<Tensor>(r#"[1,[1.0],[1]]"#).is_err());
+}
+
+#[test]
+fn bounded_reference_loader_checks_bytes_before_parsing() {
+    let wire = br#"{"schema_version":1,"data":[1.0],"shape":[1]}"#;
+    let loaded: Tensor = reference_json::from_slice_with_limit(wire, wire.len()).unwrap();
+    assert_eq!(loaded.data(), &[1.0]);
+    assert!(matches!(
+        reference_json::from_slice_with_limit::<Tensor>(wire, wire.len() - 1),
+        Err(CortexError::SerdeInputTooLarge { .. })
+    ));
+    let malformed = br#"{"schema_version":1,"data":[1.0,2.0],"shape":[1]}"#;
+    assert!(matches!(
+        reference_json::from_slice_with_limit::<Tensor>(malformed, 10),
+        Err(CortexError::SerdeInputTooLarge { .. })
+    ));
+    let model = TransformerLM::try_new(config()).unwrap();
+    let model_wire = serde_json::to_vec(&model).unwrap();
+    let loaded: TransformerLM =
+        reference_json::from_slice_with_limit(&model_wire, model_wire.len()).unwrap();
+    assert_eq!(loaded.config.dim, 4);
 }
 
 #[test]
@@ -88,6 +110,7 @@ fn transformer_payloads_are_versioned_and_shape_checked() {
     let mut bad_config = config_wire.clone();
     bad_config["schema_version"] = json!(9);
     assert!(serde_json::from_value::<TransformerConfig>(bad_config).is_err());
+    assert!(serde_json::from_str::<TransformerConfig>("[1,5,4,2,1,6,3]").is_err());
 
     let model = TransformerLM::try_new(cfg).unwrap();
     let value = serde_json::to_value(&model).unwrap();

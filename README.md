@@ -64,6 +64,8 @@ src/
 
 Serde JSON is a **versioned fixture format for this deterministic CPU reference backend**. It is not a tensor interchange format for Candle, Burn, hybrid-fusion, or other backends. Version 1 tensors use `{"schema_version":1,"data":[1.0,2.0],"shape":[2]}`. Strides are derived from the shape and are never stored. Tensor, attention, feed-forward, block, config, and LM values each carry `schema_version: 1`; unknown versions and fields are rejected. Deserialization checks tensor layout and transformer weight shapes. Serialization refuses NaN and infinity, so JSON never silently writes them as `null`; finite signed zero round-trips.
 
+For untrusted JSON, use `reference_json::from_slice_with_limit::<Tensor>(&bytes, max_bytes)` (or the same call with `TransformerLM`) and choose a maximum for the complete input. The byte check runs before Serde allocates tensor data. Direct `serde_json::from_str` and `from_value` remain available for trusted fixtures but do not enforce an input-size limit. Versioned values must be JSON objects; positional arrays are rejected.
+
 Unversioned pre-1.0 JSON and the older `strides` field must be migrated explicitly before loading. This strict format is for reproducible reference tests and snapshots, not cross-backend persistence.
 
 ### `transformer`

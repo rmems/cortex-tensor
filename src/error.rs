@@ -81,6 +81,12 @@ pub enum CortexError {
     #[error("serde error: {0}")]
     Serde(#[from] serde_json::Error),
 
+    #[error("reference JSON input is {actual_bytes} bytes, exceeding the {max_bytes}-byte limit")]
+    SerdeInputTooLarge {
+        max_bytes: usize,
+        actual_bytes: usize,
+    },
+
     #[error("{0}")]
     Msg(String),
 }

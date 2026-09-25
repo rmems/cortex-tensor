@@ -47,7 +47,8 @@ use std::fmt;
 /// universal tensor interchange format. Version 1 carries `schema_version`,
 /// `data`, and `shape`; unknown fields, including legacy `strides`, are rejected.
 /// Non-finite values cannot be serialized to JSON. Deserialization checks the
-/// shape and row-major stride arithmetic through [`Self::try_from_vec`].
+/// shape and row-major stride arithmetic through [`Self::try_from_vec`]. Use
+/// [`crate::reference_json::from_slice_with_limit`] for untrusted input.
 #[derive(Clone)]
 pub struct Tensor {
     data: Vec<f32>,
@@ -86,7 +87,7 @@ impl<'de> Deserialize<'de> for Tensor {
     where
         D: serde::Deserializer<'de>,
     {
-        let wire = TensorWire::deserialize(deserializer)?;
+        let wire: TensorWire = crate::reference_json::deserialize_object(deserializer)?;
         if wire.schema_version != 1 {
             return Err(serde::de::Error::custom(format!(
                 "unsupported Tensor schema_version {}",

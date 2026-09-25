@@ -26,7 +26,7 @@ macro_rules! reference_serde {
         impl<'de> serde::Deserialize<'de> for $name {
             fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
             where D: serde::Deserializer<'de> {
-                let wire = <$wire as serde::Deserialize>::deserialize(deserializer)?;
+                let wire: $wire = crate::reference_json::deserialize_object(deserializer)?;
                 if wire.schema_version != 1 {
                     return Err(serde::de::Error::custom(format!("unsupported {} schema_version {}", stringify!($name), wire.schema_version)));
                 }

@@ -21,6 +21,7 @@
 
 pub mod error;
 pub mod moe;
+pub mod reference_json;
 pub mod tensor;
 pub mod transformer;
 pub mod types;
