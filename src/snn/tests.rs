@@ -68,7 +68,7 @@ impl SnnBackend for MockBackend {
 
 fn spiking_router(backend: MockBackend) -> SpikingMoeRouter<MockBackend> {
     let router = MoeRouter::load_with_mode("", 8, 2, crate::moe::RoutingMode::DenseSim).unwrap();
-    SpikingMoeRouter::new(router, backend, RateEncoder::default(), SpikeCountDecoder)
+    SpikingMoeRouter::new(router, backend, RateEncoder::default(), SpikeCountDecoder).unwrap()
 }
 
 #[test]
@@ -108,6 +108,41 @@ fn spiking_forward_rejects_nan_before_backend_step() {
     assert!(matches!(
         model.forward(&embedding).unwrap_err(),
         HybridError::NanRoutingScore { expert_id: 3 }
+    ));
+    // Fail-closed: no tick consumed.
+    assert_eq!(model.backend().steps, 0);
+}
+
+#[test]
+fn constructor_rejects_fewer_channels_than_experts() {
+    let router = MoeRouter::load_with_mode("", 8, 2, crate::moe::RoutingMode::DenseSim).unwrap();
+    assert!(matches!(
+        SpikingMoeRouter::new(
+            router,
+            MockBackend::new(4, 0.0),
+            RateEncoder::default(),
+            SpikeCountDecoder
+        ),
+        Err(HybridError::SnnChannelMismatch {
+            experts: 8,
+            channels: 4
+        })
+    ));
+}
+
+#[test]
+fn nan_stimulus_rejected_before_backend_step() {
+    let router = MoeRouter::load_with_mode("", 8, 2, crate::moe::RoutingMode::DenseSim).unwrap();
+    let mut model = SpikingMoeRouter::new(
+        router,
+        MockBackend::new(8, 0.0),
+        RateEncoder { gain: f32::NAN },
+        SpikeCountDecoder,
+    )
+    .unwrap();
+    assert!(matches!(
+        model.forward(&[1.0; EMBEDDING_DIM]).unwrap_err(),
+        HybridError::SnnNan { .. }
     ));
     // Fail-closed: no tick consumed.
     assert_eq!(model.backend().steps, 0);

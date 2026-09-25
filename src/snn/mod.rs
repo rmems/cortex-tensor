@@ -145,8 +145,11 @@ impl SnnDecoder for SpikeCountDecoder {
 /// computed by [`MoeRouter`], encoded into backend stimuli by `E`, stepped by
 /// `B`, and decoded by `D`. Routing scores are `gate * (1 + spikes)`, so a
 /// spiked channel amplifies its expert without masking the ANN gate signal.
-/// NaN gate scores are rejected before the backend steps, preserving the
-/// fail-closed ordering of the old embedded path.
+/// NaN gate scores and NaN encoder output are rejected before the
+/// backend steps, preserving the fail-closed ordering of the old embedded
+/// path. Errors raised after the step (backend step failure, NaN or
+/// wrong-length decoder output) consume the tick — `reset()` restores a
+/// clean epoch.
 ///
 /// `B` is generic (not `dyn`) so callers keep concrete backend types for
 /// checkpointing and backend-specific tuning.
@@ -168,13 +171,22 @@ where
     E: SnnEncoder,
     D: SnnDecoder,
 {
-    pub fn new(router: MoeRouter, backend: B, encoder: E, decoder: D) -> Self {
-        Self {
+    /// Every expert must own a dedicated backend channel: expert *i* is
+    /// encoded/decoded at channel *i*, so `channels < num_experts` would
+    /// silently leave trailing experts permanently ANN-only.
+    pub fn new(router: MoeRouter, backend: B, encoder: E, decoder: D) -> Result<Self> {
+        if backend.channels() < router.num_experts() {
+            return Err(CortexError::SnnChannelMismatch {
+                experts: router.num_experts(),
+                channels: backend.channels(),
+            });
+        }
+        Ok(Self {
             router,
             backend,
             encoder,
             decoder,
-        }
+        })
     }
 
     /// Shared forward path. `frozen` selects [`SnnBackend::step_frozen`].
@@ -183,13 +195,28 @@ where
         // Fail closed before the backend consumes a tick.
         crate::moe::reject_nan_routing_scores(&gate_scores)?;
 
+        // Encoders may inject NaN stimuli; validate before the backend
+        // consumes a tick so the whole forward stays fail-closed. ±Inf is
+        // rankable per the finite-value policy and passes through.
         let stimulus = self.encoder.encode(&gate_scores, self.backend.channels());
+        if stimulus.iter().any(|v| v.is_nan()) {
+            return Err(CortexError::SnnNan {
+                stage: "encoder stimulus",
+            });
+        }
         let step_out = if frozen {
             self.backend.step_frozen(&stimulus)?
         } else {
             self.backend.step(&stimulus)?
         };
+        // Failures past this point have consumed a backend tick; callers that
+        // need a clean epoch should `reset()` after such an error.
         let decoded = self.decoder.decode(&step_out, self.backend.channels());
+        if decoded.len() != self.backend.channels() || decoded.iter().any(|v| v.is_nan()) {
+            return Err(CortexError::SnnNan {
+                stage: "decoder readout",
+            });
+        }
 
         let num_experts = self.router.num_experts();
         let routing_scores: Vec<f32> = (0..num_experts)

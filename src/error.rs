@@ -74,6 +74,14 @@ pub enum CortexError {
     #[error("SNN backend step failed: {0}")]
     SnnBackend(String),
 
+    /// Each expert needs a dedicated backend channel for 1:1 encode/decode.
+    #[error("SNN backend has {channels} channels but the router needs {experts} (one per expert)")]
+    SnnChannelMismatch { experts: usize, channels: usize },
+
+    /// NaN produced at the ANN↔SNN boundary (±Inf stays rankable).
+    #[error("NaN in SNN {stage}")]
+    SnnNan { stage: &'static str },
+
     /// NaN is rejected before ranking so it never participates in `partial_cmp`.
     #[error("NaN routing score at expert {expert_id}")]
     NanRoutingScore { expert_id: usize },
