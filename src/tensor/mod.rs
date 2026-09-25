@@ -238,9 +238,8 @@ impl Tensor {
     /// This **copies**. The returned tensor owns a fresh `Vec<f32>` cloned from
     /// `self`; it does not alias `self`'s storage. Because the layout is always
     /// contiguous row-major, the reinterpretation is a no-op on the element
-    /// order — only the shape metadata changes. For an in-place reinterpret
-    /// that avoids the clone when you no longer need the original, use
-    /// [`Self::reshape_into`].
+    /// order — only the shape metadata changes. To avoid the clone entirely,
+    /// reinterpret in place with [`Self::reshape_in_place`].
     ///
     /// # Panics
     ///
@@ -266,36 +265,30 @@ impl Tensor {
         Self::try_from_vec(self.data.clone(), new_shape)
     }
 
-    /// Reinterprets `self` under `new_shape` without copying, consuming it.
+    /// Reinterprets `self` under `new_shape` in place, without copying.
     ///
     /// Because the storage is already contiguous row-major, a reshape only
-    /// rewrites the shape metadata. This variant reuses the existing buffer
-    /// instead of cloning, which [`Self::reshape`] cannot do behind `&self`.
-    /// `new_shape` must imply exactly `self.numel()` elements and have
-    /// representable row-major strides.
+    /// rewrites the shape metadata. This variant mutates `self` and reuses the
+    /// existing buffer instead of cloning, which [`Self::reshape`] cannot do
+    /// behind `&self`. `new_shape` must imply exactly `self.numel()` elements
+    /// and have representable row-major strides.
     ///
-    /// Returns [`CortexError::ShapeMismatch`] on an element-count change and
-    /// [`CortexError::SizeOverflow`] on stride overflow, handing ownership of
-    /// the original tensor back to the caller unchanged in the error case.
-    pub fn reshape_into(mut self, new_shape: &[usize]) -> Result<Self> {
-        if let Err(err) = self.check_storage() {
-            return Err(err);
-        }
-        let numel = match checked_numel(new_shape) {
-            Ok(n) => n,
-            Err(err) => return Err(err),
-        };
+    /// On error the shape is validated **before** any mutation, so `self` is
+    /// left completely unchanged and remains usable: returns
+    /// [`CortexError::ShapeMismatch`] on an element-count change and
+    /// [`CortexError::SizeOverflow`] on stride overflow.
+    pub fn reshape_in_place(&mut self, new_shape: &[usize]) -> Result<()> {
+        self.check_storage()?;
+        let numel = checked_numel(new_shape)?;
         if numel != self.numel() {
             return Err(CortexError::ShapeMismatch {
                 expected: self.shape.clone(),
                 got: new_shape.to_vec(),
             });
         }
-        if let Err(err) = try_compute_strides(new_shape) {
-            return Err(err);
-        }
+        try_compute_strides(new_shape)?;
         self.shape = new_shape.to_vec();
-        Ok(self)
+        Ok(())
     }
 
     /// Transposes a 2-D tensor: `[rows, cols]` → `[cols, rows]`.
@@ -760,18 +753,21 @@ mod tests {
     }
 
     #[test]
-    fn reshape_into_reuses_buffer_without_copy() {
-        let t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
-        let reshaped = t.reshape_into(&[6]).unwrap();
-        assert_eq!(reshaped.shape(), &[6]);
-        assert_eq!(reshaped.data(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    fn reshape_in_place_reuses_buffer_without_copy() {
+        let mut t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        t.reshape_in_place(&[6]).unwrap();
+        assert_eq!(t.shape(), &[6]);
+        assert_eq!(t.data(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
 
-        // Element-count change is rejected.
-        let t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        // Element-count change is rejected AND leaves the tensor unchanged, so
+        // a caller can keep using it after a failed reshape.
+        let mut t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
         assert!(matches!(
-            t.reshape_into(&[3, 2]).unwrap_err(),
+            t.reshape_in_place(&[3, 2]).unwrap_err(),
             CortexError::ShapeMismatch { .. }
         ));
+        assert_eq!(t.shape(), &[2, 2], "failed reshape must not mutate shape");
+        assert_eq!(t.data(), &[1.0, 2.0, 3.0, 4.0], "data must be intact");
     }
 
     #[test]
