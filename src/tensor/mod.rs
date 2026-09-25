@@ -8,22 +8,48 @@ use serde::{Deserialize, Serialize};
 use std::alloc::Layout;
 use std::fmt;
 
-/// Row-major dense tensor — candle-core replacement.
+/// Row-major dense tensor — a CPU-only reference backend.
 ///
-/// Stores `f32` data in a contiguous `Vec<f32>` with an arbitrary shape.
-/// All operations are CPU-first; the `gpu` feature flag will add CUDA kernels later.
+/// Stores `f32` data in a single contiguous, row-major `Vec<f32>` addressed as
+/// `data[i * ncols + j]` (and the rank-`n` generalization). This layout is the
+/// one and only invariant: there are no strided views, no broadcasting outside
+/// the documented [`ops::batched_matmul`] case, and no device or dtype
+/// dispatch. External ML frameworks own general tensor abstractions; this crate
+/// deliberately stays a small, honest reference kernel.
+///
+/// [`Tensor`] does not carry a `strides` field. Because every element is
+/// contiguous and row-major, strides are fully determined by [`Self::shape`]
+/// and can be recomputed on demand with [`Tensor::row_major_strides`]; storing
+/// them would only invite the illusion of stride-aware kernels that do not
+/// exist.
+///
+/// # Layout and copies
+///
+/// [`Self::reshape`] and [`Self::transpose`] both return owned tensors backed
+/// by fresh buffers — they are copies, never aliasing views. [`Self::data_mut`]
+/// hands out the raw contiguous storage; callers must preserve the row-major
+/// element count for [`Self::shape`] (mutating length or reordering across rows
+/// breaks the contiguity invariant).
+///
+/// [`ops::batched_matmul`]: crate::tensor::ops::batched_matmul
 ///
 /// # Construction
 ///
 /// Prefer [`Tensor::try_from_vec`], which validates the element count and
-/// row-major strides with checked arithmetic before storing `data`.
-/// [`Tensor::from_vec`] and the other panic-style constructors remain as
-/// pre-1.0 compatibility wrappers; migrate new call sites to `try_from_vec`.
+/// row-major stride arithmetic with checked multiplication before storing
+/// `data`. [`Tensor::from_vec`] and the other panic-style constructors remain
+/// as pre-1.0 compatibility wrappers; migrate new call sites to `try_from_vec`.
+///
+/// # Serialization
+///
+/// Serialized tensors carry only `data` and `shape`. A legacy `strides` field
+/// from an earlier layout is ignored on deserialize, so older JSON still loads.
+/// `Deserialize` does not re-validate invariants; fallible methods that index
+/// storage call [`Self::check_storage`] first.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Tensor {
     data: Vec<f32>,
     shape: Vec<usize>,
-    strides: Vec<usize>,
 }
 
 impl Tensor {
@@ -44,14 +70,17 @@ impl Tensor {
         unwrap_compat(Self::try_from_vec(data, shape), "Tensor::from_vec")
     }
 
-    /// Fallible constructor: proves `numel` and strides are representable
-    /// before taking ownership of `data`.
+    /// Fallible constructor: proves `numel` and row-major strides are
+    /// representable before taking ownership of `data`.
     ///
-    /// Does not allocate a new data buffer. Overflowing shapes therefore fail
-    /// without attempting a giant allocation.
+    /// Strides are not stored; the check exists only to reject shapes whose
+    /// row-major stride arithmetic would overflow `usize`, matching the
+    /// contiguity guarantees callers of [`Self::data`] rely on. Does not
+    /// allocate a new data buffer, so overflowing shapes fail without
+    /// attempting a giant allocation.
     pub fn try_from_vec(data: Vec<f32>, shape: &[usize]) -> Result<Self> {
         let numel = checked_numel(shape)?;
-        let strides = try_compute_strides(shape)?;
+        let _ = try_compute_strides(shape)?;
         if data.len() != numel {
             return Err(CortexError::ShapeMismatch {
                 expected: shape.to_vec(),
@@ -61,7 +90,6 @@ impl Tensor {
         Ok(Self {
             data,
             shape: shape.to_vec(),
-            strides,
         })
     }
 
@@ -128,7 +156,7 @@ impl Tensor {
         use rand::RngExt;
         let numel = checked_numel(shape)?;
         check_f32_alloc(numel, shape)?;
-        let _strides = try_compute_strides(shape)?;
+        let _ = try_compute_strides(shape)?;
         let mut rng = rand::rng();
         let data: Vec<f32> = (0..numel)
             .map(|_| {
@@ -149,6 +177,14 @@ impl Tensor {
         &self.data
     }
 
+    /// Mutable access to the raw contiguous, row-major storage.
+    ///
+    /// The slice length equals [`Self::numel`] and is addressed as
+    /// `data[i * ncols + j]`. Callers may overwrite values in place but must
+    /// not rely on any layout other than contiguous row-major, and must not
+    /// assume the length can change: [`Self::shape`] is unaffected by writes
+    /// here, so reinterpreting the buffer under a different shape requires
+    /// [`Self::reshape`] (which copies).
     #[inline]
     pub fn data_mut(&mut self) -> &mut [f32] {
         &mut self.data
@@ -159,9 +195,30 @@ impl Tensor {
         &self.shape
     }
 
+    /// Recomputes the row-major strides implied by [`Self::shape`].
+    ///
+    /// Strides are not stored: this tensor is always contiguous row-major, so
+    /// they are a pure function of the shape. The last stride is `1` and each
+    /// earlier stride is the product of the following extents. Returns an empty
+    /// vector for a scalar (rank-0) shape.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the stride product overflows `usize`, which cannot happen
+    /// for a tensor built through the crate's constructors (they reject such
+    /// shapes up front). Use [`Self::try_row_major_strides`] to recover instead
+    /// of panicking on a hand-corrupted shape.
     #[inline]
-    pub fn strides(&self) -> &[usize] {
-        &self.strides
+    pub fn row_major_strides(&self) -> Vec<usize> {
+        unwrap_compat(self.try_row_major_strides(), "Tensor::row_major_strides")
+    }
+
+    /// Fallible [`Self::row_major_strides`]: returns
+    /// [`CortexError::SizeOverflow`] if the row-major stride product is not
+    /// representable in `usize`.
+    #[inline]
+    pub fn try_row_major_strides(&self) -> Result<Vec<usize>> {
+        try_compute_strides(&self.shape)
     }
 
     #[inline]
@@ -174,9 +231,16 @@ impl Tensor {
         self.shape.len()
     }
 
-    // ── Reshape / view ───────────────────────────────────────────────
+    // ── Reshape / transpose (copying) ────────────────────────────────
 
     /// Reshapes to `new_shape`, which must imply the same element count.
+    ///
+    /// This **copies**. The returned tensor owns a fresh `Vec<f32>` cloned from
+    /// `self`; it does not alias `self`'s storage. Because the layout is always
+    /// contiguous row-major, the reinterpretation is a no-op on the element
+    /// order — only the shape metadata changes. For an in-place reinterpret
+    /// that avoids the clone when you no longer need the original, use
+    /// [`Self::reshape_into`].
     ///
     /// # Panics
     ///
@@ -186,8 +250,10 @@ impl Tensor {
         unwrap_compat(self.try_reshape(new_shape), "Tensor::reshape")
     }
 
-    /// Fallible reshape: `new_shape` must imply exactly `self.numel()`
-    /// elements and have representable strides.
+    /// Fallible reshape (copying): `new_shape` must imply exactly
+    /// `self.numel()` elements and have representable row-major strides.
+    ///
+    /// See [`Self::reshape`]: the result is a copy, not a view.
     pub fn try_reshape(&self, new_shape: &[usize]) -> Result<Self> {
         self.check_storage()?;
         let numel = checked_numel(new_shape)?;
@@ -200,7 +266,43 @@ impl Tensor {
         Self::try_from_vec(self.data.clone(), new_shape)
     }
 
+    /// Reinterprets `self` under `new_shape` without copying, consuming it.
+    ///
+    /// Because the storage is already contiguous row-major, a reshape only
+    /// rewrites the shape metadata. This variant reuses the existing buffer
+    /// instead of cloning, which [`Self::reshape`] cannot do behind `&self`.
+    /// `new_shape` must imply exactly `self.numel()` elements and have
+    /// representable row-major strides.
+    ///
+    /// Returns [`CortexError::ShapeMismatch`] on an element-count change and
+    /// [`CortexError::SizeOverflow`] on stride overflow, handing ownership of
+    /// the original tensor back to the caller unchanged in the error case.
+    pub fn reshape_into(mut self, new_shape: &[usize]) -> Result<Self> {
+        if let Err(err) = self.check_storage() {
+            return Err(err);
+        }
+        let numel = match checked_numel(new_shape) {
+            Ok(n) => n,
+            Err(err) => return Err(err),
+        };
+        if numel != self.numel() {
+            return Err(CortexError::ShapeMismatch {
+                expected: self.shape.clone(),
+                got: new_shape.to_vec(),
+            });
+        }
+        if let Err(err) = try_compute_strides(new_shape) {
+            return Err(err);
+        }
+        self.shape = new_shape.to_vec();
+        Ok(self)
+    }
+
     /// Transposes a 2-D tensor: `[rows, cols]` → `[cols, rows]`.
+    ///
+    /// This **materializes** a new tensor: the returned buffer is a fresh,
+    /// contiguous row-major reordering of the elements, not a stride-swapped
+    /// view over `self`'s storage.
     ///
     /// # Panics
     ///
@@ -209,8 +311,9 @@ impl Tensor {
         unwrap_compat(self.try_transpose(), "Tensor::transpose")
     }
 
-    /// Fallible transpose: returns [`CortexError::RankMismatch`] unless
-    /// `self` is rank-2.
+    /// Fallible transpose (materializing): returns [`CortexError::RankMismatch`]
+    /// unless `self` is rank-2. See [`Self::transpose`]: the result is a copy,
+    /// not a view.
     pub fn try_transpose(&self) -> Result<Self> {
         self.check_storage()?;
         if self.ndim() != 2 {
@@ -480,11 +583,14 @@ pub(crate) fn check_f32_alloc(numel: usize, shape: &[usize]) -> Result<()> {
         })
 }
 
-/// Row-major strides using checked arithmetic.
+/// Row-major strides for `shape`, using checked arithmetic.
 ///
-/// The last stride is `1`. Earlier strides are the product of all following
-/// dimensions. A zero-sized axis can still overflow a leading stride (for
-/// example `[0, usize::MAX, 2]`).
+/// Strides are never stored on [`Tensor`]; this helper backs both the
+/// public [`Tensor::try_row_major_strides`] recompute path and the
+/// construction-time overflow guard that rejects shapes whose stride product
+/// is not representable. The last stride is `1` and each earlier stride is the
+/// product of all following dimensions. A zero-sized axis can still overflow a
+/// leading stride (for example `[0, usize::MAX, 2]`).
 pub(crate) fn try_compute_strides(shape: &[usize]) -> Result<Vec<usize>> {
     if shape.is_empty() {
         return Ok(Vec::new());
@@ -501,15 +607,15 @@ pub(crate) fn try_compute_strides(shape: &[usize]) -> Result<Vec<usize>> {
     Ok(strides)
 }
 
-/// Allocates a filled buffer only after numel and strides are representable.
+/// Allocates a filled buffer only after numel and row-major strides are
+/// representable.
 fn try_filled(shape: &[usize], val: f32) -> Result<Tensor> {
     let numel = checked_numel(shape)?;
     check_f32_alloc(numel, shape)?;
-    let strides = try_compute_strides(shape)?;
+    let _ = try_compute_strides(shape)?;
     Ok(Tensor {
         data: vec![val; numel],
         shape: shape.to_vec(),
-        strides,
     })
 }
 
@@ -539,7 +645,7 @@ mod tests {
         let t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
         assert_eq!(t.shape(), &[2, 3]);
         assert_eq!(t.numel(), 6);
-        assert_eq!(t.strides(), &[3, 1]);
+        assert_eq!(t.row_major_strides(), &[3, 1]);
     }
 
     #[test]
@@ -549,7 +655,7 @@ mod tests {
         let b = Tensor::try_from_vec(data, &[2, 3]).unwrap();
         assert_eq!(a.data(), b.data());
         assert_eq!(a.shape(), b.shape());
-        assert_eq!(a.strides(), b.strides());
+        assert_eq!(a.row_major_strides(), b.row_major_strides());
     }
 
     #[test]
@@ -636,6 +742,97 @@ mod tests {
     }
 
     #[test]
+    fn reshape_and_transpose_are_copies_not_views() {
+        // reshape copies: the result owns storage disjoint from the source, so
+        // mutating one never aliases the other.
+        let mut src = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let reshaped = src.reshape(&[3, 2]);
+        assert_eq!(reshaped.shape(), &[3, 2]);
+        assert_eq!(reshaped.data(), src.data()); // same row-major order
+        src.data_mut()[0] = 99.0;
+        assert_eq!(reshaped.data()[0], 1.0, "reshape must not alias source");
+
+        // transpose materializes a reordered buffer.
+        let t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let tt = t.transpose();
+        assert_eq!(tt.shape(), &[3, 2]);
+        assert_eq!(tt.data(), &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    #[test]
+    fn reshape_into_reuses_buffer_without_copy() {
+        let t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let reshaped = t.reshape_into(&[6]).unwrap();
+        assert_eq!(reshaped.shape(), &[6]);
+        assert_eq!(reshaped.data(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+
+        // Element-count change is rejected.
+        let t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        assert!(matches!(
+            t.reshape_into(&[3, 2]).unwrap_err(),
+            CortexError::ShapeMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn row_major_strides_recomputes_from_shape() {
+        let t = Tensor::from_vec(vec![0.0; 24], &[2, 3, 4]);
+        assert_eq!(t.row_major_strides(), &[12, 4, 1]);
+        assert_eq!(t.try_row_major_strides().unwrap(), vec![12, 4, 1]);
+        let scalar = Tensor::try_from_vec(vec![1.0], &[]).unwrap();
+        assert!(scalar.row_major_strides().is_empty());
+    }
+
+    #[test]
+    fn deserialize_ignores_legacy_strides_field() {
+        // Tensors serialized before the strides field was removed still load;
+        // the field is simply ignored and strides are recomputed on demand.
+        let json = r#"{"data":[1.0,2.0,3.0,4.0,5.0,6.0],"shape":[2,3],"strides":[3,1]}"#;
+        let t: Tensor = serde_json::from_str(json).unwrap();
+        assert_eq!(t.shape(), &[2, 3]);
+        assert_eq!(t.data(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(t.row_major_strides(), &[3, 1]);
+    }
+
+    #[test]
+    fn serialized_form_has_no_strides_field() {
+        let t = Tensor::from_vec(vec![1.0, 2.0], &[2]);
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(
+            !json.contains("strides"),
+            "serialized form leaks strides: {json}"
+        );
+        assert!(json.contains("\"shape\""));
+        assert!(json.contains("\"data\""));
+    }
+
+    #[test]
+    fn elementwise_ops_require_exact_shape_no_broadcast() {
+        // Exact-shape contract: no NumPy broadcasting on add/sub/mul, not even
+        // against a size-1 axis that broadcasting would otherwise expand.
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let row = Tensor::from_vec(vec![10.0, 20.0, 30.0], &[1, 3]);
+        let scalar_like = Tensor::from_vec(vec![10.0], &[1]);
+        for (name, err) in [
+            ("add row", a.try_add(&row).unwrap_err()),
+            ("sub row", a.try_sub(&row).unwrap_err()),
+            ("mul row", a.try_mul(&row).unwrap_err()),
+            ("add scalar-like", a.try_add(&scalar_like).unwrap_err()),
+        ] {
+            assert!(
+                matches!(err, CortexError::ShapeMismatch { .. }),
+                "{name}: {err}"
+            );
+        }
+        // Exact match succeeds.
+        let b = Tensor::from_vec(vec![6.0, 5.0, 4.0, 3.0, 2.0, 1.0], &[2, 3]);
+        assert_eq!(
+            a.try_add(&b).unwrap().data(),
+            &[7.0, 7.0, 7.0, 7.0, 7.0, 7.0]
+        );
+    }
+
+    #[test]
     fn try_row_bounds_check() {
         let t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
         assert_eq!(t.try_row(1).unwrap().data(), &[3.0, 4.0]);
@@ -661,6 +858,7 @@ mod tests {
     fn corrupted_storage_is_rejected_not_sliced() {
         // Deserialize skips invariant validation: shape [2,2] with one
         // element must not reach direct indexing in try_row/try_transpose.
+        // The legacy "strides" field is accepted and ignored (back-compat).
         let json = r#"{"data":[1.0],"shape":[2,2],"strides":[2,1]}"#;
         let t: Tensor = serde_json::from_str(json).unwrap();
         assert!(matches!(
@@ -710,15 +908,15 @@ mod tests {
         let empty = Tensor::try_from_vec(vec![], &[0, 3]).unwrap();
         assert_eq!(empty.numel(), 0);
         assert_eq!(empty.shape(), &[0, 3]);
-        assert_eq!(empty.strides(), &[3, 1]);
+        assert_eq!(empty.row_major_strides(), &[3, 1]);
 
         let zero_1d = Tensor::try_from_vec(vec![], &[0]).unwrap();
         assert_eq!(zero_1d.numel(), 0);
-        assert_eq!(zero_1d.strides(), &[1]);
+        assert_eq!(zero_1d.row_major_strides(), &[1]);
 
         let scalar = Tensor::try_from_vec(vec![3.5], &[]).unwrap();
         assert_eq!(scalar.numel(), 1);
-        assert!(scalar.strides().is_empty());
+        assert!(scalar.row_major_strides().is_empty());
         assert_eq!(scalar.data(), &[3.5]);
     }
 
@@ -809,12 +1007,12 @@ mod tests {
         // strides stay representable.
         let cancelled = Tensor::try_from_vec(vec![], &[usize::MAX, 0, 2]).unwrap();
         assert_eq!(cancelled.numel(), 0);
-        assert_eq!(cancelled.strides(), &[0, 2, 1]);
+        assert_eq!(cancelled.row_major_strides(), &[0, 2, 1]);
 
         // A trailing zero must not be lost to a left-to-right overflow.
         let trailing = Tensor::try_from_vec(vec![], &[3, usize::MAX, 0]).unwrap();
         assert_eq!(trailing.numel(), 0);
-        assert_eq!(trailing.strides(), &[0, 0, 1]);
+        assert_eq!(trailing.row_major_strides(), &[0, 0, 1]);
     }
 
     #[test]
@@ -843,7 +1041,7 @@ mod tests {
                     assert_eq!(t.numel(), numel);
                     assert_eq!(t.data().len(), numel);
                     assert_eq!(t.shape(), shape);
-                    assert_eq!(t.strides(), strides.as_slice());
+                    assert_eq!(t.row_major_strides(), strides.as_slice());
                     if shape.is_empty() {
                         assert!(strides.is_empty());
                     } else {

@@ -6,8 +6,9 @@ use crate::error::{CortexError, Result, unwrap_compat};
 
 /// Matrix multiply: [M×K] × [K×N] → [M×N]
 ///
-/// Uses a cache-friendly tiled loop. When the `gpu` feature is enabled,
-/// this will dispatch to a CUDA kernel instead.
+/// Uses a cache-friendly tiled CPU loop. This crate has no GPU backend and
+/// no `gpu` feature; consume the resulting [`Tensor`] into your own kernels if
+/// you need device acceleration.
 ///
 /// # Panics
 ///
@@ -63,7 +64,18 @@ pub fn try_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
 }
 
 /// Batched matmul: [B×M×K] × [B×K×N] → [B×M×N]
-/// If `b` is 2-D, broadcasts across batches.
+///
+/// This is the crate's **only** broadcasting rule, and it is deliberately
+/// narrow — there is no NumPy-style elementwise broadcasting anywhere else:
+///
+/// * `a` rank-3 `[B, M, K]`, `b` rank-3 `[B, K, N]`: per-batch matmul; the
+///   batch extents must match exactly.
+/// * `a` rank-3 `[B, M, K]`, `b` rank-2 `[K, N]`: `b` is reused for every
+///   batch of `a` (broadcast across the batch axis).
+/// * `a` rank-2 and `b` rank-2: delegates to [`try_matmul`].
+///
+/// Any other rank combination is a [`CortexError::RankMismatch`]. No axis of
+/// size `1` is expanded, and `a` is never broadcast against a batched `b`.
 ///
 /// # Panics
 ///
