@@ -61,6 +61,15 @@ fn tensor_rejects_hostile_json() {
         let result: cortex_tensor::Result<Tensor> = serde_json::from_str(&wire).map_err(Into::into);
         assert!(result.is_err(), "accepted {wire}");
     }
+    for wire in [
+        r#"{"schema_version":1,"data":[1e39],"shape":[1]}"#,
+        r#"{"schema_version":1,"data":[-1e39],"shape":[1]}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Tensor>(wire).is_err(),
+            "accepted {wire}"
+        );
+    }
 }
 
 #[test]
@@ -99,6 +108,30 @@ fn transformer_payloads_are_versioned_and_shape_checked() {
     let mut bad = value;
     bad["extra"] = json!(true);
     assert!(serde_json::from_value::<TransformerLM>(bad).is_err());
+}
+
+#[test]
+fn transformer_config_rejects_unusable_zero_extents() {
+    for field in ["vocab_size", "ff_dim", "max_seq_len"] {
+        let mut wire = serde_json::to_value(config()).unwrap();
+        wire[field] = json!(0);
+        assert!(
+            serde_json::from_value::<TransformerConfig>(wire).is_err(),
+            "accepted zero {field}"
+        );
+
+        let mut cfg = config();
+        match field {
+            "vocab_size" => cfg.vocab_size = 0,
+            "ff_dim" => cfg.ff_dim = 0,
+            "max_seq_len" => cfg.max_seq_len = 0,
+            _ => unreachable!(),
+        }
+        assert!(
+            TransformerLM::try_new(cfg).is_err(),
+            "constructed zero {field}"
+        );
+    }
 }
 
 #[test]

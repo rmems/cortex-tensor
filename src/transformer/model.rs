@@ -36,6 +36,11 @@ impl TransformerConfig {
                 "invalid transformer head configuration".into(),
             ));
         }
+        if self.vocab_size == 0 || self.ff_dim == 0 || self.max_seq_len == 0 {
+            return Err(CortexError::InvalidConfig(
+                "vocab_size, ff_dim, and max_seq_len must be nonzero".into(),
+            ));
+        }
         Ok(())
     }
     /// A small config for testing (~2M params).
@@ -132,7 +137,7 @@ impl TransformerLM {
     }
 
     /// Fallible constructor: returns [`CortexError::InvalidConfig`] when
-    /// `cfg.num_heads` is zero or does not evenly divide `cfg.dim`, and
+    /// any model extent is zero or `cfg.num_heads` does not divide `cfg.dim`, and
     /// [`CortexError::SizeOverflow`] when a configured shape is not
     /// representable.
     pub fn try_new(cfg: TransformerConfig) -> Result<Self> {
@@ -145,6 +150,7 @@ impl TransformerLM {
                 cfg.dim, cfg.num_heads
             )));
         }
+        cfg.validate_wire()?;
         let scale = 0.02;
         let blocks: Vec<TransformerBlock> = (0..cfg.num_layers)
             .map(|_| TransformerBlock::try_new(cfg.dim, cfg.num_heads, cfg.ff_dim))
