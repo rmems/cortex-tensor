@@ -12,6 +12,7 @@
 //! | [`tensor`] | `Tensor` type, fallible construction, core ops, finite-value policy |
 //! | [`transformer`] | Transformer building blocks (attention, block, model) |
 //! | [`moe`] | Mixture-of-Experts router + GGUF checkpoint bridge |
+//! | [`snn`] | Backend-neutral SNN execution contract + optional `neuromod` adapter |
 //! | [`types`] | Shared types used by `moe` |
 //! | [`error`] | `CortexError` unified error type |
 //!
@@ -22,6 +23,7 @@
 pub mod error;
 pub mod moe;
 pub mod reference_json;
+pub mod snn;
 pub mod tensor;
 pub mod transformer;
 pub mod types;

@@ -88,8 +88,8 @@ pub(super) fn top_k_indices(scores: &[f32], top_k: usize) -> Result<Vec<usize>> 
 }
 
 /// Reject NaN routing scores without ranking. Used to fail closed before
-/// mutating spiking membrane state.
-pub(super) fn reject_nan_routing_scores(scores: &[f32]) -> Result<()> {
+/// mutating any SNN backend state.
+pub(crate) fn reject_nan_routing_scores(scores: &[f32]) -> Result<()> {
     if let Some(expert_id) = scores.iter().position(|score| score.is_nan()) {
         return Err(HybridError::NanRoutingScore { expert_id });
     }
@@ -97,7 +97,7 @@ pub(super) fn reject_nan_routing_scores(scores: &[f32]) -> Result<()> {
 }
 
 /// Rank raw routing scores, then softmax for the returned expert weights.
-pub(super) fn route_top_k(scores: &[f32], top_k: usize) -> Result<(Vec<f32>, Vec<usize>)> {
+pub(crate) fn route_top_k(scores: &[f32], top_k: usize) -> Result<(Vec<f32>, Vec<usize>)> {
     let selected_experts = top_k_indices(scores, top_k)?;
     Ok((softmax(scores), selected_experts))
 }

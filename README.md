@@ -8,7 +8,7 @@ Pure-Rust tensor, transformer, and Mixture-of-Experts building blocks. No CUDA, 
 
 ## Overview
 
-`cortex-tensor` is a minimal, framework-free foundation for building transformer-based language models and MoE routers in Rust. It was surgically extracted from a larger hybrid codebase (`corinth-canal`) and then stripped of every GPU / CUDA / Julia / SNN-specific concern so it can stand alone as a reusable, open-source numerical kernel.
+`cortex-tensor` is a minimal, framework-free foundation for building transformer-based language models and MoE routers in Rust. It was surgically extracted from a larger hybrid codebase (`corinth-canal`) and stripped of GPU / CUDA / Julia concerns so it can stand alone as a reusable, open-source numerical kernel. It stays ANN/SNN hybrid-capable through a backend-neutral SNN contract (`snn` module) — neuron dynamics come from focused reusable crates (e.g. `neuromod`) behind feature-gated adapters, not an embedded runtime.
 
 Design goals:
 
@@ -81,12 +81,56 @@ Unversioned pre-1.0 JSON and the older `strides` field must be migrated explicit
 | Item | Purpose |
 |---|---|
 | `MoeRouter` | MoE router. Loads a GGUF checkpoint and produces top-k expert selections. |
-| `RoutingMode` | `StubUniform`, `DenseSim`, `SpikingSim` (simulation-only; no GPU dispatch). |
+| `RoutingMode` | `StubUniform`, `DenseSim` (default). Spiking routing moved to `snn::SpikingMoeRouter` + an `SnnBackend` adapter. |
 | `ExtractTokenOptions` | Optional resample / L2 when extracting token rows (`for_projector_forward()` matches legacy 2048 + L2). |
 
 Top-k selection ranks finite scores descending and breaks ties by ascending expert ID. NaN scores are rejected (`NanRoutingScore`); `+Inf` ranks above all finite values and `-Inf` below them. The helper is pure: the same `(scores, top_k)` pair always produces the same expert IDs.
 
-Supported GGUF tensor types: `F32`, `F16`, `Q8_0`, `Q5_K`. `IQ3_S` is detected and rejected (for token embeddings) with a clear error so callers can fall back to `llama.cpp` prompt embeddings. For the preferred GPU synapse tensor (e.g. attn_q on an IQ3-quantized MoE checkpoint), unsupported quants now correctly route to a checkpoint-backed `routing-f32` source (using the F32 routing tensor) instead of synthetic fallback. See `synapse_source()`, `real_gpu_synapse_tensor_name()`, and `MoeRouter` metadata.
+Supported GGUF tensor types: `F32`, `F16`, `Q8_0`, `Q5_K`. `IQ3_S` is detected and rejected (for token embeddings) with a clear error so callers can fall back to `llama.cpp` prompt embeddings.
+
+### `snn`
+
+Hybrid execution/interchange contract — cortex stays ANN/SNN-capable without
+embedding neuron dynamics.
+
+| Item | Purpose |
+|---|---|
+| `SnnBackend` | Execution contract: `step`, `step_frozen` (held-out eval), `reset`, `capabilities`, `channels`. Failure-atomic by contract. |
+| `SnnEncoder` / `SnnDecoder` | ANN→SNN stimulus encoding and SNN→ANN readout (`RateEncoder`, `SpikeCountDecoder` defaults). |
+| `SnnStepOutput` / `SnnCapabilities` | Per-tick spike output and backend capability reporting for orchestrators (e.g. `hybrid-fusion`). |
+| `SpikingMoeRouter` | Composes `MoeRouter` gate scores with an `SnnBackend`: encode → step → decode → deterministic top-k. Replaces the removed embedded `RoutingMode::SpikingSim`. |
+| `NeuromodNetwork` | `neuromod`-feature adapter over `neuromod::SpikingNetwork` (LIF + Izhikevich, R-STDP). Frozen eval delegates to `step` until a neuromod release ships `step_frozen`; `capabilities().frozen_evaluation` reports `false` meanwhile. |
+
+```toml
+[dependencies]
+cortex-tensor = { git = "https://github.com/rmems/cortex-tensor", branch = "main", features = ["neuromod"] }
+```
+
+```rust
+use cortex_tensor::moe::{MoeRouter, RoutingMode};
+use cortex_tensor::snn::{NeuromodNetwork, RateEncoder, SpikingMoeRouter, SpikeCountDecoder};
+
+let router = MoeRouter::load("model.gguf", 0, 2)?;
+let backend = NeuromodNetwork::new(/* lif */ 8, /* izh */ 0, /* channels */ 8)?;
+let mut hybrid = SpikingMoeRouter::new(router, backend, RateEncoder::default(), SpikeCountDecoder)?;
+let out = hybrid.forward(&embedding)?; // or forward_frozen for held-out eval
+```
+
+### Migration notes
+
+- `RoutingMode::SpikingSim` → `snn::SpikingMoeRouter` + an `SnnBackend`
+  (`NeuromodNetwork` via `features = ["neuromod"]`). `RoutingMode::default()`
+  is now `DenseSim` (was `SpikingSim`).
+- `MoeRouter::reset_state` removed — call `SpikingMoeRouter::reset` or the
+  backend's `reset`.
+- `preferred_gpu_synapse_tensor_name()`, `real_gpu_synapse_tensor_name()`,
+  `synapse_source()`, `RouterMetadata.preferred_gpu_synapse_tensor_name`,
+  `RouterMetadata.synapse_source` removed. SAAQ/GPU synapse-source policy now
+  lives downstream in `corinth-canal` / `grok-ozempic`. Artifact consumers that
+  read a `synapse_source` manifest label (e.g. `Surrogate_Viz.jl`) keep working
+  against artifacts emitted by those downstream pipelines; new artifacts should
+  source the label there, not from cortex.
+- GGUF parsing/mmap stays as-is pending #47 (engram-parser 0.3.x consume).
 
 **Parser layer (planning, see #8 / #47):** the canonical home for GGUF v3
 deserialization and per-expert raw weight extraction is `engram-parser`, not this
@@ -106,15 +150,13 @@ engram-parser = { version = "...", features = ["safetensors"] }
 No implementation or dependency is present yet — this keeps the reusable parser
 boundary clean. Cross-links and notes are maintained for alignment.
 
-### GGUF adapter + synapse source + SAAQ flow (code paths)
+### GGUF adapter (code paths)
 
 - `MoeRouter::load` / `load_with_mode` → `probe_and_map` calls `resolve_adapter` (adapter.rs).
-- `resolve_adapter` reads `{architecture}.*` metadata keys (the arch string is opaque checkpoint data), validates routing tensor (rank-2 F32 with one dim equal to `hidden_size` and the other ≥ expert count), validates token embeddings (F32/F16/Q8_0/Q5_K, shape `[hidden, vocab]`), sets `preferred_gpu_synapse_tensor` to `blk.0.attn_q.weight` when present.
-- Synapse source selection (updated for IQ3_S checkpoints): if attn_q is F16 rank-2 containing hidden_size (relaxed from strict square to support GQA) → `real`; elif attn_q present → `routing-f32` (real name = routing tensor name); else `synthetic-fallback`.
+- `resolve_adapter` reads `{architecture}.*` metadata keys (the arch string is opaque checkpoint data), validates routing tensor (rank-2 F32 with one dim equal to `hidden_size` and the other ≥ expert count), validates token embeddings (F32/F16/Q8_0/Q5_K, shape `[hidden, vocab]`).
 - Routing always uses `routing_tensor` via `checkpoint_gate_scores` (routing.rs) when checkpoint loaded (never synthetic for real loads).
 - `extract_named_token_embedding_from_checkpoint` (checkpoint.rs) supports dequant for Q8_0/Q5_K (and F32/F16); IQ3_S errors for embeddings.
-- `MoeRouter` exposes `preferred_gpu_synapse_tensor_name()`, `real_gpu_synapse_tensor_name()`, and `synapse_source()` (the first and last also on `RouterMetadata`) for SAAQ experiment / Surrogate_Viz consumers to choose dequant vs. synthetic path and load the right tensor (f16 path or f32 routing path).
-- SAAQ artifacts (external): calibration runs consume the router to emit artifacts for viz; see labels on related issues for campaign.
+- Checkpoint topology (which tensors exist) is reported via `RouterMetadata` / adapter internals. **SAAQ/GPU synapse-source policy is no longer owned here** — it moved downstream to the experimental repos (`corinth-canal` / `grok-ozempic`) that consume these checkpoints; see [Migration notes](#migration-notes).
 
 ## Scope / Boundaries
 
@@ -124,8 +166,11 @@ This crate **owns**:
   mask, softmax, layer norm, RMSNorm) under a documented finite-value policy.
 - Decoder-only transformer building blocks (attention, block, `TransformerLM`).
 - MoE routing math — gate scores, softmax, top-k selection, L2 normalization,
-  embedding resampling — and the simulation routing modes.
-- Checkpoint adapter and tensor selection, including synapse-source resolution.
+  embedding resampling — and the dense simulation routing mode.
+- The ANN↔SNN execution/interchange contract (`snn` module): `SnnBackend`,
+  `SnnEncoder`/`SnnDecoder` boundary types, `SnnCapabilities`, and
+  `SpikingMoeRouter` composing the MoE router with an external SNN backend.
+- Checkpoint adapter and tensor selection.
 - Dequantization of supported GGUF quants to `f32` (`Q8_0`, `Q5_K`, `F16`).
 - The consumer-side GGUF bridge it needs today: mmap'd tensor access and
   token-embedding extraction.
@@ -139,13 +184,19 @@ This crate **does not own**:
 - Safetensors header inspection, deterministic manifests, and MoE candidate
   discovery — `engram-parser` feature `safetensors` (see #9, #32).
 - CUDA / GPU / SIMD execution, and any GPU host registration.
-- SNN neuron dynamics ([`neuromod`](https://github.com/rmems/neuromod))
-  and ANN→SNN orchestration
+- SNN neuron dynamics — delegated to reusable crates behind `snn::SnnBackend`
+  ([`neuromod`](https://github.com/rmems/neuromod) via the optional `neuromod`
+  feature) — and ANN→SNN orchestration
   ([`hybrid-fusion`](https://github.com/rmems/hybrid-fusion)).
+- SAAQ experimental policy: GPU synapse-source selection and tensor-source
+  preference live in the downstream experimental repos (`corinth-canal` /
+  `grok-ozempic`), not in the reusable execution core.
+- Specialized SNN/hybrid GPU kernels — `myelin-accelerator`.
 - Tokenization and automatic differentiation (see [Non-goals](#non-goals)).
 
 **Allowed dependencies:** the current small set — `serde`, `serde_json`,
-`thiserror`, `rand`, `rayon`, `memmap2`, `half` — and,
+`thiserror`, `rand`, `rayon`, `memmap2`, `half` — optional feature-gated
+SNN backend crates (`neuromod` today, evaluated individually) and,
 in future, the zero-dependency rmems parser crates.
 
 **Forbidden dependencies:** GPU backends (`cust`), inference frameworks
@@ -202,6 +253,12 @@ planning is tracked in Linear LIM-88 (under LIM-9).
 [dependencies]
 cortex-tensor = { git = "https://github.com/rmems/cortex-tensor", branch = "main" }
 ```
+
+Features (all off by default):
+
+| Feature | Effect |
+|---|---|
+| `neuromod` | Enables `snn::NeuromodNetwork` — `neuromod::SpikingNetwork` behind `snn::SnnBackend`. Pulls the optional `neuromod` crate dependency. |
 
 ## Quick start
 
@@ -283,7 +340,9 @@ fn main() -> cortex_tensor::Result<()> {
 - No GPU backend. Ever. If you need CUDA, consume this crate's `Tensor` into your own kernels.
 - No automatic differentiation. This is an inference and forward-pass library.
 - No tokenizer. Pair it with `tokenizers` or `llama.cpp`'s tokenizer of choice.
-- No SNN / neuromorphic logic. Those live in upstream projects.
+- No embedded SNN runtime. SNN execution goes through `snn::SnnBackend`
+  adapters over focused crates (`neuromod` feature); orchestration lives in
+  `hybrid-fusion`, neuron dynamics in `neuromod`.
 
 ## Status
 

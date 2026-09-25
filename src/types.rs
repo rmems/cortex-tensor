@@ -32,10 +32,14 @@ impl ExtractTokenOptions {
 }
 
 /// Execution mode used by the router.
+///
+/// Spiking routing is no longer a mode of this enum: it is provided by
+/// `snn::SpikingMoeRouter`, which composes an `MoeRouter` with an external
+/// [`crate::snn::SnnBackend`] (e.g. `neuromod`). `DenseSim` is the default
+/// for backward-compatible default routing semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RoutingMode {
     StubUniform,
-    DenseSim,
     #[default]
-    SpikingSim,
+    DenseSim,
 }
