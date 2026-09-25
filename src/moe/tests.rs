@@ -44,7 +44,6 @@ fn test_dense_sim_uses_real_gate_weights() {
     embedding[0] = 1.0;
     let out = model.forward(&embedding).unwrap();
     assert_eq!(out.selected_experts[0], 0);
-    assert_eq!(model.family(), ModelFamily::ReferenceMoe);
     assert_eq!(model.routing_tensor_name(), "blk.0.ffn_gate_inp.weight");
 
     let _ = remove_file(path);
@@ -114,7 +113,7 @@ fn test_real_checkpoint_probe_via_env() {
         return;
     };
 
-    let metadata = MoeRouter::probe_model(&path, None).unwrap();
+    let metadata = MoeRouter::probe_model(&path).unwrap();
     assert!(!metadata.architecture.is_empty());
     assert!(metadata.hidden_size > 0);
     assert!(metadata.num_experts > 0);
@@ -182,7 +181,7 @@ fn test_adapter_resolve_routing_insufficient_experts() {
     );
     let (path, mapped) = adapter_probe(&checkpoint, "routing-insufficient-experts");
     let result =
-        super::adapter::resolve_adapter(mapped.metadata(), &mapped, None, path.to_str().unwrap());
+        super::adapter::resolve_adapter(mapped.metadata(), &mapped, path.to_str().unwrap());
     assert!(matches!(
         result,
         Err(HybridError::UnsupportedFormat(msg)) if msg.contains("only exposes 1 experts")
@@ -203,7 +202,7 @@ fn test_adapter_resolve_routing_invalid_orientation() {
     );
     let (path, mapped) = adapter_probe(&checkpoint, "routing-invalid-orientation");
     let result =
-        super::adapter::resolve_adapter(mapped.metadata(), &mapped, None, path.to_str().unwrap());
+        super::adapter::resolve_adapter(mapped.metadata(), &mapped, path.to_str().unwrap());
     assert!(matches!(
         result,
         Err(HybridError::UnsupportedFormat(msg)) if msg.contains("unsupported orientation")
@@ -323,7 +322,7 @@ fn test_adapter_resolve_rejects_iq3_s_token_embedding() {
     );
     let (path, mapped) = adapter_probe(&checkpoint, "iq3s-token-embd");
     let result =
-        super::adapter::resolve_adapter(mapped.metadata(), &mapped, None, path.to_str().unwrap());
+        super::adapter::resolve_adapter(mapped.metadata(), &mapped, path.to_str().unwrap());
     assert!(matches!(
         result,
         Err(HybridError::UnsupportedFormat(msg)) if msg.contains("token embedding tensor")

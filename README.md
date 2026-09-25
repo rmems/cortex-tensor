@@ -15,7 +15,7 @@ Design goals:
 - **Zero GPU coupling.** No `cust`, no `libc` pinned-host registration, no `#[cfg(feature = "gpu")]` branches.
 - **Zero framework dependency.** No `candle`, no `tch`, no `ort`. The tensor type is a row-major `Vec<f32>` with explicit shape + strides.
 - **Small, auditable dependency set.** `serde`, `serde_json`, `thiserror`, `rand`, `rayon`, `memmap2`, `half` — nothing else.
-- **Inference-ready MoE.** A GGUF checkpoint bridge with family-aware adapter resolution for reference MoE checkpoints, Qwen3-MoE, Gemma-4, DeepSeek-2, and Llama-MoE.
+- **Inference-ready MoE.** A GGUF checkpoint bridge with adapter resolution for MoE checkpoints; backend-neutral — `general.architecture` is treated as opaque checkpoint data.
 
 ## Architecture
 
@@ -23,7 +23,7 @@ Design goals:
 src/
 ├── lib.rs            # re-exports Tensor, CortexError, HybridError, Result
 ├── error.rs          # CortexError + HybridError alias
-├── types.rs          # EMBEDDING_DIM, ModelFamily, RoutingMode
+├── types.rs          # EMBEDDING_DIM, ExtractTokenOptions, RoutingMode
 ├── tensor/
 │   ├── finite.rs     # finite-value policy + stable softmax / LayerNorm / RMSNorm / L2 kernels
 │   ├── mod.rs        # row-major Tensor { data, shape, strides }
@@ -35,7 +35,7 @@ src/
 │   └── mod.rs
 └── moe/
     ├── mod.rs        # MoeRouter public API, RoutingMode
-    ├── adapter.rs    # model-family detection + tensor selection
+    ├── adapter.rs    # checkpoint adapter resolution + tensor selection
     ├── checkpoint.rs # GGUF parser, mmap'd F32/F16/Q8_0/Q5_K access
     ├── dequant.rs    # Q8_0 / Q5_K row dequant, f16→f32, row sizing
     ├── gguf.rs       # GGUF magic/version + GGML type constants
@@ -72,14 +72,13 @@ src/
 
 | Item | Purpose |
 |---|---|
-| `MoeRouter` | Family-aware MoE router. Loads a GGUF checkpoint, detects model family, and produces top-k expert selections. |
+| `MoeRouter` | MoE router. Loads a GGUF checkpoint and produces top-k expert selections. |
 | `RoutingMode` | `StubUniform`, `DenseSim`, `SpikingSim` (simulation-only; no GPU dispatch). |
-| `ModelFamily` | `ReferenceMoe`, `Qwen3Moe`, `Gemma4`, `DeepSeek2`, `LlamaMoe`. |
 | `ExtractTokenOptions` | Optional resample / L2 when extracting token rows (`for_projector_forward()` matches legacy 2048 + L2). |
 
 Top-k selection ranks finite scores descending and breaks ties by ascending expert ID. NaN scores are rejected (`NanRoutingScore`); `+Inf` ranks above all finite values and `-Inf` below them. The helper is pure: the same `(scores, top_k)` pair always produces the same expert IDs.
 
-Supported GGUF tensor types: `F32`, `F16`, `Q8_0`, `Q5_K`. `IQ3_S` is detected and rejected (for token embeddings) with a clear error so callers can fall back to `llama.cpp` prompt embeddings. For the preferred GPU synapse tensor (e.g. attn_q on qwen3_moe_iq3_m), unsupported quants now correctly route to a checkpoint-backed `routing-f32` source (using the F32 routing tensor) instead of synthetic fallback. See `synapse_source()`, `real_gpu_synapse_tensor_name()`, and `MoeRouter` metadata.
+Supported GGUF tensor types: `F32`, `F16`, `Q8_0`, `Q5_K`. `IQ3_S` is detected and rejected (for token embeddings) with a clear error so callers can fall back to `llama.cpp` prompt embeddings. For the preferred GPU synapse tensor (e.g. attn_q on an IQ3-quantized MoE checkpoint), unsupported quants now correctly route to a checkpoint-backed `routing-f32` source (using the F32 routing tensor) instead of synthetic fallback. See `synapse_source()`, `real_gpu_synapse_tensor_name()`, and `MoeRouter` metadata.
 
 **Parser layer (planning, see #8 / #47):** the canonical home for GGUF v3
 deserialization and per-expert raw weight extraction is `engram-parser`, not this
@@ -101,9 +100,9 @@ boundary clean. Cross-links and notes are maintained for alignment.
 
 ### GGUF adapter + synapse source + SAAQ flow (code paths)
 
-- `MoeRouter::load` / `load_with_family_and_mode` → `probe_and_map` calls `resolve_adapter` (adapter.rs).
-- `resolve_adapter` infers family from arch, validates routing tensor (rank-2 F32 with one dim equal to `hidden_size` and the other ≥ expert count), validates token embeddings (F32/F16/Q8_0/Q5_K, shape `[hidden, vocab]`), sets `preferred_gpu_synapse_tensor` to `blk.0.attn_q.weight` when present.
-- Synapse source selection (updated for qwen3 IQ3_S): if attn_q is F16 rank-2 containing hidden_size (relaxed from strict square to support GQA) → `real`; elif attn_q present → `routing-f32` (real name = routing tensor name); else `synthetic-fallback`.
+- `MoeRouter::load` / `load_with_mode` → `probe_and_map` calls `resolve_adapter` (adapter.rs).
+- `resolve_adapter` reads `{architecture}.*` metadata keys (the arch string is opaque checkpoint data), validates routing tensor (rank-2 F32 with one dim equal to `hidden_size` and the other ≥ expert count), validates token embeddings (F32/F16/Q8_0/Q5_K, shape `[hidden, vocab]`), sets `preferred_gpu_synapse_tensor` to `blk.0.attn_q.weight` when present.
+- Synapse source selection (updated for IQ3_S checkpoints): if attn_q is F16 rank-2 containing hidden_size (relaxed from strict square to support GQA) → `real`; elif attn_q present → `routing-f32` (real name = routing tensor name); else `synthetic-fallback`.
 - Routing always uses `routing_tensor` via `checkpoint_gate_scores` (routing.rs) when checkpoint loaded (never synthetic for real loads).
 - `extract_named_token_embedding_from_checkpoint` (checkpoint.rs) supports dequant for Q8_0/Q5_K (and F32/F16); IQ3_S errors for embeddings.
 - Public metadata exposes `preferred_gpu_synapse_tensor_name`, `real_gpu_synapse_tensor_name`, `synapse_source` for SAAQ experiment / Surrogate_Viz consumers to choose dequant vs. synthetic path and load the right tensor (f16 path or f32 routing path).
@@ -118,8 +117,7 @@ This crate **owns**:
 - Decoder-only transformer building blocks (attention, block, `TransformerLM`).
 - MoE routing math — gate scores, softmax, top-k selection, L2 normalization,
   embedding resampling — and the simulation routing modes.
-- Model-family adapters and tensor selection (`ReferenceMoe`, `Qwen3Moe`,
-  `Gemma4`, `DeepSeek2`, `LlamaMoe`), including synapse-source resolution.
+- Checkpoint adapter and tensor selection, including synapse-source resolution.
 - Dequantization of supported GGUF quants to `f32` (`Q8_0`, `Q5_K`, `F16`).
 - The consumer-side GGUF bridge it needs today: mmap'd tensor access and
   token-embedding extraction.
@@ -177,7 +175,7 @@ adapters on top of parsed layout / extracted weights. Consume follow-up: [#47](h
 | Per-expert raw weight extraction | `engram-parser` | not implemented here |
 | mmap'd tensor access for the router | `cortex-tensor` | `src/moe/checkpoint.rs` (`probe_and_map_checkpoint`) |
 | Dequantization to `f32` | `cortex-tensor` | `src/moe/dequant.rs` |
-| Routing math, top-k, family adapters | `cortex-tensor` | `src/moe/routing.rs`, `src/moe/adapter.rs` |
+| Routing math, top-k, checkpoint adapter | `cortex-tensor` | `src/moe/routing.rs`, `src/moe/adapter.rs` |
 
 **Freeze until consume lands:** no new parser code and no dtype/GGUF format
 enhancements in `src/moe/checkpoint.rs`, `src/moe/gguf.rs`, or
@@ -247,7 +245,7 @@ let attn = MultiHeadAttention::new(/* dim */ 512, /* num_heads */ 8);
 let block = TransformerBlock::new(/* dim */ 512, /* num_heads */ 8, /* mlp_dim */ 2048);
 ```
 
-Loading a family-aware MoE GGUF and running the router:
+Loading a MoE GGUF checkpoint and running the router:
 
 ```rust
 use cortex_tensor::moe::{ExtractTokenOptions, MoeRouter, RoutingMode};

@@ -22,7 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Model-family enum uses `ReferenceMoe` for backend-neutral GGUF MoE checkpoints; unknown architecture strings infer `ReferenceMoe`.
 - MSRV / toolchain target: Rust 1.98.1 (`rust-version` in `Cargo.toml`, `rust-toolchain.toml`).
 - Softmax (tensor last-axis, attention, MoE routing) is max-subtracted with explicit NaN, `+Inf` split, and all-`-Inf` uniform behavior; partition sums use `f64`, then an `f32` residual so rows of length `≤ 4096` stay within `SOFTMAX_SUM_TOLERANCE` (RM-1354).
 - LayerNorm, RMSNorm, and L2 routing normalize accumulate moments in `f64` so large finite magnitudes stay finite; affine overflow saturates to `±f32::MAX` (RM-1354).
@@ -32,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **Breaking:** the public `ModelFamily` enum and its surface (RM-1834): `ModelFamily` (incl. `Qwen3Moe`/`Gemma4`/`DeepSeek2`/`LlamaMoe`/`ReferenceMoe` variants and `slug()`), `RouterMetadata.family`, `MoeRouter::family()`, `MoeRouter::load_with_family_and_mode`, and the `family_override` parameter on `MoeRouter::probe_model`. GGUF `general.architecture` stays exposed as an opaque string via `RouterMetadata.architecture` / `MoeRouter::architecture()`.
 - Optional Sentry integration (feature, dependency, and re-export). Wire monitoring at the application layer.
 - Qodana Cloud scan (`qodana-rust` + `QODANA_TOKEN_128211718`) after membership expiry. Deleted `qodana.yaml` and `.github/workflows/qodana_code_quality.yml`.
 
