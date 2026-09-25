@@ -112,7 +112,7 @@ impl MoeRouter {
             return Self::build_stub_router(num_experts, top_k, routing_mode);
         }
 
-        let (metadata, checkpoint) = Self::probe_and_map(model_path)?;
+        let (metadata, checkpoint, adapter) = Self::probe_and_map(model_path)?;
         let effective_num_experts = if num_experts == 0 {
             metadata.num_experts
         } else {
@@ -130,8 +130,6 @@ impl MoeRouter {
         } else {
             top_k.max(1).min(effective_num_experts)
         };
-        let adapter = resolve_adapter(checkpoint.metadata(), &checkpoint, model_path)?;
-
         Ok(Self {
             model_path: model_path.to_owned(),
             num_experts: effective_num_experts,
@@ -182,7 +180,7 @@ impl MoeRouter {
     }
 
     pub fn probe_model(path: &str) -> Result<RouterMetadata> {
-        let (metadata, _checkpoint) = Self::probe_and_map(path)?;
+        let (metadata, _checkpoint, _adapter) = Self::probe_and_map(path)?;
         Ok(metadata)
     }
 
@@ -255,7 +253,7 @@ impl MoeRouter {
         checkpoint.u16_tensor_values(&info, &self.model_path, tensor_name)
     }
 
-    fn probe_and_map(path: &str) -> Result<(RouterMetadata, MappedGgufCheckpoint)> {
+    fn probe_and_map(path: &str) -> Result<(RouterMetadata, MappedGgufCheckpoint, ModelAdapter)> {
         let (_raw_metadata, checkpoint) = probe_and_map_checkpoint(path)?;
         let adapter = resolve_adapter(checkpoint.metadata(), &checkpoint, path)?;
         let metadata = RouterMetadata {
@@ -269,7 +267,7 @@ impl MoeRouter {
             preferred_gpu_synapse_tensor_name: adapter.preferred_gpu_synapse_tensor.clone(),
             synapse_source: adapter.synapse_source_label().into(),
         };
-        Ok((metadata, checkpoint))
+        Ok((metadata, checkpoint, adapter))
     }
 
     fn simulate_moe_routing(&self, embedding: &[f32]) -> Result<MoeOutput> {
