@@ -4,11 +4,11 @@
 // full public API, loading logic, multiple routing modes, and extensive tests.
 // Further modularization planned.
 
-//! Public MoE router API backed by a family-aware GGUF bridge.
+//! Public MoE router API backed by a GGUF checkpoint bridge.
 //!
 //! Private helpers live in:
 //! - `moe/checkpoint.rs` for GGUF parsing + mapped tensor access
-//! - `moe/adapter.rs` for model-family detection and tensor selection
+//! - `moe/adapter.rs` for checkpoint adapter resolution and tensor selection
 //! - `moe/dequant.rs` for quantized tensor dequantization
 //! - `moe/gguf.rs` for GGUF constants
 //! - `moe/routing.rs` for routing math and embedding resampling
@@ -52,7 +52,7 @@ use self::routing::{
 };
 use crate::error::{HybridError, Result};
 pub use crate::types::RoutingMode;
-pub use crate::types::{EMBEDDING_DIM, ExtractTokenOptions, ModelFamily};
+pub use crate::types::{EMBEDDING_DIM, ExtractTokenOptions};
 
 pub(crate) use self::gguf::{
     GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_IQ3_S, GGML_TYPE_Q5_K, GGML_TYPE_Q8_0, GGUF_MAGIC,
@@ -79,7 +79,6 @@ pub struct MoeRouter {
 
 #[derive(Debug, Clone, Default)]
 pub struct RouterMetadata {
-    pub family: ModelFamily,
     pub architecture: String,
     pub hidden_size: usize,
     pub num_layers: usize,
@@ -100,13 +99,7 @@ pub struct MoeOutput {
 
 impl MoeRouter {
     pub fn load(model_path: &str, num_experts: usize, top_k: usize) -> Result<Self> {
-        Self::load_with_family_and_mode(
-            model_path,
-            num_experts,
-            top_k,
-            None,
-            RoutingMode::StubUniform,
-        )
+        Self::load_with_mode(model_path, num_experts, top_k, RoutingMode::StubUniform)
     }
 
     pub fn load_with_mode(
@@ -115,21 +108,11 @@ impl MoeRouter {
         top_k: usize,
         routing_mode: RoutingMode,
     ) -> Result<Self> {
-        Self::load_with_family_and_mode(model_path, num_experts, top_k, None, routing_mode)
-    }
-
-    pub fn load_with_family_and_mode(
-        model_path: &str,
-        num_experts: usize,
-        top_k: usize,
-        family_override: Option<ModelFamily>,
-        routing_mode: RoutingMode,
-    ) -> Result<Self> {
         if model_path.is_empty() {
-            return Self::build_stub_router(num_experts, top_k, family_override, routing_mode);
+            return Self::build_stub_router(num_experts, top_k, routing_mode);
         }
 
-        let (metadata, checkpoint) = Self::probe_and_map(model_path, family_override)?;
+        let (metadata, checkpoint, adapter) = Self::probe_and_map(model_path)?;
         let effective_num_experts = if num_experts == 0 {
             metadata.num_experts
         } else {
@@ -147,13 +130,6 @@ impl MoeRouter {
         } else {
             top_k.max(1).min(effective_num_experts)
         };
-        let adapter = resolve_adapter(
-            checkpoint.metadata(),
-            &checkpoint,
-            family_override,
-            model_path,
-        )?;
-
         Ok(Self {
             model_path: model_path.to_owned(),
             num_experts: effective_num_experts,
@@ -173,7 +149,6 @@ impl MoeRouter {
     fn build_stub_router(
         num_experts: usize,
         top_k: usize,
-        family_override: Option<ModelFamily>,
         routing_mode: RoutingMode,
     ) -> Result<Self> {
         let inferred_experts = num_experts.max(1);
@@ -184,7 +159,6 @@ impl MoeRouter {
             top_k: inferred_top_k,
             loaded: false,
             metadata: RouterMetadata {
-                family: family_override.unwrap_or(ModelFamily::ReferenceMoe),
                 architecture: "stub".into(),
                 hidden_size: EMBEDDING_DIM,
                 num_layers: 0,
@@ -205,8 +179,8 @@ impl MoeRouter {
         })
     }
 
-    pub fn probe_model(path: &str, family_override: Option<ModelFamily>) -> Result<RouterMetadata> {
-        let (metadata, _checkpoint) = Self::probe_and_map(path, family_override)?;
+    pub fn probe_model(path: &str) -> Result<RouterMetadata> {
+        let (metadata, _checkpoint, _adapter) = Self::probe_and_map(path)?;
         Ok(metadata)
     }
 
@@ -279,14 +253,10 @@ impl MoeRouter {
         checkpoint.u16_tensor_values(&info, &self.model_path, tensor_name)
     }
 
-    fn probe_and_map(
-        path: &str,
-        family_override: Option<ModelFamily>,
-    ) -> Result<(RouterMetadata, MappedGgufCheckpoint)> {
+    fn probe_and_map(path: &str) -> Result<(RouterMetadata, MappedGgufCheckpoint, ModelAdapter)> {
         let (_raw_metadata, checkpoint) = probe_and_map_checkpoint(path)?;
-        let adapter = resolve_adapter(checkpoint.metadata(), &checkpoint, family_override, path)?;
+        let adapter = resolve_adapter(checkpoint.metadata(), &checkpoint, path)?;
         let metadata = RouterMetadata {
-            family: adapter.family,
             architecture: adapter.architecture.clone(),
             hidden_size: adapter.hidden_size,
             num_layers: adapter.num_layers,
@@ -297,7 +267,7 @@ impl MoeRouter {
             preferred_gpu_synapse_tensor_name: adapter.preferred_gpu_synapse_tensor.clone(),
             synapse_source: adapter.synapse_source_label().into(),
         };
-        Ok((metadata, checkpoint))
+        Ok((metadata, checkpoint, adapter))
     }
 
     fn simulate_moe_routing(&self, embedding: &[f32]) -> Result<MoeOutput> {
@@ -408,10 +378,6 @@ impl MoeRouter {
 
     pub fn model_path(&self) -> &str {
         &self.model_path
-    }
-
-    pub fn family(&self) -> ModelFamily {
-        self.metadata.family
     }
 
     pub fn architecture(&self) -> &str {

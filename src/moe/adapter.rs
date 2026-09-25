@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Model-family adapter resolution for the GGUF router host.
+//! Checkpoint adapter resolution for the GGUF router host.
 
 use super::checkpoint::{GgufMetadata, GgufTensorInfo, MappedGgufCheckpoint};
 use super::{GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_Q5_K, GGML_TYPE_Q8_0};
 use crate::error::{HybridError, Result};
-use crate::types::ModelFamily;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SynapseSource {
@@ -16,7 +15,6 @@ pub(super) enum SynapseSource {
 
 #[derive(Debug, Clone)]
 pub(super) struct ModelAdapter {
-    pub(super) family: ModelFamily,
     pub(super) architecture: String,
     pub(super) hidden_size: usize,
     pub(super) num_layers: usize,
@@ -43,11 +41,9 @@ impl ModelAdapter {
 pub(super) fn resolve_adapter(
     metadata: &GgufMetadata,
     checkpoint: &MappedGgufCheckpoint,
-    family_override: Option<ModelFamily>,
     path: &str,
 ) -> Result<ModelAdapter> {
     let architecture = metadata.architecture.clone();
-    let family = infer_family(&architecture, family_override, path)?;
     let hidden_size = metadata
         .numeric(&format!("{architecture}.embedding_length"))
         .ok_or_else(|| {
@@ -82,7 +78,7 @@ pub(super) fn resolve_adapter(
         .as_ref()
         .and_then(|name| checkpoint.tensor_info(name, path).ok());
     let is_real_f16_attn = attn_info.as_ref().is_some_and(|info| {
-        // Relaxed from strict square [hidden, hidden] to support GQA models (Qwen3-MoE etc)
+        // Relaxed from strict square [hidden, hidden] to support GQA models
         // where attn_q.weight may be e.g. [num_q_heads * head_dim, hidden_size] (or transposed).
         // As long as it's F16 and involves the model hidden_size, treat as "real" F16 synapse-capable.
         // The synapse_source label + README document the contract for consumers.
@@ -91,7 +87,7 @@ pub(super) fn resolve_adapter(
     let real_gpu_synapse_tensor = if is_real_f16_attn {
         preferred_gpu_synapse_tensor.clone()
     } else if preferred_gpu_synapse_tensor.is_some() {
-        // qwen3 IQ3_S (and other non-F16 attn) now route to checkpoint-backed routing tensor
+        // IQ3_S (and other non-F16 attn) checkpoints now route to checkpoint-backed routing tensor
         // as "routing-f32" synapse source instead of falling back to synthetic. This fulfills
         // dequantized synapse path requirements for SAAQ without full IQ3_S dequant in adapter.
         Some(routing_tensor.clone())
@@ -107,7 +103,6 @@ pub(super) fn resolve_adapter(
     };
 
     Ok(ModelAdapter {
-        family,
         architecture,
         hidden_size,
         num_layers,
@@ -208,30 +203,4 @@ fn resolve_routing_tensor(
         )));
     }
     Ok(routing_tensor)
-}
-
-fn infer_family(
-    architecture: &str,
-    family_override: Option<ModelFamily>,
-    _path: &str,
-) -> Result<ModelFamily> {
-    let inferred = match architecture {
-        "qwen3moe" => ModelFamily::Qwen3Moe,
-        "gemma4" => ModelFamily::Gemma4,
-        "deepseek2" => ModelFamily::DeepSeek2,
-        "llama" => ModelFamily::LlamaMoe,
-        _ => ModelFamily::ReferenceMoe,
-    };
-
-    #[allow(clippy::collapsible_if)]
-    if let Some(expected) = family_override {
-        if expected != inferred {
-            return Err(HybridError::InvalidConfig(format!(
-                "model_family override {:?} does not match GGUF architecture '{architecture}'",
-                expected
-            )));
-        }
-    }
-
-    Ok(inferred)
 }

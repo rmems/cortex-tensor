@@ -31,31 +31,6 @@ impl ExtractTokenOptions {
     }
 }
 
-/// Supported GGUF model families for the router bridge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum ModelFamily {
-    /// Default family for GGUF MoE checkpoints whose architecture string is not
-    /// one of the named vendor families below.
-    #[default]
-    ReferenceMoe,
-    Qwen3Moe,
-    Gemma4,
-    DeepSeek2,
-    LlamaMoe,
-}
-
-impl ModelFamily {
-    pub fn slug(self) -> &'static str {
-        match self {
-            Self::ReferenceMoe => "reference_moe",
-            Self::Qwen3Moe => "qwen3_moe",
-            Self::Gemma4 => "gemma4",
-            Self::DeepSeek2 => "deepseek2",
-            Self::LlamaMoe => "llama_moe",
-        }
-    }
-}
-
 /// Execution mode used by the router.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RoutingMode {
