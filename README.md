@@ -13,7 +13,7 @@ Pure-Rust tensor, transformer, and Mixture-of-Experts building blocks. No CUDA, 
 Design goals:
 
 - **Zero GPU coupling.** No `cust`, no `libc` pinned-host registration, no `#[cfg(feature = "gpu")]` branches.
-- **Zero framework dependency.** No `candle`, no `tch`, no `ort`. The tensor type is a row-major `Vec<f32>` with explicit shape + strides.
+- **Zero framework dependency.** No `candle`, no `tch`, no `ort`. The tensor type is a single contiguous, row-major `Vec<f32>` plus a shape; there are no strided views (strides are implied by the shape and recomputed on demand).
 - **Small, auditable dependency set.** `serde`, `serde_json`, `thiserror`, `rand`, `rayon`, `memmap2`, `half` — nothing else.
 - **Inference-ready MoE.** A GGUF checkpoint bridge with adapter resolution for MoE checkpoints; backend-neutral — `general.architecture` is treated as opaque checkpoint data.
 
@@ -26,7 +26,7 @@ src/
 ├── types.rs          # EMBEDDING_DIM, ExtractTokenOptions, RoutingMode
 ├── tensor/
 │   ├── finite.rs     # finite-value policy + stable softmax / LayerNorm / RMSNorm / L2 kernels
-│   ├── mod.rs        # row-major Tensor { data, shape, strides }
+│   ├── mod.rs        # row-major Tensor { data, shape } (strides recomputed from shape)
 │   └── ops.rs        # matmul, batched_matmul, causal_mask, softmax, layer_norm, rms_norm
 ├── transformer/
 │   ├── attention.rs  # MultiHeadAttention (scaled dot-product, causal mask)
@@ -49,7 +49,7 @@ src/
 
 | Item | Purpose |
 |---|---|
-| `Tensor` | Row-major `f32` tensor (`data: Vec<f32>`, `shape`, `strides`), `Serialize`/`Deserialize`. |
+| `Tensor` | Row-major `f32` tensor (`data: Vec<f32>`, `shape`), `Serialize`/`Deserialize`. Always contiguous; row-major strides are recomputed via `row_major_strides()`, never stored. |
 | `Tensor::try_from_vec` | Fallible constructor: checked `numel` and stride arithmetic, no giant overflow allocations. |
 | `ops::try_matmul` / `try_batched_matmul` | Checked CPU matmul; rank, inner-dim, and size errors are typed. |
 | `ops::try_embedding` | Embedding lookup that returns `CortexError::TokenIndex` for OOV ids. |
