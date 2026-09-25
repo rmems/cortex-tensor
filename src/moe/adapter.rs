@@ -6,13 +6,6 @@ use super::checkpoint::{GgufMetadata, GgufTensorInfo, MappedGgufCheckpoint};
 use super::{GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_Q5_K, GGML_TYPE_Q8_0};
 use crate::error::{HybridError, Result};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SynapseSource {
-    Real,
-    RoutingF32,
-    SyntheticFallback,
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct ModelAdapter {
     pub(super) architecture: String,
@@ -22,20 +15,7 @@ pub(super) struct ModelAdapter {
     pub(super) expert_used_count: usize,
     pub(super) token_embedding_tensor: String,
     pub(super) routing_tensor: String,
-    pub(super) preferred_gpu_synapse_tensor: Option<String>,
-    pub(super) real_gpu_synapse_tensor: Option<String>,
-    pub(super) synapse_source: SynapseSource,
     pub(super) quantization: String,
-}
-
-impl ModelAdapter {
-    pub(super) fn synapse_source_label(&self) -> &'static str {
-        match self.synapse_source {
-            SynapseSource::Real => "real",
-            SynapseSource::RoutingF32 => "routing-f32",
-            SynapseSource::SyntheticFallback => "synthetic-fallback",
-        }
-    }
 }
 
 pub(super) fn resolve_adapter(
@@ -71,37 +51,6 @@ pub(super) fn resolve_adapter(
     let token_embedding_tensor = resolve_token_embedding_tensor(checkpoint, hidden_size, path)?;
     let routing_tensor = resolve_routing_tensor(checkpoint, hidden_size, num_experts, path)?;
 
-    let preferred_gpu_synapse_tensor = checkpoint
-        .has_tensor("blk.0.attn_q.weight")
-        .then(|| "blk.0.attn_q.weight".to_owned());
-    let attn_info = preferred_gpu_synapse_tensor
-        .as_ref()
-        .and_then(|name| checkpoint.tensor_info(name, path).ok());
-    let is_real_f16_attn = attn_info.as_ref().is_some_and(|info| {
-        // Relaxed from strict square [hidden, hidden] to support GQA models
-        // where attn_q.weight may be e.g. [num_q_heads * head_dim, hidden_size] (or transposed).
-        // As long as it's F16 and involves the model hidden_size, treat as "real" F16 synapse-capable.
-        // The synapse_source label + README document the contract for consumers.
-        info.ggml_type == GGML_TYPE_F16 && info.dims.len() == 2 && info.dims.contains(&hidden_size)
-    });
-    let real_gpu_synapse_tensor = if is_real_f16_attn {
-        preferred_gpu_synapse_tensor.clone()
-    } else if preferred_gpu_synapse_tensor.is_some() {
-        // IQ3_S (and other non-F16 attn) checkpoints now route to checkpoint-backed routing tensor
-        // as "routing-f32" synapse source instead of falling back to synthetic. This fulfills
-        // dequantized synapse path requirements for SAAQ without full IQ3_S dequant in adapter.
-        Some(routing_tensor.clone())
-    } else {
-        None
-    };
-    let synapse_source = if is_real_f16_attn {
-        SynapseSource::Real
-    } else if preferred_gpu_synapse_tensor.is_some() {
-        SynapseSource::RoutingF32
-    } else {
-        SynapseSource::SyntheticFallback
-    };
-
     Ok(ModelAdapter {
         architecture,
         hidden_size,
@@ -110,9 +59,6 @@ pub(super) fn resolve_adapter(
         expert_used_count,
         token_embedding_tensor,
         routing_tensor,
-        preferred_gpu_synapse_tensor,
-        synapse_source,
-        real_gpu_synapse_tensor,
         quantization: metadata.quantization.clone(),
     })
 }
@@ -164,7 +110,7 @@ fn resolve_token_embedding_tensor(
 ///
 /// Gate scoring (`routing_weight_index`) requires one dimension to equal
 /// `hidden_size` (metadata `embedding_length`, matching the resampled embedding
-/// length in `MoeRouter::compute_gate_scores`) and the other to be ≥ `num_experts`.
+/// length in `MoeRouter::gate_scores`) and the other to be ≥ `num_experts`.
 /// Do **not** relax this to `min(d0, d1) >= num_experts`: that previously
 /// accepted tensors that then failed on the first gate-score pass.
 fn resolve_routing_tensor(

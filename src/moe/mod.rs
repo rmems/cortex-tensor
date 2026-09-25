@@ -47,8 +47,8 @@ pub(crate) mod test_fixtures;
 use self::adapter::{ModelAdapter, resolve_adapter};
 use self::checkpoint::{MappedGgufCheckpoint, probe_and_map_checkpoint};
 use self::routing::{
-    apply_extract_token_options, checkpoint_gate_scores, normalize_l2, reject_nan_routing_scores,
-    resample_embedding, route_top_k, synthetic_gate_scores,
+    apply_extract_token_options, checkpoint_gate_scores, normalize_l2, resample_embedding,
+    synthetic_gate_scores,
 };
 use crate::error::{HybridError, Result};
 pub use crate::types::RoutingMode;
@@ -62,6 +62,8 @@ pub(crate) use self::gguf::{
     GGUF_VALUE_TYPE_UINT64, GGUF_VERSION,
 };
 
+pub(crate) use self::routing::{reject_nan_routing_scores, route_top_k};
+
 pub struct MoeRouter {
     model_path: String,
     num_experts: usize,
@@ -70,10 +72,6 @@ pub struct MoeRouter {
     metadata: RouterMetadata,
     adapter: Option<ModelAdapter>,
     routing_mode: RoutingMode,
-    expert_membranes: Vec<f32>,
-    hidden_membranes: Vec<f32>,
-    threshold: f32,
-    decay: f32,
     checkpoint: Option<MappedGgufCheckpoint>,
 }
 
@@ -86,8 +84,6 @@ pub struct RouterMetadata {
     pub expert_used_count: usize,
     pub quantization: String,
     pub routing_tensor_name: String,
-    pub preferred_gpu_synapse_tensor_name: Option<String>,
-    pub synapse_source: String,
 }
 
 #[derive(Debug, Clone)]
@@ -138,10 +134,6 @@ impl MoeRouter {
             metadata,
             adapter: Some(adapter),
             routing_mode,
-            expert_membranes: vec![0.0; effective_num_experts],
-            hidden_membranes: vec![0.0; EMBEDDING_DIM],
-            threshold: 0.75,
-            decay: 0.91,
             checkpoint: Some(checkpoint),
         })
     }
@@ -166,15 +158,9 @@ impl MoeRouter {
                 expert_used_count: inferred_top_k,
                 quantization: "stub".into(),
                 routing_tensor_name: "synthetic".into(),
-                preferred_gpu_synapse_tensor_name: None,
-                synapse_source: "synthetic-fallback".into(),
             },
             adapter: None,
             routing_mode,
-            expert_membranes: vec![0.0; inferred_experts],
-            hidden_membranes: vec![0.0; EMBEDDING_DIM],
-            threshold: 0.75,
-            decay: 0.91,
             checkpoint: None,
         })
     }
@@ -195,7 +181,6 @@ impl MoeRouter {
         match self.routing_mode {
             RoutingMode::StubUniform => Ok(self.stub_output()),
             RoutingMode::DenseSim => self.simulate_moe_routing(embedding),
-            RoutingMode::SpikingSim => self.spiking_moe_routing(embedding),
         }
     }
 
@@ -232,27 +217,6 @@ impl MoeRouter {
         Ok(apply_extract_token_options(&embedding, options))
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn synapse_weights_f16(&mut self, tensor_name: &str) -> Result<Vec<u16>> {
-        let checkpoint = self
-            .checkpoint
-            .as_mut()
-            .ok_or_else(|| HybridError::ModelLoad {
-                path: self.model_path.clone(),
-                reason: "checkpoint not loaded".into(),
-            })?;
-        let info = checkpoint
-            .tensor_info(tensor_name, &self.model_path)?
-            .clone();
-        if info.ggml_type != GGML_TYPE_F16 {
-            return Err(HybridError::UnsupportedFormat(format!(
-                "tensor '{tensor_name}' must be F16, got ggml_type={}",
-                info.ggml_type
-            )));
-        }
-        checkpoint.u16_tensor_values(&info, &self.model_path, tensor_name)
-    }
-
     fn probe_and_map(path: &str) -> Result<(RouterMetadata, MappedGgufCheckpoint, ModelAdapter)> {
         let (_raw_metadata, checkpoint) = probe_and_map_checkpoint(path)?;
         let adapter = resolve_adapter(checkpoint.metadata(), &checkpoint, path)?;
@@ -264,14 +228,12 @@ impl MoeRouter {
             expert_used_count: adapter.expert_used_count,
             quantization: adapter.quantization.clone(),
             routing_tensor_name: adapter.routing_tensor.clone(),
-            preferred_gpu_synapse_tensor_name: adapter.preferred_gpu_synapse_tensor.clone(),
-            synapse_source: adapter.synapse_source_label().into(),
         };
         Ok((metadata, checkpoint, adapter))
     }
 
     fn simulate_moe_routing(&self, embedding: &[f32]) -> Result<MoeOutput> {
-        let gate_scores = self.compute_gate_scores(embedding)?;
+        let gate_scores = self.gate_scores(embedding)?;
         let (expert_weights, selected_experts) = route_top_k(&gate_scores, self.top_k)?;
         let selected_mass: f32 = selected_experts
             .iter()
@@ -286,63 +248,10 @@ impl MoeRouter {
         })
     }
 
-    fn spiking_moe_routing(&mut self, embedding: &[f32]) -> Result<MoeOutput> {
-        let gate_scores = self.compute_gate_scores(embedding)?;
-        reject_nan_routing_scores(&gate_scores)?;
-        let n = self.num_experts;
-        let mut next_membranes = self.expert_membranes.clone();
-        let mut membrane_scores = Vec::with_capacity(n);
-        let mut expert_spikes = vec![0.0f32; n];
-
-        for expert_id in 0..n {
-            next_membranes[expert_id] =
-                next_membranes[expert_id] * self.decay + gate_scores[expert_id] * 0.18;
-
-            let spike = if next_membranes[expert_id] > self.threshold {
-                next_membranes[expert_id] -= self.threshold;
-                1.0
-            } else if next_membranes[expert_id] < -self.threshold {
-                next_membranes[expert_id] += self.threshold;
-                -1.0
-            } else {
-                0.0
-            };
-
-            expert_spikes[expert_id] = spike;
-            membrane_scores.push(next_membranes[expert_id] + spike * self.threshold);
-        }
-
-        let (expert_weights, selected_experts) = route_top_k(&membrane_scores, self.top_k)?;
-        self.expert_membranes = next_membranes;
-        let active_mass: f32 = selected_experts
-            .iter()
-            .map(|&expert_id| expert_spikes[expert_id] * expert_weights[expert_id])
-            .sum();
-
-        let mut hidden = vec![0.0f32; EMBEDDING_DIM];
-        for (idx, value) in hidden.iter_mut().enumerate() {
-            let input = embedding[idx] * active_mass;
-            self.hidden_membranes[idx] = self.hidden_membranes[idx] * self.decay + input;
-            let spike = if self.hidden_membranes[idx] > self.threshold {
-                self.hidden_membranes[idx] -= self.threshold;
-                1.0
-            } else if self.hidden_membranes[idx] < -self.threshold {
-                self.hidden_membranes[idx] += self.threshold;
-                -1.0
-            } else {
-                0.0
-            };
-            *value = spike * 0.3;
-        }
-
-        Ok(MoeOutput {
-            expert_weights,
-            selected_experts,
-            hidden,
-        })
-    }
-
-    fn compute_gate_scores(&self, embedding: &[f32]) -> Result<Vec<f32>> {
+    /// Gate scores for `embedding` under this router's checkpoint or synthetic
+    /// policy. Exposed crate-wide so `snn::SpikingMoeRouter` can compose
+    /// routing with an external [`crate::snn::SnnBackend`].
+    pub(crate) fn gate_scores(&self, embedding: &[f32]) -> Result<Vec<f32>> {
         if let (Some(checkpoint), Some(adapter)) = (&self.checkpoint, &self.adapter) {
             let mut routed_embedding = resample_embedding(embedding, adapter.hidden_size);
             normalize_l2(&mut routed_embedding);
@@ -369,11 +278,6 @@ impl MoeRouter {
 
     pub fn is_loaded(&self) -> bool {
         self.loaded
-    }
-
-    pub fn reset_state(&mut self) {
-        self.expert_membranes.fill(0.0);
-        self.hidden_membranes.fill(0.0);
     }
 
     pub fn model_path(&self) -> &str {
@@ -408,32 +312,16 @@ impl MoeRouter {
         &self.metadata.routing_tensor_name
     }
 
-    pub fn preferred_gpu_synapse_tensor_name(&self) -> Option<&str> {
-        self.metadata.preferred_gpu_synapse_tensor_name.as_deref()
-    }
-
-    pub fn real_gpu_synapse_tensor_name(&self) -> Option<&str> {
-        self.adapter
-            .as_ref()
-            .and_then(|adapter| adapter.real_gpu_synapse_tensor.as_deref())
-    }
-
-    pub fn synapse_source(&self) -> &str {
-        &self.metadata.synapse_source
-    }
-
     pub fn num_experts(&self) -> usize {
         self.num_experts
     }
 
-    pub fn routing_mode(&self) -> RoutingMode {
-        self.routing_mode
+    pub fn top_k(&self) -> usize {
+        self.top_k
     }
 
-    #[cfg(test)]
-    pub(crate) fn has_state_activity(&self) -> bool {
-        self.expert_membranes.iter().any(|&value| value != 0.0)
-            || self.hidden_membranes.iter().any(|&value| value != 0.0)
+    pub fn routing_mode(&self) -> RoutingMode {
+        self.routing_mode
     }
 }
 

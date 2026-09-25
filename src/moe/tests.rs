@@ -74,40 +74,6 @@ fn dense_sim_rejects_nan_gate_score() {
 }
 
 #[test]
-fn spiking_sim_ranks_raw_membrane_scores_before_softmax() {
-    let mut model =
-        MoeRouter::load_with_mode("", 8, 2, RoutingMode::SpikingSim).expect("stub spiking load");
-    let mut embedding = vec![0.0f32; EMBEDDING_DIM];
-    let chunk = (EMBEDDING_DIM / 8).max(1);
-    embedding[3 * chunk] = f32::INFINITY;
-    let out = model.forward(&embedding).unwrap();
-    assert_eq!(out.selected_experts[0], 3);
-}
-
-#[test]
-fn spiking_sim_rejects_nan_gate_score_before_membrane_update() {
-    let mut model =
-        MoeRouter::load_with_mode("", 8, 2, RoutingMode::SpikingSim).expect("stub spiking load");
-    let mut embedding = vec![0.0f32; EMBEDDING_DIM];
-    let chunk = (EMBEDDING_DIM / 8).max(1);
-    embedding[3 * chunk] = f32::NAN;
-    assert!(matches!(
-        model.forward(&embedding).unwrap_err(),
-        HybridError::NanRoutingScore { expert_id: 3 }
-    ));
-    assert!(!model.has_state_activity());
-}
-
-#[test]
-fn test_spiking_sim_state_can_reset() {
-    let mut model = MoeRouter::load_with_mode("", 8, 2, RoutingMode::SpikingSim).unwrap();
-    let _ = model.forward(&vec![1.0; EMBEDDING_DIM]).unwrap();
-    assert!(model.has_state_activity());
-    model.reset_state();
-    assert!(!model.has_state_activity());
-}
-
-#[test]
 fn test_real_checkpoint_probe_via_env() {
     let Some(path) = std::env::var("GGUF_CHECKPOINT_PATH").ok() else {
         return;

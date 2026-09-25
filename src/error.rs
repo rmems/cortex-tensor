@@ -70,6 +70,10 @@ pub enum CortexError {
     #[error("router forward pass failed: {0}")]
     MoeForward(String),
 
+    /// An external SNN backend (e.g. `neuromod`) rejected a step.
+    #[error("SNN backend step failed: {0}")]
+    SnnBackend(String),
+
     /// NaN is rejected before ranking so it never participates in `partial_cmp`.
     #[error("NaN routing score at expert {expert_id}")]
     NanRoutingScore { expert_id: usize },
