@@ -34,6 +34,12 @@ mod neuromod_adapter;
 #[cfg(feature = "neuromod")]
 pub use neuromod_adapter::NeuromodNetwork;
 
+#[cfg(feature = "axon-encoder")]
+mod axon_adapter;
+
+#[cfg(feature = "axon-encoder")]
+pub use axon_adapter::AxonEncoder;
+
 /// Capabilities a backend advertises to orchestrators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnnCapabilities {
@@ -85,9 +91,21 @@ pub trait SnnBackend {
 }
 
 /// ANN → SNN boundary: map an ANN-side f32 signal into backend stimuli.
+///
+/// `&mut self` because real encoders are stateful (phase accumulators,
+/// streaming windows); one `encode` call is one backend tick. Encoder state
+/// advances when `encode` is called — it is NOT failure-atomic with respect
+/// to later forward errors; callers needing a clean epoch reset the encoder.
 pub trait SnnEncoder {
-    /// Produce a stimulus vector of exactly `channels` length.
-    fn encode(&self, ann_signal: &[f32], channels: usize) -> Vec<f32>;
+    /// Produce a stimulus vector of exactly `channels` length, or an error
+    /// when the encoding cannot be represented in `channels` (e.g. spikes
+    /// outside the channel space).
+    fn encode(&mut self, ann_signal: &[f32], channels: usize) -> Result<Vec<f32>>;
+
+    /// Restore the encoder's streaming state (phase/window) to a clean epoch.
+    /// Called by [`SpikingMoeRouter::reset`] alongside the backend reset.
+    /// Stateless encoders use the no-op default.
+    fn reset(&mut self) {}
 }
 
 /// SNN → ANN boundary: map one step of spikes into per-channel f32 readouts.
@@ -112,15 +130,15 @@ impl Default for RateEncoder {
 }
 
 impl SnnEncoder for RateEncoder {
-    fn encode(&self, ann_signal: &[f32], channels: usize) -> Vec<f32> {
+    fn encode(&mut self, ann_signal: &[f32], channels: usize) -> Result<Vec<f32>> {
         let mut stimulus = vec![0.0f32; channels];
         if ann_signal.is_empty() {
-            return stimulus;
+            return Ok(stimulus);
         }
         for (idx, slot) in stimulus.iter_mut().enumerate() {
             *slot = ann_signal[idx % ann_signal.len()] * self.gain;
         }
-        stimulus
+        Ok(stimulus)
     }
 }
 
@@ -200,7 +218,7 @@ where
         // Encoders may inject NaN stimuli; validate before the backend
         // consumes a tick so the whole forward stays fail-closed. ±Inf is
         // rankable per the finite-value policy and passes through.
-        let stimulus = self.encoder.encode(&gate_scores, self.backend.channels());
+        let stimulus = self.encoder.encode(&gate_scores, self.backend.channels())?;
         if stimulus.iter().any(|v| v.is_nan()) {
             return Err(CortexError::SnnNan {
                 stage: "encoder stimulus",
@@ -265,8 +283,9 @@ where
         self.forward_impl(embedding, true)
     }
 
-    /// Reset the backend epoch; router (ANN) state is untouched.
+    /// Reset the backend and encoder epochs; router (ANN) state is untouched.
     pub fn reset(&mut self) {
+        self.encoder.reset();
         self.backend.reset();
     }
 
@@ -285,6 +304,15 @@ where
 
     pub fn backend_mut(&mut self) -> &mut B {
         &mut self.backend
+    }
+
+    pub fn encoder(&self) -> &E {
+        &self.encoder
+    }
+
+    /// Access the encoder (e.g. to reset its streaming state after an error).
+    pub fn encoder_mut(&mut self) -> &mut E {
+        &mut self.encoder
     }
 }
 

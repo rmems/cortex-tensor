@@ -19,6 +19,8 @@ default = []
 # Optional so the core contract stays dependency-light; other backend crates
 # are evaluated individually, not added wholesale.
 neuromod = ["dep:neuromod"]
+# SNN encoder adapter: `axon-encoder` spike encoders behind `snn::SnnEncoder`.
+axon-encoder = ["dep:axon-encoder"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -29,6 +31,7 @@ rayon = "1.7"
 memmap2 = "0.9"
 half = "2"
 neuromod = { version = "0.6", optional = true }
+axon-encoder = { version = "0.5", optional = true }
 
 [profile.release]
 opt-level = 3

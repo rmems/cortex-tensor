@@ -100,6 +100,7 @@ embedding neuron dynamics.
 | `SnnStepOutput` / `SnnCapabilities` | Per-tick spike output and backend capability reporting for orchestrators (e.g. `hybrid-fusion`). |
 | `SpikingMoeRouter` | Composes `MoeRouter` gate scores with an `SnnBackend`: encode → step → decode → deterministic top-k. Replaces the removed embedded `RoutingMode::SpikingSim`. |
 | `NeuromodNetwork` | `neuromod`-feature adapter over `neuromod::SpikingNetwork` (LIF + Izhikevich, R-STDP). Frozen eval delegates to `step` until a neuromod release ships `step_frozen`; `capabilities().frozen_evaluation` reports `false` meanwhile. |
+| `AxonEncoder` | `axon-encoder`-feature adapter over any `axon_encoder::Encoder` (rate, latency, delta, predictive, population). Spikes net to `+1.0`/`-1.0` per channel per tick. |
 
 ```toml
 [dependencies]
@@ -259,6 +260,7 @@ Features (all off by default):
 | Feature | Effect |
 |---|---|
 | `neuromod` | Enables `snn::NeuromodNetwork` — `neuromod::SpikingNetwork` behind `snn::SnnBackend`. Pulls the optional `neuromod` crate dependency. |
+| `axon-encoder` | Enables `snn::AxonEncoder` — any `axon_encoder::Encoder` behind `snn::SnnEncoder` (streaming `encode_step` per forward tick). Pulls the optional `axon-encoder` crate dependency. |
 
 ## Quick start
 
