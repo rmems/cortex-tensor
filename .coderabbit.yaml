@@ -1,5 +1,5 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
-# Draft CodeRabbit config for rmems/cortex-tensor (generated locally, not pushed).
+# CodeRabbit config for rmems/cortex-tensor.
 language: en-US
 reviews:
   profile: chill
@@ -12,9 +12,9 @@ reviews:
   - '!**/target/**'
   path_instructions:
   - path: '**/*.rs'
-    instructions: 'Rust edition 2024; `rust-version = "1.98.1"` and `rust-toolchain.toml` pins 1.98.1. Do not suggest downgrading the edition or using std/language APIs newer than the pinned toolchain/MSRV. CI gate: `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all-features` and `cargo test` (default features). Flag anything that would fail `cargo fmt --check` or clippy `-D warnings`. Features `neuromod` and `axon-encoder` are optional; code must build and test with and without `--all-features`.'
+    instructions: 'Rust edition 2024; `rust-version = "1.98.1"` and `rust-toolchain.toml` pins 1.98.1. Do not suggest downgrading the edition or using std/language APIs newer than the pinned toolchain/MSRV. CI gate: `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all-features` and `cargo test` (default features). Flag anything that would fail `cargo fmt --check` or clippy `-D warnings`. Flag any new `unsafe` block. Features `neuromod` and `axon-encoder` are optional; code must build and test with and without `--all-features`.'
   - path: src/moe/checkpoint.rs
-    instructions: 'Scrutinize every `unsafe` block (currently in `src/moe/checkpoint.rs`): require a written safety justification covering aliasing, lifetimes, alignment and bounds; prefer a safe abstraction when one exists. Flag any new `unsafe` outside these files.'
+    instructions: 'Scrutinize every `unsafe` block (currently in `src/moe/checkpoint.rs`): require a written safety justification covering aliasing, lifetimes, alignment and bounds; prefer a safe abstraction when one exists.'
   - path: '**/Cargo.toml'
     instructions: Cargo manifest. Call out new dependencies and feature changes, and keep `rust-version` / `edition` consistent with CI. Keep `rust-version` equal to the `rust-toolchain.toml` channel.
   - path: .github/workflows/**
