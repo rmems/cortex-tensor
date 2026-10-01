@@ -90,6 +90,64 @@ pub enum CortexError {
     #[error("NaN routing score at expert {expert_id}")]
     NanRoutingScore { expert_id: usize },
 
+    // ── Stage-execution errors ────────────────────────────────────────────
+    /// A stage identifier was not a valid dotted path (see [`crate::stage::StageId`]).
+    #[error("invalid stage id '{id}': {reason}")]
+    InvalidStageId { id: String, reason: String },
+
+    /// A topology failed structural validation (empty, duplicate ids, or a
+    /// forward/self stage reference).
+    #[error("invalid topology: {reason}")]
+    InvalidTopology { reason: String },
+
+    /// An executor was asked to run a stage kind its capabilities do not cover.
+    #[error("backend '{backend}' does not support stage '{stage_id}' of kind {kind}")]
+    UnsupportedStage {
+        backend: &'static str,
+        stage_id: String,
+        kind: String,
+    },
+
+    /// A stage descriptor was missing the parameters its kind requires.
+    #[error("stage '{stage_id}' is missing required parameters")]
+    MissingStageParams { stage_id: String },
+
+    /// A stage received the wrong number of inputs.
+    #[error("stage '{stage_id}' expected {expected} input(s), got {got}")]
+    StageInputArity {
+        stage_id: String,
+        expected: usize,
+        got: usize,
+    },
+
+    /// A stage input had the wrong kind (e.g. tokens where a tensor was expected).
+    #[error("stage '{stage_id}' received an input of the wrong kind at index {index}")]
+    StageInputKind { stage_id: String, index: usize },
+
+    /// A stage input or output used a dtype the executor does not support.
+    #[error("stage '{stage_id}' dtype mismatch: expected {expected}, got {got}")]
+    StageDTypeMismatch {
+        stage_id: String,
+        expected: String,
+        got: String,
+    },
+
+    /// A composition run had no binding for a named external ingress.
+    ///
+    /// The field is deliberately not named `source`: `thiserror` would treat a
+    /// field named `source` as the error cause and require it to implement
+    /// [`std::error::Error`], but here it is just the external ingress name.
+    #[error("missing binding for external stage source '{name}'")]
+    MissingStageBinding { name: String },
+
+    /// A stage's execution failed; the wrapped error carries the cause.
+    #[error("stage '{stage_id}' failed: {source}")]
+    StageFailed {
+        stage_id: String,
+        #[source]
+        source: Box<CortexError>,
+    },
+
     // ── I/O / serde ───────────────────────────────────────────────────────
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),

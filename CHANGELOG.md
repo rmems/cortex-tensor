@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- New `stage` module: backend-neutral ANN stage-execution contracts (`DType`, `TensorMeta`, `StageTensor`, `StageKind`/`StageKindTag` with separate dense/gated MLP and layer/RMS norm tags, `NormKind`, `MlpKind`, `StageSource`, `AnnStage`, validated `StageId` dotted-path newtype, validated `AnnTopology` with sub-span dependency listing, `AnnCapabilities`, `StageInput`, the generic `AnnExecutor` trait whose contract never names a concrete tensor, and the `run_topology` composition driver over `ExternalBindings`). Descriptors carry no serde; a device field and tensor wire format are intentionally deferred to RM-1827 (RM-1822).
+- **Possible break for exhaustive `CortexError` matches:** new stage-boundary variants `InvalidStageId`, `InvalidTopology`, `UnsupportedStage`, `MissingStageParams`, `StageInputArity`, `StageInputKind`, `StageDTypeMismatch`, `MissingStageBinding`, and `StageFailed` (RM-1822).
 - New `snn` module: backend-neutral ANN↔SNN execution/interchange contract (`SnnBackend`, `SnnEncoder`/`SnnDecoder`, `SnnStepOutput`, `SnnCapabilities`), default `RateEncoder`/`SpikeCountDecoder`, and `SpikingMoeRouter` composing `MoeRouter` gate scores with an external SNN backend (RM-1824).
 - Optional `neuromod` cargo feature adding `snn::NeuromodNetwork` — `neuromod::SpikingNetwork` behind `SnnBackend`. Frozen evaluation delegates to `step` until a neuromod release ships `step_frozen`; `capabilities().frozen_evaluation` reports `false` meanwhile.
 - `MoeRouter::top_k()` accessor and `CortexError::{SnnBackend, SnnChannelMismatch, SnnNan, SnnSpikeOutOfRange}` variants.
