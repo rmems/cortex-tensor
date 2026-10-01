@@ -102,7 +102,7 @@ reference_serde!(TransformerLM, ModelWire {
 });
 
 impl TransformerLM {
-    fn validate_wire(&self) -> Result<()> {
+    pub(crate) fn validate_wire(&self) -> Result<()> {
         let cfg = &self.config;
         cfg.validate_wire()?;
         expect_shape(&self.tok_embed, &[cfg.vocab_size, cfg.dim])?;
@@ -207,6 +207,28 @@ impl TransformerLM {
     /// Fallible hidden-state extraction: same contract as
     /// [`Self::try_forward`] but stops before the LM head.
     pub fn try_hidden_states(&self, token_ids: &[u32]) -> Result<Tensor> {
+        let mut x = self.embed_tokens(token_ids)?;
+
+        for block in &self.blocks {
+            x = block.try_forward(&x)?;
+        }
+
+        try_layer_norm(
+            &x,
+            &self.final_ln_w,
+            &self.final_ln_b,
+            super::LAYER_NORM_EPS,
+        )
+    }
+
+    /// Token + positional embedding, shared by [`Self::try_hidden_states`] and
+    /// the stage executor's embedding stage so both compute byte-identical
+    /// results.
+    ///
+    /// Returns [`CortexError::InputLengthMismatch`] when the sequence exceeds
+    /// `config.max_seq_len` (or, defensively, when a position index overflows
+    /// `u32`), and [`CortexError::TokenIndex`] for out-of-vocabulary ids.
+    pub(crate) fn embed_tokens(&self, token_ids: &[u32]) -> Result<Tensor> {
         let seq_len = token_ids.len();
         if seq_len > self.config.max_seq_len {
             return Err(CortexError::InputLengthMismatch {
@@ -226,13 +248,7 @@ impl TransformerLM {
                 got: seq_len,
             })?;
         let pos = try_embedding(&self.pos_embed, &pos_ids)?;
-        let mut x = tok.try_add(&pos)?;
-
-        for block in &self.blocks {
-            x = block.try_forward(&x)?;
-        }
-
-        try_layer_norm(&x, &self.final_ln_w, &self.final_ln_b, 1e-5)
+        tok.try_add(&pos)
     }
 
     pub fn param_count(&self) -> usize {

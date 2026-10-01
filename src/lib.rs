@@ -31,5 +31,5 @@ pub mod transformer;
 pub mod types;
 
 pub use error::{CortexError, HybridError, Result};
-pub use stage::{AnnExecutor, AnnStage, AnnTopology, StageId, StageKind};
+pub use stage::{AnnExecutor, AnnStage, AnnTopology, ReferenceExecutor, StageId, StageKind};
 pub use tensor::Tensor;

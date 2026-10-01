@@ -165,7 +165,7 @@ impl TransformerBlock {
 
     /// Fallible forward pass.
     pub fn try_forward(&self, x: &Tensor) -> Result<Tensor> {
-        let eps = 1e-5;
+        let eps = super::LAYER_NORM_EPS;
 
         // Attention sub-layer with residual
         let normed = try_layer_norm(x, &self.ln1_w, &self.ln1_b, eps)?;
