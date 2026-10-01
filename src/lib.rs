@@ -13,6 +13,7 @@
 //! | [`transformer`] | Transformer building blocks (attention, block, model) |
 //! | [`moe`] | Mixture-of-Experts router + GGUF checkpoint bridge |
 //! | [`snn`] | Backend-neutral SNN execution contract + optional `neuromod` adapter |
+//! | [`stage`] | Backend-neutral ANN stage-execution contracts |
 //! | [`types`] | Shared types used by `moe` |
 //! | [`error`] | `CortexError` unified error type |
 //!
@@ -24,9 +25,11 @@ pub mod error;
 pub mod moe;
 pub mod reference_json;
 pub mod snn;
+pub mod stage;
 pub mod tensor;
 pub mod transformer;
 pub mod types;
 
 pub use error::{CortexError, HybridError, Result};
+pub use stage::{AnnExecutor, AnnStage, AnnTopology, ReferenceExecutor, StageId, StageKind};
 pub use tensor::Tensor;

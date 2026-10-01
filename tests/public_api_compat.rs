@@ -4,10 +4,12 @@
 //! for pre-1.0 source compatibility. If a signature here fails to compile, the
 //! wrapper was removed or changed without a SemVer decision (see RM-1353).
 
+use cortex_tensor::stage::{AnnStage, AnnTopology, ReferenceExecutor, StageId};
 use cortex_tensor::tensor::ops::{
     batched_matmul, embedding, layer_norm, matmul, rms_norm, try_batched_matmul, try_causal_mask,
     try_embedding, try_layer_norm, try_matmul, try_rms_norm,
 };
+use cortex_tensor::transformer::TransformerLM;
 use cortex_tensor::{Result, Tensor};
 
 #[test]
@@ -40,4 +42,36 @@ fn fallible_apis_are_public() {
     let _: fn(&Tensor, &Tensor) -> Result<Tensor> = Tensor::try_mul;
     let _: fn(&Tensor, usize) -> Result<Tensor> = Tensor::try_row;
     let _: fn(&Tensor) -> Result<Tensor> = Tensor::try_softmax_last;
+}
+
+#[test]
+fn stage_execution_apis_have_stable_signatures() {
+    // Fallible `StageId` constructor. `new` takes `impl Into<String>`; pin the
+    // `String` instantiation, which is the form `from_transformer` relies on.
+    let _: fn(String) -> Result<StageId> = StageId::new;
+    // Validated topology constructor over an ordered stage list.
+    let _: fn(Vec<AnnStage>) -> Result<AnnTopology> = AnnTopology::new;
+    // Lifetime-generic model-to-topology builder: the returned executor borrows
+    // from the model, tying its lifetime to the input. The fn item does not
+    // coerce to a higher-ranked `for<'a> fn(...)` pointer, so pin the exact
+    // signature structurally: this local function compiles only while
+    // `ReferenceExecutor::from_transformer` keeps the `&'a TransformerLM ->
+    // Result<(ReferenceExecutor<'a>, AnnTopology)>` shape.
+    fn from_transformer_pin<'a>(
+        model: &'a TransformerLM,
+    ) -> Result<(ReferenceExecutor<'a>, AnnTopology)> {
+        ReferenceExecutor::from_transformer(model)
+    }
+    // Reference the pin so it is not dead code; invoking it on a throwaway model
+    // forces the compiler to resolve the exact borrowed-return signature.
+    let model = TransformerLM::try_new(cortex_tensor::transformer::TransformerConfig {
+        vocab_size: 4,
+        dim: 8,
+        num_heads: 2,
+        num_layers: 1,
+        ff_dim: 16,
+        max_seq_len: 4,
+    })
+    .expect("valid pin model");
+    let (_exec, _topo) = from_transformer_pin(&model).expect("pin resolves");
 }

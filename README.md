@@ -117,6 +117,29 @@ let mut hybrid = SpikingMoeRouter::new(router, backend, RateEncoder::default(), 
 let out = hybrid.forward(&embedding)?; // or forward_frozen for held-out eval
 ```
 
+### `stage`
+
+Backend-neutral ANN stage-execution contracts — describe an ANN forward pass as
+an ordered graph of stages, then run it through a swappable backend.
+
+| Item | Purpose |
+|---|---|
+| `StageKind` / `StageKindTag` | What a stage computes (embedding, attention, layer/RMS norm, dense/gated MLP, MoE router/expert, add, readout, custom) and its fieldless tag for capability checks. |
+| `AnnStage` / `StageId` / `AnnTopology` | A stage (validated dotted-path id + kind + input wiring) and a validated, topologically-ordered graph of them, with `sub_span` extraction. |
+| `AnnExecutor` / `AnnCapabilities` | The execution contract (generic over the backend's tensor type — it never names `Tensor`) plus capability reporting, mirroring `snn::SnnBackend`. |
+| `run_topology` / `ExternalBindings` | Composition driver that runs an executor over a topology, resolving external ingress (tokens or hidden-state tensors). |
+| `ReferenceExecutor` | The reference backend (see below) and `from_transformer`, which emits a block-ordered topology for a `TransformerLM`. |
+
+The **reference backend is `f32` / CPU / dense**. `ReferenceExecutor` reuses the
+same kernels as `TransformerLM::try_forward`, so a topology built by
+`ReferenceExecutor::from_transformer` reproduces the model's output bit for bit.
+MoE router, MoE expert, and gated MLP stages are present in the stage vocabulary
+but are **rejected** by the reference backend with `CortexError::UnsupportedStage`
+— accelerated or MoE-capable backends (e.g. Candle / Burn) belong in optional
+adapters, not in this core crate. A device field and a concrete cross-backend
+tensor wire format are intentionally deferred (RM-1827); stage descriptors carry
+no serde and describe only identity, kind, and wiring.
+
 ### Migration notes
 
 - `RoutingMode::SpikingSim` → `snn::SpikingMoeRouter` + an `SnnBackend`

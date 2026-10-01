@@ -38,6 +38,14 @@ macro_rules! reference_serde {
     };
 }
 
+/// Epsilon used by every LayerNorm in the reference transformer.
+///
+/// Shared by [`block::TransformerBlock::try_forward`], the final layer norm in
+/// [`model::TransformerLM::try_hidden_states`], and the stage executor
+/// ([`crate::stage::ReferenceExecutor`]) so a composed topology normalizes with
+/// exactly the same constant as the monolithic forward pass.
+pub(crate) const LAYER_NORM_EPS: f32 = 1e-5;
+
 fn expect_shape(tensor: &crate::tensor::Tensor, expected: &[usize]) -> crate::error::Result<()> {
     if tensor.shape() != expected {
         return Err(crate::error::CortexError::ShapeMismatch {
