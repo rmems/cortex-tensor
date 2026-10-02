@@ -39,7 +39,15 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-Coverage in CI: `cargo llvm-cov --lib --no-default-features --locked --lcov --output-path lcov.info`.
+Coverage, as CI runs it after the build and test steps:
+
+```bash
+cargo llvm-cov --lib --no-default-features --lcov --output-path lcov.info
+```
+
+CI passes `--locked` to that step only because the earlier `cargo build` has already generated a
+`Cargo.lock` in the runner. In a fresh checkout, leave `--locked` off (or run
+`cargo generate-lockfile` first) because the lockfile isn't committed.
 
 ## Conventions visible in the repo
 
