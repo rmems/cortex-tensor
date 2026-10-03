@@ -176,8 +176,9 @@ identity, kind, and wiring.
 
 **Parser layer (planning, see #8 / #47):** the canonical home for GGUF v3
 deserialization and per-expert raw weight extraction is `engram-parser`, not this
-crate. Parser/dtype freeze holds until #47 can wrap `parse_checkpoint_layout`
-around engram-parser 0.2.0 — see [GGUF parser boundary](#gguf-parser-boundary-see-8).
+crate. Parser/dtype freeze holds until #47 can consume published engram-parser
+0.3.x checkpoint/tensor APIs and retire in-tree GGUF — see
+[GGUF parser boundary](#gguf-parser-boundary-see-8).
 
 **Future formats (planning, see #9 / #32):** Safetensors header inspection,
 deterministic manifests, and MoE candidate discovery belong in `engram-parser`
@@ -268,7 +269,7 @@ must not leak native types into core. Extraction from corinth-canal is a
 See [LIM-9](https://linear.app/saaq-spiking-adaptive-activity/issue/LIM-9/plan-rust-runtime-and-deployment-repo-boundary-matrix)
 for the full Rust runtime/deployment boundary matrix, and issues #5 (boundary
 doc), #8 (GGUF parser coordination), #9 / #32 (Safetensors provider), and #47
-(consume `engram-parser` 0.2.0) for this repo's tracking.
+(consume published `engram-parser` 0.3.x) for this repo's tracking.
 
 ### GGUF parser boundary (see #8)
 
@@ -293,9 +294,10 @@ adapters on top of parsed layout / extracted weights. Consume follow-up: [#47](h
 **Freeze until consume lands:** no new parser code and no dtype/GGUF format
 enhancements in `src/moe/checkpoint.rs`, `src/moe/gguf.rs`, or
 `src/moe/dequant.rs` until [#47](https://github.com/rmems/cortex-tensor/issues/47)
-can wrap `parse_checkpoint_layout` around engram-parser 0.2.0. That issue is
-blocked on [engram-parser#45](https://github.com/rmems/engram-parser/issues/45)
-(mmap + K-quant). Known gaps versus the corinth-canal reference — additional
+can consume published engram-parser 0.3.x checkpoint/tensor APIs. The older
+plan to wrap `parse_checkpoint_layout` around engram-parser 0.2.0 is
+superseded; engram-parser#45 (mmap + K-quant) is closed and is not the
+blocker. Known gaps versus the corinth-canal reference — additional
 dtypes (`BF16`, `Q6_K`, `IQ3_*`), a `ggml_type_label` helper, and the
 "GGUF wire type 31 is `Q4_0_4_4`, not IQ3_M" discipline — stay parked on
 engram-parser. **Do not add Q6_K / IQ3_* dequant in this crate.** Cross-repo

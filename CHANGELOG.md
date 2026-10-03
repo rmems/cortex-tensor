@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Crate identity is a backend-neutral ANN stage layer plus a deterministic `Vec<f32>` reference backend. README and Cargo description say so. Checkpoint parsing stays in engram-parser, orchestration stays in hybrid-fusion, and the closed decision not to merge hybrid-fusion (issue 35) stands. No new framework-generic numerical API (issue 56).
+- Parser-boundary docs no longer tell maintainers to wrap `parse_checkpoint_layout` around engram-parser 0.2.0. Issue 47's target is published engram-parser 0.3.x checkpoint/tensor APIs. This change does not consume that crate.
 
 ### Added
 
