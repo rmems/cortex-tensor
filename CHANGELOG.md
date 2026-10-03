@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Crate identity is a backend-neutral ANN stage layer plus a deterministic `Vec<f32>` reference backend. README and Cargo description say so. Checkpoint parsing stays in engram-parser, orchestration stays in hybrid-fusion, and the closed decision not to merge hybrid-fusion (issue 35) stands. No new framework-generic numerical API (issue 56).
+
 ### Added
 
 - New `stage` module: backend-neutral ANN stage-execution contracts (`DType`, `TensorMeta`, `StageTensor`, `StageKind`/`StageKindTag` with separate dense/gated MLP and layer/RMS norm tags, `NormKind`, `MlpKind`, `StageSource`, `AnnStage`, validated `StageId` dotted-path newtype, validated `AnnTopology` with sub-span dependency listing, `AnnCapabilities`, `StageInput`, the generic `AnnExecutor` trait whose contract never names a concrete tensor, and the `run_topology` composition driver over `ExternalBindings`). Descriptors carry no serde; a device field and tensor wire format are intentionally deferred to RM-1827 (RM-1822).

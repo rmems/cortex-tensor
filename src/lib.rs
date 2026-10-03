@@ -2,18 +2,20 @@
 
 //! # cortex-tensor
 //!
-//! Pure-Rust tensor + transformer + MoE building blocks. Zero GPU / CUDA /
-//! Julia / framework dependencies.
+//! Backend-neutral ANN stage layer plus a deterministic `Vec<f32>` reference
+//! backend for hybrid ANN/SNN research. Checkpoint parsing stays in
+//! `engram-parser`. Placement and session orchestration stay in
+//! `hybrid-fusion`. External ML engines are optional adapters, not core types.
 //!
 //! ## Modules
 //!
 //! | Module | Role |
 //! |--------|------|
-//! | [`tensor`] | `Tensor` type, fallible construction, core ops, finite-value policy |
-//! | [`transformer`] | Transformer building blocks (attention, block, model) |
-//! | [`moe`] | Mixture-of-Experts router + GGUF checkpoint bridge |
-//! | [`snn`] | Backend-neutral SNN execution contract + optional `neuromod` adapter |
-//! | [`stage`] | Backend-neutral ANN stage-execution contracts |
+//! | [`stage`] | Backend-neutral ANN stage contracts; [`stage::ReferenceExecutor`] is the reference backend |
+//! | [`tensor`] | Reference-backend `Tensor`, fallible construction, core ops |
+//! | [`transformer`] | Reference-backend transformer blocks |
+//! | [`moe`] | Reference-backend MoE routing; in-tree GGUF is transitional (issue 47) |
+//! | [`snn`] | SNN execution contract + optional crate-backed adapters |
 //! | [`types`] | Shared types used by `moe` |
 //! | [`error`] | `CortexError` unified error type |
 //!
