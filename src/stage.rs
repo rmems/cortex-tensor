@@ -1138,6 +1138,14 @@ impl<'p> crate::adapter::ExternalAdapterMarker for ReferenceExecutor<'p> {
     fn adapter_capabilities(&self) -> crate::adapter::AdapterCapabilities {
         adapter::reference_adapter_capabilities(Self::ann_capabilities())
     }
+
+    fn export_hidden(&self, tensor: &Self::Tensor) -> Result<crate::adapter::HiddenStateBuffer> {
+        Self::export_hidden(tensor)
+    }
+
+    fn import_hidden(&self, buffer: &crate::adapter::HiddenStateBuffer) -> Result<Self::Tensor> {
+        Self::import_hidden(buffer)
+    }
 }
 
 impl<'p> AnnExecutor for ReferenceExecutor<'p> {

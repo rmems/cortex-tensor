@@ -95,7 +95,21 @@ fn negotiation_document_names_only_cortex_facts() {
     assert!(!doc.batch);
     assert!(!doc.sequence_cache);
     assert!(!doc.stateful);
-    assert!(doc.unsupported.iter().any(|item| item == "moe_router"));
+    assert!(
+        doc.unsupported
+            .iter()
+            .any(|item| item == "stage_kind:moe_router")
+    );
+    assert!(
+        doc.unsupported_dtypes
+            .iter()
+            .any(|item| item == "dtype:f16")
+    );
+    assert!(
+        doc.unsupported_devices
+            .iter()
+            .any(|item| item == "device:cuda")
+    );
     assert!(
         doc.limitations
             .iter()
@@ -295,6 +309,24 @@ fn capability_gap_is_a_structured_error_not_a_ranking() {
     let _ = offered;
 }
 
+#[test]
+fn generic_adapter_moves_hidden_state_without_naming_the_backend() {
+    fn round_trip<A>(adapter: &A, tensor: &A::Tensor) -> A::Tensor
+    where
+        A: cortex_tensor::stage::ExternalAdapterMarker,
+    {
+        let buffer = ExternalAdapter::export_hidden(adapter, tensor).expect("export");
+        ExternalAdapter::import_hidden(adapter, &buffer).expect("import")
+    }
+
+    let values = vec![1.0f32, 2.0, 3.0, 4.0];
+    let tensor = Tensor::try_from_vec(values, &[2, 2]).expect("tensor");
+    let model = tiny_model(0);
+    let (executor, _) = ReferenceExecutor::from_transformer(&model).expect("bind");
+    let restored = round_trip(&executor, &tensor);
+    assert_eq!(restored.data(), tensor.data());
+}
+
 fn _adapter_object_safety() {
     // Native engine types cannot satisfy this bound: it names only cortex types.
     fn assert_adapter<T: cortex_tensor::stage::ExternalAdapterMarker<Tensor = Tensor>>(_: &T) {}
@@ -319,8 +351,18 @@ fn candle_feature_adapter_is_wired_when_enabled() {
             shape: vec![2, 2],
             dtype: DType::F32,
         };
-        let tensor = adapter.import_hidden(&buffer).expect("import");
-        let exported = adapter.export_hidden(&tensor).expect("export");
+        let tensor = ExternalAdapter::import_hidden(&adapter, &buffer).expect("import");
+        let exported = ExternalAdapter::export_hidden(&adapter, &tensor).expect("export");
+        assert!(caps.ann.supported_tags.is_empty());
+        assert!(!caps.batch);
+        assert_eq!(caps.limitations.unsupported_tags.len(), 11);
+        let doc = caps.negotiation_document();
+        assert!(doc.stage_kinds.is_empty());
+        assert!(
+            doc.unsupported
+                .iter()
+                .any(|item| item == "stage_kind:embedding")
+        );
         assert_eq!(exported.data, values);
         assert_eq!(exported.dtype, DType::F32);
         let bad = HiddenStateBuffer {
@@ -354,14 +396,21 @@ fn burn_feature_stays_a_structured_stub_on_this_toolchain() {
             caps.limitations
                 .notes
                 .iter()
-                .any(|note| note.contains("1.98.1"))
+                .any(|note| note.contains("does not depend on the burn crate"))
+        );
+        assert!(
+            !caps
+                .limitations
+                .notes
+                .iter()
+                .any(|note| note.contains("1.92"))
         );
         let stage = add_stage();
         let err = ExternalAdapter::execute(&mut { adapter }, &stage, &[]).unwrap_err();
         assert!(matches!(
             err,
             CortexError::UnsupportedOperation { backend, category, .. }
-                if backend == "burn" && category == "toolchain"
+                if backend == "burn" && category == "policy"
         ));
     }
 }

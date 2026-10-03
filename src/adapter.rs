@@ -174,7 +174,14 @@ pub struct NegotiationDocument {
     /// Copied from [`AdapterCapabilities::hidden_state_io`].
     pub hidden_state_io: bool,
     /// Unsupported stage-kind tokens, sorted.
+    ///
+    /// Prefixed `stage_kind:` so a caller can tell a refused stage from a
+    /// refused dtype or device without parsing notes.
     pub unsupported: Vec<String>,
+    /// Unsupported dtype tokens, sorted. Prefixed `dtype:`.
+    pub unsupported_dtypes: Vec<String>,
+    /// Unsupported device tokens, sorted. Prefixed `device:`.
+    pub unsupported_devices: Vec<String>,
     /// Limitation notes, including the orchestrator boundary.
     pub limitations: Vec<String>,
 }
@@ -209,9 +216,23 @@ impl AdapterCapabilities {
             .limitations
             .unsupported_tags
             .iter()
-            .map(|tag| tag.as_str().to_string())
+            .map(|tag| format!("stage_kind:{}", tag.as_str()))
             .collect();
         unsupported.sort();
+        let mut unsupported_dtypes: Vec<String> = self
+            .limitations
+            .unsupported_dtypes
+            .iter()
+            .map(|dtype| format!("dtype:{}", dtype.as_str()))
+            .collect();
+        unsupported_dtypes.sort();
+        let mut unsupported_devices: Vec<String> = self
+            .limitations
+            .unsupported_devices
+            .iter()
+            .map(|device| format!("device:{}", device.as_str()))
+            .collect();
+        unsupported_devices.sort();
         let mut limitations = self.limitations.notes.clone();
         limitations.push(
             "translation target is hybrid-fusion negotiation (hybrid-fusion#41); this document does not place or rank backends".to_string(),
@@ -226,6 +247,8 @@ impl AdapterCapabilities {
             stateful: self.ann.stateful,
             hidden_state_io: self.hidden_state_io,
             unsupported,
+            unsupported_dtypes,
+            unsupported_devices,
             limitations,
         }
     }
@@ -233,16 +256,29 @@ impl AdapterCapabilities {
 
 /// Marker for a backend that can be used through the external-adapter contract.
 ///
-/// The methods callers use are inherent on each backend (`capabilities`,
-/// `execute`, `import_hidden`, `export_hidden`) so a recording test double can
-/// wrap [`crate::stage::ReferenceExecutor`] without reimplementing conversion.
-/// This trait exists so generic code can name "an external adapter" without
-/// naming Candle or Burn. Native engine tensors are not valid `Tensor`
-/// parameters of this trait: only the backend's associated stage tensor is.
+/// Generic code bounded by this trait can query capabilities, execute stages,
+/// and move hidden state through [`HiddenStateBuffer`] without naming Candle
+/// or Burn. Native engine tensors stay the backend's associated [`StageTensor`].
+/// Inherent methods on each backend remain so a recording wrapper can call
+/// conversion without implementing this trait itself.
 pub trait ExternalAdapterMarker: AnnExecutor {
     /// Report the adapter capability surface. Must agree with
     /// [`AnnExecutor::capabilities`] on name, tags, dtypes, and statefulness.
     fn adapter_capabilities(&self) -> AdapterCapabilities;
+
+    /// Copy `tensor` into the interchange buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CortexError`] when the adapter cannot export `tensor`.
+    fn export_hidden(&self, tensor: &Self::Tensor) -> Result<HiddenStateBuffer>;
+
+    /// Copy `buffer` into the backend's tensor type.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CortexError`] when the adapter cannot import `buffer`.
+    fn import_hidden(&self, buffer: &HiddenStateBuffer) -> Result<Self::Tensor>;
 }
 
 /// Checked element count for a hidden-state shape.
@@ -320,12 +356,11 @@ pub(crate) fn require_f32_buffer(buffer: &HiddenStateBuffer) -> Result<()> {
     Ok(())
 }
 
-/// Inherent-method namespace matching the call shape used by adapters.
+/// Namespace for generic calls against [`ExternalAdapterMarker`].
 ///
-/// `ReferenceExecutor`, [`CandleAdapter`], and [`BurnAdapter`] expose the same
-/// methods directly. This helper lets tests and generic callers write
-/// `ExternalAdapter::capabilities(backend)` without a separate trait method
-/// that would force every recording wrapper to reimplement conversion.
+/// `ReferenceExecutor`, [`CandleAdapter`], and [`BurnAdapter`] also expose the
+/// same methods inherently. This helper lets tests and generic callers write
+/// `ExternalAdapter::capabilities(backend)` without naming an engine.
 pub struct ExternalAdapter;
 
 impl ExternalAdapter {
@@ -341,6 +376,22 @@ impl ExternalAdapter {
         inputs: &[StageInput<A::Tensor>],
     ) -> Result<A::Tensor> {
         adapter.execute(stage, inputs)
+    }
+
+    /// [`ExternalAdapterMarker::export_hidden`] for a generic adapter.
+    pub fn export_hidden<A: ExternalAdapterMarker + ?Sized>(
+        adapter: &A,
+        tensor: &A::Tensor,
+    ) -> Result<HiddenStateBuffer> {
+        adapter.export_hidden(tensor)
+    }
+
+    /// [`ExternalAdapterMarker::import_hidden`] for a generic adapter.
+    pub fn import_hidden<A: ExternalAdapterMarker + ?Sized>(
+        adapter: &A,
+        buffer: &HiddenStateBuffer,
+    ) -> Result<A::Tensor> {
+        adapter.import_hidden(buffer)
     }
 }
 

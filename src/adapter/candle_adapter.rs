@@ -4,10 +4,9 @@
 //!
 //! `candle_core::Tensor` and `candle_core::Device` stay in this module. The
 //! public stage contract sees only [`crate::adapter::HiddenStateBuffer`] and
-//! [`crate::adapter::AdapterCapabilities`]. Stage execution of a full
-//! Candle model is not this adapter's job: it proves a Candle tensor can sit
-//! behind the same contract as the reference backend, and it refuses dtypes
-//! and devices it was not built to serve.
+//! [`crate::adapter::AdapterCapabilities`]. This adapter copies CPU `f32`
+//! hidden state. It does not bind stage kernels, so it reports no executable
+//! stage kinds.
 
 use super::{
     AdapterCapabilities, BackendLimitations, DeviceClass, ExternalAdapterMarker, HiddenStateBuffer,
@@ -133,15 +132,8 @@ impl CandleAdapter {
     fn capabilities_value() -> AnnCapabilities {
         AnnCapabilities {
             backend_name: "candle",
-            supported_tags: BTreeSet::from([
-                StageKindTag::Embedding,
-                StageKindTag::Attention,
-                StageKindTag::LayerNorm,
-                StageKindTag::RmsNorm,
-                StageKindTag::DenseMlp,
-                StageKindTag::Add,
-                StageKindTag::Readout,
-            ]),
+            // `execute` refuses every stage. Do not advertise kinds that are not bound.
+            supported_tags: BTreeSet::new(),
             supported_dtypes: BTreeSet::from([DType::F32]),
             stateful: false,
         }
@@ -153,23 +145,39 @@ impl ExternalAdapterMarker for CandleAdapter {
         AdapterCapabilities {
             ann: Self::capabilities_value(),
             devices: BTreeSet::from([DeviceClass::Cpu]),
-            batch: true,
+            batch: false,
             sequence_cache: false,
             hidden_state_io: true,
             limitations: BackendLimitations {
                 unsupported_tags: BTreeSet::from([
+                    StageKindTag::Embedding,
+                    StageKindTag::Attention,
+                    StageKindTag::LayerNorm,
+                    StageKindTag::RmsNorm,
+                    StageKindTag::DenseMlp,
                     StageKindTag::GatedMlp,
                     StageKindTag::MoeRouter,
                     StageKindTag::MoeExpert,
+                    StageKindTag::Add,
+                    StageKindTag::Readout,
                     StageKindTag::Custom,
                 ]),
                 unsupported_dtypes: BTreeSet::from([DType::F16, DType::BF16]),
                 unsupported_devices: BTreeSet::from([DeviceClass::Cuda, DeviceClass::Metal]),
                 notes: vec![
-                    "candle adapter is CPU f32 hidden-state I/O; it does not rank backends or ship GPU kernels".to_string(),
+                    "candle adapter is CPU f32 hidden-state I/O; stage kernels are not bound"
+                        .to_string(),
                 ],
             },
         }
+    }
+
+    fn export_hidden(&self, tensor: &Self::Tensor) -> Result<HiddenStateBuffer> {
+        CandleAdapter::export_hidden(self, tensor)
+    }
+
+    fn import_hidden(&self, buffer: &HiddenStateBuffer) -> Result<Self::Tensor> {
+        CandleAdapter::import_hidden(self, buffer)
     }
 }
 

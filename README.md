@@ -244,10 +244,14 @@ This crate **does not own**:
 SNN backend crates (`neuromod` today, evaluated individually) and,
 in future, the zero-dependency rmems parser crates.
 
-**Forbidden dependencies:** GPU backends (`cust`), inference frameworks
-(`candle`, `tch`, `ort`), domain/SNN orchestration crates, and any dependency on
-`rmems/corinth-canal`. Extraction from corinth-canal is a **one-way copy**; that
-repo keeps an unmodified reference copy per its `PROMOTION_RULES.md`.
+**Forbidden dependencies:** GPU backends (`cust`), inference frameworks as
+core dependencies (`tch`, `ort`, and `candle` outside the optional `candle`
+feature), domain/SNN orchestration crates, and any dependency on
+`rmems/corinth-canal`. `candle-core` is allowed only behind the `candle`
+feature, with GPU features off. The `burn` feature is a stub and must not
+depend on the `burn` crate in v0.3. Extraction from corinth-canal is a
+**one-way copy**; that repo keeps an unmodified reference copy per its
+`PROMOTION_RULES.md`.
 
 | Crate | Role |
 |-------|------|
@@ -306,7 +310,7 @@ Features (all off by default):
 | `neuromod` | Enables `snn::NeuromodNetwork` — `neuromod::SpikingNetwork` behind `snn::SnnBackend`. Pulls the optional `neuromod` crate dependency. |
 | `axon-encoder` | Enables `snn::AxonEncoder` — any `axon_encoder::Encoder` behind `snn::SnnEncoder` (streaming `encode_step` per forward tick). Pulls the optional `axon-encoder` crate dependency. |
 | `candle` | Enables `stage::CandleAdapter` — CPU `f32` hidden-state import/export over `candle-core`, behind the same adapter contract as the reference backend. Does not enable Candle GPU features. |
-| `burn` | Enables `stage::BurnAdapter` as a structured toolchain stub. Published `burn` 0.21 requires rustc 1.92, above this crate's 1.98.1 pin, so the feature does not depend on `burn` and every call returns `UnsupportedOperation`. |
+| `burn` | Enables `stage::BurnAdapter` as a structured policy stub. v0.3 does not depend on `burn`; every call returns `UnsupportedOperation`. `burn` 0.21's rustc 1.92 requirement is a minimum and is compatible with this crate's 1.98.1 pin. |
 
 ## Quick start
 

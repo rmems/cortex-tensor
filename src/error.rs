@@ -111,7 +111,7 @@ pub enum CortexError {
     /// An external adapter refused an operation its capability report does not cover.
     ///
     /// `category` is a stable negotiation key (`stage_kind`, `dtype`, `device`,
-    /// `toolchain`, …), not a ranking of backends. `stage_id` is set when the
+    /// `policy`, …), not a ranking of backends. `stage_id` is set when the
     /// refusal is about one stage.
     #[error(
         "backend '{backend}' does not support {category}{stage}: {detail}",

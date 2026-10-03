@@ -24,9 +24,10 @@ axon-encoder = ["dep:axon-encoder"]
 # Candle CPU hidden-state adapter. Not in `default` and not required for core.
 # GPU features of candle-core are not enabled.
 candle = ["dep:candle-core"]
-# Burn adapter slot. Not in `default`. Published burn 0.21 requires rustc 1.92,
-# above this crate's 1.98.1 pin, so the feature compiles a structured stub and
-# does not depend on the `burn` crate. Do not add `burn` until the MSRV moves.
+# Burn adapter slot. Not in `default`. v0.3 keeps this a structured stub and
+# does not depend on the `burn` crate. burn 0.21's rust-version 1.92 is a
+# minimum and is compatible with this pin; omitting the dependency is policy,
+# not a toolchain conflict.
 burn = []
 
 [dependencies]

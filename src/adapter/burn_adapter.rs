@@ -1,19 +1,20 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Burn adapter placeholder for the current toolchain.
+//! Burn adapter placeholder.
 //!
-//! Published `burn` 0.21.0 declares `rust-version = "1.92"`. This crate's
-//! pinned toolchain is 1.98.1, so depending on `burn` would make
-//! `--all-features` fail CI. The adapter type is therefore compiled only when
-//! the `burn` feature is enabled explicitly, and every operation returns a
-//! structured toolchain refusal. No `burn::` type appears in this module.
+//! v0.3 ships the adapter slot without a `burn` crate dependency. Published
+//! `burn` 0.21.0 declares `rust-version = "1.92"`, which is a minimum and is
+//! compatible with this crate's 1.98.1 pin. The feature stays a stub by
+//! repository policy so core does not take a foundational ML-framework
+//! dependency in this milestone. No `burn::` type appears in this module.
 //!
-//! When the crate MSRV moves to a Burn-compatible toolchain, replace
-//! [`BurnAdapter::unavailable`] with a CPU `ndarray` backend that implements
-//! the same [`ExternalAdapterMarker`] methods. That change stays inside this
-//! module: [`crate::stage::AnnExecutor`] does not gain Burn types.
+//! A later milestone can replace [`BurnAdapter::unavailable`] with a CPU
+//! backend inside this module. [`crate::stage::AnnExecutor`] does not gain
+//! Burn types.
 
-use super::{AdapterCapabilities, BackendLimitations, DeviceClass, ExternalAdapterMarker};
+use super::{
+    AdapterCapabilities, BackendLimitations, DeviceClass, ExternalAdapterMarker, HiddenStateBuffer,
+};
 use crate::error::{CortexError, Result};
 use crate::stage::{
     AnnCapabilities, AnnExecutor, AnnStage, DType, StageInput, StageTensor, TensorMeta,
@@ -40,13 +41,13 @@ impl StageTensor for BurnTensorView {
 
 /// Burn participation stub.
 ///
-/// `unavailable` is the only constructor on this toolchain. Enabling the
-/// feature does not pull the `burn` crate.
+/// `unavailable` is the only constructor. Enabling the feature does not pull
+/// the `burn` crate.
 #[derive(Debug, Clone, Copy)]
 pub struct BurnAdapter;
 
 impl BurnAdapter {
-    /// Adapter that reports the toolchain gap instead of linking Burn.
+    /// Adapter that reports the v0.3 policy gap instead of linking Burn.
     pub fn unavailable() -> Self {
         Self
     }
@@ -55,8 +56,8 @@ impl BurnAdapter {
         CortexError::UnsupportedOperation {
             backend: "burn",
             stage_id,
-            category: "toolchain",
-            detail: "burn 0.21 requires rustc 1.92; this crate is pinned to 1.98.1, so the Burn adapter is not linked".to_string(),
+            category: "policy",
+            detail: "burn is not a dependency of cortex-tensor v0.3; the feature is a structured stub and does not link burn".to_string(),
         }
     }
 }
@@ -83,10 +84,18 @@ impl ExternalAdapterMarker for BurnAdapter {
                     DeviceClass::Metal,
                 ]),
                 notes: vec![
-                    "burn adapter is a structured stub on rustc 1.98.1; burn 0.21 requires rustc 1.92 and is not a core dependency".to_string(),
+                    "burn adapter is a structured stub; cortex-tensor v0.3 does not depend on the burn crate".to_string(),
                 ],
             },
         }
+    }
+
+    fn export_hidden(&self, _tensor: &Self::Tensor) -> Result<HiddenStateBuffer> {
+        Err(Self::refusal(None))
+    }
+
+    fn import_hidden(&self, _buffer: &HiddenStateBuffer) -> Result<Self::Tensor> {
+        Err(Self::refusal(None))
     }
 }
 
