@@ -3,7 +3,7 @@ name = "cortex-tensor"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98.1"
-description = "Pure-Rust tensor, transformer, and MoE building blocks. Zero GPU/CUDA/Julia dependencies."
+description = "Backend-neutral ANN stage layer and deterministic Vec reference backend for hybrid ANN/SNN systems."
 authors = ["Raul Cardenas Montoya"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rmems/cortex-tensor"
@@ -21,6 +21,13 @@ default = []
 neuromod = ["dep:neuromod"]
 # SNN encoder adapter: `axon-encoder` spike encoders behind `snn::SnnEncoder`.
 axon-encoder = ["dep:axon-encoder"]
+# Candle CPU hidden-state adapter. Not in `default` and not required for core.
+# GPU features of candle-core are not enabled.
+candle = ["dep:candle-core"]
+# Burn adapter slot. Not in `default`. Published burn 0.21 requires rustc 1.92,
+# above this crate's 1.98.1 pin, so the feature compiles a structured stub and
+# does not depend on the `burn` crate. Do not add `burn` until the MSRV moves.
+burn = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -32,6 +39,7 @@ memmap2 = "0.9"
 half = "2"
 neuromod = { version = "0.6", optional = true }
 axon-encoder = { version = "0.5", optional = true }
+candle-core = { version = "0.11", optional = true, default-features = false }
 
 [profile.release]
 opt-level = 3

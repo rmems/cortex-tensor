@@ -108,6 +108,22 @@ pub enum CortexError {
         kind: String,
     },
 
+    /// An external adapter refused an operation its capability report does not cover.
+    ///
+    /// `category` is a stable negotiation key (`stage_kind`, `dtype`, `device`,
+    /// `toolchain`, …), not a ranking of backends. `stage_id` is set when the
+    /// refusal is about one stage.
+    #[error(
+        "backend '{backend}' does not support {category}{stage}: {detail}",
+        stage = stage_id.as_ref().map(|id| format!(" on stage '{id}'")).unwrap_or_default()
+    )]
+    UnsupportedOperation {
+        backend: &'static str,
+        stage_id: Option<String>,
+        category: &'static str,
+        detail: String,
+    },
+
     /// A stage descriptor was missing the parameters its kind requires.
     #[error("stage '{stage_id}' is missing required parameters")]
     MissingStageParams { stage_id: String },

@@ -1,6 +1,6 @@
 # cortex-tensor
 
-Pure-Rust tensor, transformer, and Mixture-of-Experts building blocks. No CUDA, no Julia FFI, no framework dependencies — just `Vec<f32>` and honest math.
+Backend-neutral ANN stage layer and deterministic reference backend for hybrid ANN/SNN systems. The in-tree `Vec<f32>` tensor, transformer, and dense MoE path are the reference backend used for CI, golden vectors, and conformance — not a generic ML framework, and not a claim that one engine is preferred.
 
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache-blue)](./LICENSE-APACHE-2.0)
@@ -8,14 +8,27 @@ Pure-Rust tensor, transformer, and Mixture-of-Experts building blocks. No CUDA, 
 
 ## Overview
 
-`cortex-tensor` is a minimal, framework-free foundation for building transformer-based language models and MoE routers in Rust. It was surgically extracted from a larger hybrid codebase (`corinth-canal`) and stripped of GPU / CUDA / Julia concerns so it can stand alone as a reusable, open-source numerical kernel. It stays ANN/SNN hybrid-capable through a backend-neutral SNN contract (`snn` module) — neuron dynamics come from focused reusable crates (e.g. `neuromod`) behind feature-gated adapters, not an embedded runtime.
+`cortex-tensor` makes ANN engines usable as interchangeable stage executors. Core owns the stage vocabulary, execution contract, hidden-state ingress/egress, and capability facts. The reference backend is `f32`, CPU-only, and dense. Candle and Burn are optional adapters; their native tensor and device types do not appear in core. Neuron dynamics stay in focused SNN crates behind the `snn` contract.
 
-Design goals:
+```text
+engram-parser          checkpoint + topology (not this crate; #47 waits on a published 0.3.x)
+        |
+        v
+hybrid-fusion          placement + orchestration (not merged here; #35 stands)
+        |
+        v
+cortex-tensor          ANN stage contracts
+   |        |        |
+reference  candle    burn     + SNN backend contract
+```
 
-- **Zero GPU coupling.** No `cust`, no `libc` pinned-host registration, no `#[cfg(feature = "gpu")]` branches.
-- **Zero framework dependency.** No `candle`, no `tch`, no `ort`. The tensor type is a single contiguous, row-major `Vec<f32>` plus a shape; there are no strided views (strides are implied by the shape and recomputed on demand).
-- **Small, auditable dependency set.** `serde`, `serde_json`, `thiserror`, `rand`, `rayon`, `memmap2`, `half` — nothing else.
-- **Inference-ready MoE.** A GGUF checkpoint bridge with adapter resolution for MoE checkpoints; backend-neutral — `general.architecture` is treated as opaque checkpoint data.
+Design boundaries:
+
+- **Reference backend, not a framework.** `Tensor` is a contiguous row-major `Vec<f32>`. New numerical kernels land here only when conformance or the reference path needs them.
+- **No mandatory ML framework.** Default features do not depend on Candle, Burn, `tch`, or `ort`.
+- **No GPU kernels in this crate.** CUDA and Metal may be reported as capability facts. Specialized hybrid GPU kernels belong to `myelin-accelerator`.
+- **Checkpoint parsing is not owned here.** In-tree GGUF stays until #47 can consume published `engram-parser` 0.3.x. Do not extend it.
+- **Orchestration is not owned here.** ANN↔SNN placement stays in [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion). The closed decision not to merge that crate ([#35](https://github.com/rmems/cortex-tensor/issues/35)) stands.
 
 ## Architecture
 
@@ -134,11 +147,14 @@ The **reference backend is `f32` / CPU / dense**. `ReferenceExecutor` reuses the
 same kernels as `TransformerLM::try_forward`, so a topology built by
 `ReferenceExecutor::from_transformer` reproduces the model's output bit for bit.
 MoE router, MoE expert, and gated MLP stages are present in the stage vocabulary
-but are **rejected** by the reference backend with `CortexError::UnsupportedStage`
-— accelerated or MoE-capable backends (e.g. Candle / Burn) belong in optional
-adapters, not in this core crate. A device field and a concrete cross-backend
-tensor wire format are intentionally deferred (RM-1827); stage descriptors carry
-no serde and describe only identity, kind, and wiring.
+but are **rejected** by the reference backend with `CortexError::UnsupportedStage`.
+Optional adapters implement the same `ExternalAdapter` contract without changing
+core traits. `HiddenStateBuffer` is the import/export boundary; it is not a
+checkpoint format and not a universal tensor wire (RM-1827). `NegotiationDocument`
+is the cortex-owned fact list hybrid-fusion can translate once its
+`BackendCapabilities` type lands ([hybrid-fusion#41](https://github.com/rmems/hybrid-fusion/issues/41)).
+This crate does not select, rank, or place backends. Stage descriptors carry no
+serde and describe only identity, kind, and wiring.
 
 ### Migration notes
 
@@ -186,11 +202,12 @@ boundary clean. Cross-links and notes are maintained for alignment.
 
 This crate **owns**:
 
-- Row-major `f32` `Tensor` and CPU tensor ops (matmul, batched matmul, causal
-  mask, softmax, layer norm, RMSNorm) under a documented finite-value policy.
-- Decoder-only transformer building blocks (attention, block, `TransformerLM`).
-- MoE routing math — gate scores, softmax, top-k selection, L2 normalization,
-  embedding resampling — and the dense simulation routing mode.
+- A backend-neutral ANN stage vocabulary and `AnnExecutor` contract (`stage`).
+- External adapter capability facts and hidden-state import/export (`adapter`).
+  Native Candle and Burn types stay behind optional features.
+- The deterministic `Vec<f32>` reference backend: row-major `Tensor`, CPU ops,
+  decoder-only transformer blocks, and dense MoE routing math, kept for CI,
+  golden vectors, and conformance. Not a second framework surface.
 - The ANN↔SNN execution/interchange contract (`snn` module): `SnnBackend`,
   `SnnEncoder`/`SnnDecoder` boundary types, `SnnCapabilities`, and
   `SpikingMoeRouter` composing the MoE router with an external SNN backend.
@@ -201,10 +218,14 @@ This crate **owns**:
 
 This crate **does not own**:
 
+- Checkpoint parsing — [`engram-parser`](https://github.com/rmems/engram-parser).
+  In-tree GGUF is transitional until #47. Do not add parser or dtype coverage here.
+- ANN↔SNN placement and session orchestration — [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion).
+  [#35](https://github.com/rmems/cortex-tensor/issues/35) (do not merge hybrid-fusion) is closed and stands.
+- SNN neuron dynamics, generic CUDA/GPU kernels, GOZ1 / SAAQ experiment policy,
+  and a universal Rust tensor framework.
 - Canonical GGUF v3 deserialization (header, KV metadata, tensor directory) and
-  per-expert *raw* weight extraction — see
-  [`engram-parser`](https://github.com/rmems/engram-parser) and the
-  parser-boundary note below.
+  per-expert *raw* weight extraction — see the parser-boundary note below.
 - Safetensors header inspection, deterministic manifests, and MoE candidate
   discovery — `engram-parser` feature `safetensors` (see #9, #32).
 - CUDA / GPU / SIMD execution, and any GPU host registration.
@@ -284,6 +305,8 @@ Features (all off by default):
 |---|---|
 | `neuromod` | Enables `snn::NeuromodNetwork` — `neuromod::SpikingNetwork` behind `snn::SnnBackend`. Pulls the optional `neuromod` crate dependency. |
 | `axon-encoder` | Enables `snn::AxonEncoder` — any `axon_encoder::Encoder` behind `snn::SnnEncoder` (streaming `encode_step` per forward tick). Pulls the optional `axon-encoder` crate dependency. |
+| `candle` | Enables `stage::CandleAdapter` — CPU `f32` hidden-state import/export over `candle-core`, behind the same adapter contract as the reference backend. Does not enable Candle GPU features. |
+| `burn` | Enables `stage::BurnAdapter` as a structured toolchain stub. Published `burn` 0.21 requires rustc 1.92, above this crate's 1.98.1 pin, so the feature does not depend on `burn` and every call returns `UnsupportedOperation`. |
 
 ## Quick start
 

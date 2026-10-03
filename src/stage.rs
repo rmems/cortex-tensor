@@ -29,6 +29,7 @@
 //! derives: they describe identity, kind, and wiring only, not a persisted
 //! wire format.
 
+use crate::adapter::{self, require_f32_buffer};
 use crate::error::{CortexError, Result};
 use crate::tensor::Tensor;
 use crate::tensor::ops::{try_embedding, try_layer_norm, try_matmul, try_rms_norm};
@@ -36,6 +37,15 @@ use crate::transformer::block::FeedForward;
 use crate::transformer::{MultiHeadAttention, TransformerLM};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+
+#[cfg(feature = "burn")]
+pub use crate::adapter::BurnAdapter;
+#[cfg(feature = "candle")]
+pub use crate::adapter::CandleAdapter;
+pub use crate::adapter::{
+    AdapterCapabilities, BackendLimitations, DeviceClass, ExternalAdapter, ExternalAdapterMarker,
+    HiddenStateBuffer, NegotiationDocument,
+};
 
 /// Element type reported through the stage boundary.
 ///
@@ -55,12 +65,18 @@ pub enum DType {
 
 impl fmt::Display for DType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
+        f.write_str(self.as_str())
+    }
+}
+
+impl DType {
+    /// Stable negotiation token (`"f32"`, `"f16"`, `"bf16"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
             DType::F32 => "f32",
             DType::F16 => "f16",
             DType::BF16 => "bf16",
-        };
-        f.write_str(name)
+        }
     }
 }
 
@@ -189,6 +205,31 @@ pub enum StageKindTag {
     Readout,
     /// Tag for [`StageKind::Custom`].
     Custom,
+}
+
+impl StageKindTag {
+    /// Stable negotiation token, independent of [`Debug`] formatting.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StageKindTag::Embedding => "embedding",
+            StageKindTag::Attention => "attention",
+            StageKindTag::LayerNorm => "layer_norm",
+            StageKindTag::RmsNorm => "rms_norm",
+            StageKindTag::DenseMlp => "dense_mlp",
+            StageKindTag::GatedMlp => "gated_mlp",
+            StageKindTag::MoeRouter => "moe_router",
+            StageKindTag::MoeExpert => "moe_expert",
+            StageKindTag::Add => "add",
+            StageKindTag::Readout => "readout",
+            StageKindTag::Custom => "custom",
+        }
+    }
+}
+
+impl fmt::Display for StageKindTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl StageKind {
@@ -437,7 +478,7 @@ impl AnnTopology {
 }
 
 /// What a backend can execute, mirroring the `snn` module's capabilities style.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnCapabilities {
     /// Human-readable backend identity, e.g. `"cortex::ReferenceExecutor"`.
     pub backend_name: &'static str,
@@ -1044,16 +1085,66 @@ impl<'p> ReferenceExecutor<'p> {
     }
 }
 
-impl<'p> AnnExecutor for ReferenceExecutor<'p> {
-    type Tensor = Tensor;
-
-    fn capabilities(&self) -> AnnCapabilities {
+impl<'p> ReferenceExecutor<'p> {
+    fn ann_capabilities() -> AnnCapabilities {
         AnnCapabilities {
             backend_name: Self::BACKEND_NAME,
             supported_tags: Self::supported_tags(),
             supported_dtypes: BTreeSet::from([DType::F32]),
             stateful: false,
         }
+    }
+
+    /// Copy a reference tensor into the adapter interchange buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CortexError::StageDTypeMismatch`] when `tensor` does not report
+    /// [`DType::F32`]. The reference tensor type always does.
+    pub fn export_hidden(tensor: &Tensor) -> Result<crate::adapter::HiddenStateBuffer> {
+        let meta = tensor.meta();
+        if meta.dtype != DType::F32 {
+            return Err(CortexError::StageDTypeMismatch {
+                stage_id: "hidden_state".to_string(),
+                expected: DType::F32.to_string(),
+                got: meta.dtype.to_string(),
+            });
+        }
+        Ok(crate::adapter::HiddenStateBuffer {
+            data: tensor.data().to_vec(),
+            shape: meta.shape,
+            dtype: DType::F32,
+        })
+    }
+
+    /// Copy an interchange buffer into a reference tensor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CortexError::StageDTypeMismatch`] for a non-`f32` buffer and
+    /// [`CortexError::StageFailed`] when the element count does not match the shape.
+    pub fn import_hidden(buffer: &crate::adapter::HiddenStateBuffer) -> Result<Tensor> {
+        require_f32_buffer(buffer)?;
+        Tensor::try_from_vec(buffer.data.clone(), &buffer.shape).map_err(|err| {
+            CortexError::StageFailed {
+                stage_id: "hidden_state".to_string(),
+                source: Box::new(err),
+            }
+        })
+    }
+}
+
+impl<'p> crate::adapter::ExternalAdapterMarker for ReferenceExecutor<'p> {
+    fn adapter_capabilities(&self) -> crate::adapter::AdapterCapabilities {
+        adapter::reference_adapter_capabilities(Self::ann_capabilities())
+    }
+}
+
+impl<'p> AnnExecutor for ReferenceExecutor<'p> {
+    type Tensor = Tensor;
+
+    fn capabilities(&self) -> AnnCapabilities {
+        Self::ann_capabilities()
     }
 
     fn execute(
