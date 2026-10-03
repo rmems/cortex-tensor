@@ -319,6 +319,11 @@ RMSNorm moments, and L2 norms accumulate in `f64`.
 
 Kernels are sequential, so a given input bit pattern is deterministic across debug/release and supported platforms.
 
+The deterministic numerical baseline and coverage inventory live in
+[Reference goldens](tests/fixtures/REFERENCE_GOLDENS.md). Run it with
+`cargo test --test reference_goldens`; intentional expectation changes require
+a documented semantic reason and independent arithmetic review.
+
 ### Integration notes (RM-1354)
 
 - **Public API:** Prefer `ops::try_softmax`, `Tensor::try_softmax_last`, `try_layer_norm`, and `try_rms_norm` for rank, shape, `eps`, and allocation checks. Row kernels in `tensor::finite` are crate-internal; they assume valid buffer lengths and (for norms) an `eps` already accepted by `validate_norm_eps`.
