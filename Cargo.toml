@@ -21,6 +21,14 @@ default = []
 neuromod = ["dep:neuromod"]
 # SNN encoder adapter: `axon-encoder` spike encoders behind `snn::SnnEncoder`.
 axon-encoder = ["dep:axon-encoder"]
+# Candle adapter slot. Not in `default`. v0.3 keeps this a structured stub and
+# does not depend on the `candle-core` crate so core stays framework-free.
+candle = []
+# Burn adapter slot. Not in `default`. v0.3 keeps this a structured stub and
+# does not depend on the `burn` crate. burn 0.21's rust-version 1.92 is a
+# minimum and is compatible with this pin; omitting the dependency is policy,
+# not a toolchain conflict.
+burn = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
