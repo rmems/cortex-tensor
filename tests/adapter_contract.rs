@@ -340,43 +340,32 @@ fn candle_feature_adapter_is_wired_when_enabled() {
     #[cfg(feature = "candle")]
     {
         use cortex_tensor::stage::CandleAdapter;
-        let mut adapter = CandleAdapter::cpu();
+        let adapter = CandleAdapter::unavailable();
         let caps = ExternalAdapter::capabilities(&adapter);
         assert_eq!(caps.ann.backend_name, "candle");
-        assert!(caps.hidden_state_io);
-        assert!(caps.devices.contains(&DeviceClass::Cpu));
-        let values = vec![1.5f32, -2.0, 0.0, 4.0];
+        assert!(!caps.hidden_state_io);
+        assert!(caps.devices.is_empty());
+        assert!(caps.ann.supported_dtypes.is_empty());
+        assert_eq!(caps.limitations.unsupported_tags.len(), 11);
+        assert!(
+            caps.limitations
+                .notes
+                .iter()
+                .any(|note| note.contains("does not depend on the candle crate"))
+        );
         let buffer = HiddenStateBuffer {
-            data: values.clone(),
+            data: vec![1.5, -2.0, 0.0, 4.0],
             shape: vec![2, 2],
             dtype: DType::F32,
         };
-        let tensor = ExternalAdapter::import_hidden(&adapter, &buffer).expect("import");
-        let exported = ExternalAdapter::export_hidden(&adapter, &tensor).expect("export");
-        assert!(caps.ann.supported_tags.is_empty());
-        assert!(!caps.batch);
-        assert_eq!(caps.limitations.unsupported_tags.len(), 11);
-        let doc = caps.negotiation_document();
-        assert!(doc.stage_kinds.is_empty());
-        assert!(
-            doc.unsupported
-                .iter()
-                .any(|item| item == "stage_kind:embedding")
-        );
-        assert_eq!(exported.data, values);
-        assert_eq!(exported.dtype, DType::F32);
-        let bad = HiddenStateBuffer {
-            data: values,
-            shape: vec![2, 2],
-            dtype: DType::BF16,
-        };
-        let err = adapter.import_hidden(&bad).unwrap_err();
+        let err = ExternalAdapter::import_hidden(&adapter, &buffer).unwrap_err();
         assert!(matches!(
             err,
-            CortexError::UnsupportedOperation { category, .. } if category == "dtype"
+            CortexError::UnsupportedOperation { backend, category, .. }
+                if backend == "candle" && category == "policy"
         ));
         let stage = add_stage();
-        let err = ExternalAdapter::execute(&mut adapter, &stage, &[]).unwrap_err();
+        let err = ExternalAdapter::execute(&mut { adapter }, &stage, &[]).unwrap_err();
         assert!(matches!(
             err,
             CortexError::UnsupportedStage { backend, stage_id, kind }
@@ -399,6 +388,8 @@ fn burn_feature_stays_a_structured_stub_on_this_toolchain() {
         let caps = ExternalAdapter::capabilities(&adapter);
         assert_eq!(caps.ann.backend_name, "burn");
         assert!(caps.ann.supported_tags.is_empty());
+        assert_eq!(caps.limitations.unsupported_tags.len(), 11);
+        assert_eq!(caps.negotiation_document().unsupported.len(), 11);
         assert!(
             caps.limitations
                 .notes

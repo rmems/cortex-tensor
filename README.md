@@ -254,12 +254,11 @@ SNN backend crates (`neuromod` today, evaluated individually) and,
 in future, the zero-dependency rmems parser crates.
 
 **Forbidden dependencies:** GPU backends (`cust`) as core dependencies,
-making an inference framework (`candle`, `burn`, `tch`, `ort`) a required
-dependency, domain/SNN orchestration crates (including `hybrid-fusion`), and
-any dependency on `rmems/corinth-canal`. Optional adapters must not leak native
-types into core. `candle-core` is allowed only behind the `candle` feature, with
-GPU features off. The `burn` feature is a stub and must not depend on the `burn`
-crate in v0.3. Extraction from corinth-canal is a
+inference frameworks (`candle`, `burn`, `tch`, `ort`), domain/SNN orchestration
+crates (including `hybrid-fusion`), and any dependency on
+`rmems/corinth-canal`. Optional adapter slots must not leak native types into
+core. The `candle` and `burn` features are stubs and must not depend on their
+framework crates in v0.3. Extraction from corinth-canal is a
 **one-way copy**; that repo keeps an unmodified reference copy per its
 `PROMOTION_RULES.md`.
 
@@ -320,8 +319,8 @@ Features (all off by default):
 |---|---|
 | `neuromod` | Enables `snn::NeuromodNetwork` — `neuromod::SpikingNetwork` behind `snn::SnnBackend`. Pulls the optional `neuromod` crate dependency. |
 | `axon-encoder` | Enables `snn::AxonEncoder` — any `axon_encoder::Encoder` behind `snn::SnnEncoder` (streaming `encode_step` per forward tick). Pulls the optional `axon-encoder` crate dependency. |
-| `candle` | Enables `stage::CandleAdapter` — CPU `f32` hidden-state import/export over `candle-core`, behind the same adapter contract as the reference backend. Does not enable Candle GPU features. |
-| `burn` | Enables `stage::BurnAdapter` as a structured policy stub. v0.3 does not depend on `burn`; every call returns `UnsupportedOperation`. `burn` 0.21's rustc 1.92 requirement is a minimum and is compatible with this crate's 1.98.1 pin. |
+| `candle` | Enables `stage::CandleAdapter` as a structured policy stub. v0.3 does not depend on `candle-core`; hidden-state import/export returns `UnsupportedOperation` (category `policy`) and `execute` returns `UnsupportedStage`. |
+| `burn` | Enables `stage::BurnAdapter` as a structured policy stub. v0.3 does not depend on `burn`; hidden-state import/export returns `UnsupportedOperation` (category `policy`) and `execute` returns `UnsupportedStage`. `burn` 0.21's rustc 1.92 requirement is a minimum and is compatible with this crate's 1.98.1 pin. |
 
 ## Quick start
 

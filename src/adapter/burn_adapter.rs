@@ -14,6 +14,7 @@
 
 use super::{
     AdapterCapabilities, BackendLimitations, DeviceClass, ExternalAdapterMarker, HiddenStateBuffer,
+    all_stage_tags,
 };
 use crate::error::{CortexError, Result};
 use crate::stage::{
@@ -76,7 +77,7 @@ impl ExternalAdapterMarker for BurnAdapter {
             sequence_cache: false,
             hidden_state_io: false,
             limitations: BackendLimitations {
-                unsupported_tags: BTreeSet::new(),
+                unsupported_tags: BTreeSet::from(all_stage_tags()),
                 unsupported_dtypes: BTreeSet::from([DType::F32, DType::F16, DType::BF16]),
                 unsupported_devices: BTreeSet::from([
                     DeviceClass::Cpu,

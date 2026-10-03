@@ -1,141 +1,59 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Optional Candle adapter.
+//! Candle adapter placeholder.
 //!
-//! `candle_core::Tensor` and `candle_core::Device` stay in this module. The
-//! public stage contract sees only [`crate::adapter::HiddenStateBuffer`] and
-//! [`crate::adapter::AdapterCapabilities`]. This adapter copies CPU `f32`
-//! hidden state. It does not bind stage kernels, so it reports no executable
-//! stage kinds.
+//! v0.3 ships the adapter slot without a `candle-core` dependency so the core
+//! crate remains framework-free. No `candle_core::` type appears in this
+//! module. A sibling integration crate can implement the cortex-owned adapter
+//! contract without changing core traits.
 
 use super::{
     AdapterCapabilities, BackendLimitations, DeviceClass, ExternalAdapterMarker, HiddenStateBuffer,
-    checked_numel,
+    all_stage_tags,
 };
 use crate::error::{CortexError, Result};
 use crate::stage::{
-    AnnCapabilities, AnnExecutor, AnnStage, DType, StageInput, StageKindTag, StageTensor,
-    TensorMeta,
+    AnnCapabilities, AnnExecutor, AnnStage, DType, StageInput, StageTensor, TensorMeta,
 };
-use candle_core::{DType as CandleDType, Device, Tensor as CandleTensor};
 use std::collections::BTreeSet;
 
-/// Candle CPU tensor viewed through the stage boundary.
-#[derive(Debug, Clone)]
+/// Tensor stand-in used while Candle lives outside the core dependency graph.
+///
+/// It never holds Candle storage. Import refuses before one can be built.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CandleTensorView {
-    inner: CandleTensor,
+    shape: Vec<usize>,
+    dtype: DType,
 }
 
 impl StageTensor for CandleTensorView {
     fn meta(&self) -> TensorMeta {
         TensorMeta {
-            shape: self.inner.dims().to_vec(),
-            dtype: match self.inner.dtype() {
-                CandleDType::F32 => DType::F32,
-                CandleDType::F16 => DType::F16,
-                CandleDType::BF16 => DType::BF16,
-                _ => DType::F32,
-            },
+            shape: self.shape.clone(),
+            dtype: self.dtype,
         }
     }
 }
 
-/// Candle participation in the external-adapter contract.
+/// Candle participation stub.
 ///
-/// Constructed for CPU `f32` only. CUDA and Metal are reported as unsupported
-/// rather than compiled in: this crate does not ship those kernels.
-#[derive(Debug, Clone)]
-pub struct CandleAdapter {
-    device: Device,
-}
+/// `unavailable` is the only constructor. Enabling the feature does not pull
+/// the `candle-core` crate.
+#[derive(Debug, Clone, Copy)]
+pub struct CandleAdapter;
 
 impl CandleAdapter {
-    /// CPU adapter. Hidden-state import and export use Candle's CPU `f32` storage.
-    pub fn cpu() -> Self {
-        Self {
-            device: Device::Cpu,
-        }
+    /// Adapter that reports the v0.3 dependency-policy gap.
+    pub fn unavailable() -> Self {
+        Self
     }
 
-    /// Copy `tensor` out to the interchange buffer.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CortexError::UnsupportedOperation`] when `tensor` is not `f32`
-    /// on CPU.
-    pub fn export_hidden(&self, tensor: &CandleTensorView) -> Result<HiddenStateBuffer> {
-        self.require_native(tensor)?;
-        let flat = tensor
-            .inner
-            .flatten_all()
-            .and_then(|flat| flat.to_vec1::<f32>())
-            .map_err(|err| CortexError::StageFailed {
-                stage_id: "hidden_state".to_string(),
-                source: Box::new(CortexError::Msg(err.to_string())),
-            })?;
-        Ok(HiddenStateBuffer {
-            data: flat,
-            shape: tensor.inner.dims().to_vec(),
-            dtype: DType::F32,
-        })
-    }
-
-    /// Copy `buffer` into a Candle CPU `f32` tensor.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CortexError::UnsupportedOperation`] for a non-`f32` buffer and
-    /// [`CortexError::StageFailed`] when the element count does not match the shape.
-    pub fn import_hidden(&self, buffer: &HiddenStateBuffer) -> Result<CandleTensorView> {
-        if buffer.dtype != DType::F32 {
-            return Err(CortexError::UnsupportedOperation {
-                backend: "candle",
-                stage_id: None,
-                category: "dtype",
-                detail: format!(
-                    "{} is not imported by the CPU f32 Candle adapter",
-                    buffer.dtype
-                ),
-            });
-        }
-        let numel = checked_numel(&buffer.shape)?;
-        if buffer.data.len() != numel {
-            return Err(CortexError::StageFailed {
-                stage_id: "hidden_state".to_string(),
-                source: Box::new(CortexError::ShapeMismatch {
-                    expected: buffer.shape.clone(),
-                    got: vec![buffer.data.len()],
-                }),
-            });
-        }
-        let inner =
-            CandleTensor::from_vec(buffer.data.clone(), buffer.shape.as_slice(), &self.device)
-                .map_err(|err| CortexError::StageFailed {
-                    stage_id: "hidden_state".to_string(),
-                    source: Box::new(CortexError::Msg(err.to_string())),
-                })?;
-        Ok(CandleTensorView { inner })
-    }
-
-    fn require_native(&self, tensor: &CandleTensorView) -> Result<()> {
-        if tensor.inner.dtype() != CandleDType::F32 || !tensor.inner.device().is_cpu() {
-            return Err(CortexError::UnsupportedOperation {
-                backend: "candle",
-                stage_id: None,
-                category: "dtype",
-                detail: "Candle adapter exports CPU f32 tensors only".to_string(),
-            });
-        }
-        Ok(())
-    }
-
-    fn capabilities_value() -> AnnCapabilities {
-        AnnCapabilities {
-            backend_name: "candle",
-            // `execute` refuses every stage. Do not advertise kinds that are not bound.
-            supported_tags: BTreeSet::new(),
-            supported_dtypes: BTreeSet::from([DType::F32]),
-            stateful: false,
+    fn refusal() -> CortexError {
+        CortexError::UnsupportedOperation {
+            backend: "candle",
+            stage_id: None,
+            category: "policy",
+            detail: "candle is not a dependency of cortex-tensor v0.3; the feature is a structured stub and does not link candle".to_string(),
         }
     }
 }
@@ -143,41 +61,37 @@ impl CandleAdapter {
 impl ExternalAdapterMarker for CandleAdapter {
     fn adapter_capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
-            ann: Self::capabilities_value(),
-            devices: BTreeSet::from([DeviceClass::Cpu]),
+            ann: AnnCapabilities {
+                backend_name: "candle",
+                supported_tags: BTreeSet::new(),
+                supported_dtypes: BTreeSet::new(),
+                stateful: false,
+            },
+            devices: BTreeSet::new(),
             batch: false,
             sequence_cache: false,
-            hidden_state_io: true,
+            hidden_state_io: false,
             limitations: BackendLimitations {
-                unsupported_tags: BTreeSet::from([
-                    StageKindTag::Embedding,
-                    StageKindTag::Attention,
-                    StageKindTag::LayerNorm,
-                    StageKindTag::RmsNorm,
-                    StageKindTag::DenseMlp,
-                    StageKindTag::GatedMlp,
-                    StageKindTag::MoeRouter,
-                    StageKindTag::MoeExpert,
-                    StageKindTag::Add,
-                    StageKindTag::Readout,
-                    StageKindTag::Custom,
+                unsupported_tags: BTreeSet::from(all_stage_tags()),
+                unsupported_dtypes: BTreeSet::from([DType::F32, DType::F16, DType::BF16]),
+                unsupported_devices: BTreeSet::from([
+                    DeviceClass::Cpu,
+                    DeviceClass::Cuda,
+                    DeviceClass::Metal,
                 ]),
-                unsupported_dtypes: BTreeSet::from([DType::F16, DType::BF16]),
-                unsupported_devices: BTreeSet::from([DeviceClass::Cuda, DeviceClass::Metal]),
                 notes: vec![
-                    "candle adapter is CPU f32 hidden-state I/O; stage kernels are not bound"
-                        .to_string(),
+                    "candle adapter is a structured stub; cortex-tensor v0.3 does not depend on the candle crate".to_string(),
                 ],
             },
         }
     }
 
-    fn export_hidden(&self, tensor: &Self::Tensor) -> Result<HiddenStateBuffer> {
-        CandleAdapter::export_hidden(self, tensor)
+    fn export_hidden(&self, _tensor: &Self::Tensor) -> Result<HiddenStateBuffer> {
+        Err(Self::refusal())
     }
 
-    fn import_hidden(&self, buffer: &HiddenStateBuffer) -> Result<Self::Tensor> {
-        CandleAdapter::import_hidden(self, buffer)
+    fn import_hidden(&self, _buffer: &HiddenStateBuffer) -> Result<Self::Tensor> {
+        Err(Self::refusal())
     }
 }
 
@@ -185,7 +99,7 @@ impl AnnExecutor for CandleAdapter {
     type Tensor = CandleTensorView;
 
     fn capabilities(&self) -> AnnCapabilities {
-        Self::capabilities_value()
+        self.adapter_capabilities().ann
     }
 
     fn execute(
@@ -193,9 +107,6 @@ impl AnnExecutor for CandleAdapter {
         stage: &AnnStage,
         _inputs: &[StageInput<Self::Tensor>],
     ) -> Result<Self::Tensor> {
-        // Stage kernels stay in the engine. This adapter refuses execution
-        // that would require reimplementing them, and it does so before
-        // looking at inputs.
         Err(CortexError::UnsupportedStage {
             backend: "candle",
             stage_id: stage.id.to_string(),
