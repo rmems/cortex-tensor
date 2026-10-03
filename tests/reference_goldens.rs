@@ -648,7 +648,11 @@ fn checked_errors_are_structured_not_panic_expectations() {
         x.try_sub(&wrong_shape),
         x.try_mul(&wrong_shape),
     ] {
-        assert!(matches!(error, Err(CortexError::ShapeMismatch { .. })));
+        assert!(matches!(
+            error,
+            Err(CortexError::ShapeMismatch { expected, got })
+                if expected == [2, 2] && got == [4]
+        ));
     }
     assert!(matches!(
         try_matmul(&x, &t(&[3, 1], &[1.; 3])),
