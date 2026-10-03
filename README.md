@@ -1,6 +1,6 @@
 # cortex-tensor
 
-Backend-neutral ANN stage layer and deterministic reference backend for hybrid ANN/SNN systems. The in-tree `Vec<f32>` tensor, transformer, and dense MoE path are the reference backend used for CI, golden vectors, and conformance — not a generic ML framework, and not a claim that one engine is preferred.
+Backend-neutral ANN stage layer and deterministic reference backend for hybrid ANN/SNN systems. The in-tree `Vec<f32>` tensor, transformer, and dense MoE path are the reference backend used for CI, golden vectors, and conformance. They are not a generic ML framework, and this crate does not rank external engines.
 
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache-blue)](./LICENSE-APACHE-2.0)
@@ -8,27 +8,29 @@ Backend-neutral ANN stage layer and deterministic reference backend for hybrid A
 
 ## Overview
 
-`cortex-tensor` makes ANN engines usable as interchangeable stage executors. Core owns the stage vocabulary, execution contract, hidden-state ingress/egress, and capability facts. The reference backend is `f32`, CPU-only, and dense. Candle and Burn are optional adapters; their native tensor and device types do not appear in core. Neuron dynamics stay in focused SNN crates behind the `snn` contract.
+`cortex-tensor` makes ANN engines usable as interchangeable stage executors inside heterogeneous ANN/SNN plans. It does not compete on generic tensor frameworks, attention kernels, training stacks, or GPU backends.
+
+Core owns the stage vocabulary, execution contract, hidden-state ingress/egress, and capability facts. The reference backend is `f32`, CPU-only, and dense. Candle and Burn are optional adapters; their native tensor and device types do not appear in core. Neuron dynamics stay in focused SNN crates behind the `snn` contract.
 
 ```text
-engram-parser          checkpoint + topology (not this crate; #47 waits on a published 0.3.x)
+engram-parser          checkpoint + topology (not this crate)
         |
         v
-hybrid-fusion          placement + orchestration (not merged here; #35 stands)
+hybrid-fusion          placement + orchestration (not merged here)
         |
         v
-cortex-tensor          ANN stage contracts
+cortex-tensor          ANN stage contracts + reference backend
    |        |        |
 reference  candle    burn     + SNN backend contract
 ```
 
 Design boundaries:
 
-- **Reference backend, not a framework.** `Tensor` is a contiguous row-major `Vec<f32>`. New numerical kernels land here only when conformance or the reference path needs them.
+- **Reference backend, not the product surface.** `Tensor` is a contiguous row-major `Vec<f32>`. Public stage contracts (`AnnStage`, `AnnExecutor`) do not name it. New framework-generic numerical features are out of scope unless a conformance or reference test needs them.
 - **No mandatory ML framework.** Default features do not depend on Candle, Burn, `tch`, or `ort`.
 - **No GPU kernels in this crate.** CUDA and Metal may be reported as capability facts. Specialized hybrid GPU kernels belong to `myelin-accelerator`.
-- **Checkpoint parsing is not owned here.** In-tree GGUF stays until #47 can consume published `engram-parser` 0.3.x. Do not extend it.
-- **Orchestration is not owned here.** ANN↔SNN placement stays in [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion). The closed decision not to merge that crate ([#35](https://github.com/rmems/cortex-tensor/issues/35)) stands.
+- **Checkpoint parsing is not owned here.** In-tree GGUF stays until issue 47 can consume a published `engram-parser` 0.3.x crate. This boundary reset does not implement that consume, and it does not add parser or dtype coverage.
+- **Orchestration is not owned here.** ANN↔SNN placement stays in [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion). The closed decision not to merge that crate (issue 35) stands.
 
 ## Architecture
 
@@ -143,8 +145,8 @@ an ordered graph of stages, then run it through a swappable backend.
 | `run_topology` / `ExternalBindings` | Composition driver that runs an executor over a topology, resolving external ingress (tokens or hidden-state tensors). |
 | `ReferenceExecutor` | The reference backend (see below) and `from_transformer`, which emits a block-ordered topology for a `TransformerLM`. |
 
-The **reference backend is `f32` / CPU / dense**. `ReferenceExecutor` reuses the
-same kernels as `TransformerLM::try_forward`, so a topology built by
+`ReferenceExecutor` is the reference backend: `f32`, CPU-only, and dense. It
+reuses the same kernels as `TransformerLM::try_forward`, so a topology built by
 `ReferenceExecutor::from_transformer` reproduces the model's output bit for bit.
 MoE router, MoE expert, and gated MLP stages are present in the stage vocabulary
 but are **rejected** by the reference backend with `CortexError::UnsupportedStage`.
@@ -174,8 +176,9 @@ serde and describe only identity, kind, and wiring.
 
 **Parser layer (planning, see #8 / #47):** the canonical home for GGUF v3
 deserialization and per-expert raw weight extraction is `engram-parser`, not this
-crate. Parser/dtype freeze holds until #47 can wrap `parse_checkpoint_layout`
-around engram-parser 0.2.0 — see [GGUF parser boundary](#gguf-parser-boundary-see-8).
+crate. Parser/dtype freeze holds until #47 can consume published engram-parser
+0.3.x checkpoint/tensor APIs and retire in-tree GGUF — see
+[GGUF parser boundary](#gguf-parser-boundary-see-8).
 
 **Future formats (planning, see #9 / #32):** Safetensors header inspection,
 deterministic manifests, and MoE candidate discovery belong in `engram-parser`
@@ -203,11 +206,14 @@ boundary clean. Cross-links and notes are maintained for alignment.
 This crate **owns**:
 
 - A backend-neutral ANN stage vocabulary and `AnnExecutor` contract (`stage`).
+- Hidden-state ingress and egress at stage boundaries (`ExternalBindings`, `run_topology`).
 - External adapter capability facts and hidden-state import/export (`adapter`).
   Native Candle and Burn types stay behind optional features.
-- The deterministic `Vec<f32>` reference backend: row-major `Tensor`, CPU ops,
-  decoder-only transformer blocks, and dense MoE routing math, kept for CI,
-  golden vectors, and conformance. Not a second framework surface.
+- The deterministic `Vec<f32>` reference backend: row-major `Tensor`, CPU ops
+  (matmul, batched matmul, causal mask, softmax, layer norm, RMSNorm),
+  decoder-only transformer blocks, and dense MoE routing math. Kept for CI,
+  golden vectors, fuzzing, and backend-semantic comparisons. Not a second
+  product surface.
 - The ANN↔SNN execution/interchange contract (`snn` module): `SnnBackend`,
   `SnnEncoder`/`SnnDecoder` boundary types, `SnnCapabilities`, and
   `SpikingMoeRouter` composing the MoE router with an external SNN backend.
@@ -219,11 +225,14 @@ This crate **owns**:
 This crate **does not own**:
 
 - Checkpoint parsing — [`engram-parser`](https://github.com/rmems/engram-parser).
-  In-tree GGUF is transitional until #47. Do not add parser or dtype coverage here.
+  Issue 47 (consume published engram-parser 0.3.x and retire in-tree GGUF) is
+  open and is not part of this boundary reset.
 - ANN↔SNN placement and session orchestration — [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion).
-  [#35](https://github.com/rmems/cortex-tensor/issues/35) (do not merge hybrid-fusion) is closed and stands.
-- SNN neuron dynamics, generic CUDA/GPU kernels, GOZ1 / SAAQ experiment policy,
-  and a universal Rust tensor framework.
+  Issue 35, the decision not to merge hybrid-fusion into this repo, is closed and stands.
+- SNN neuron dynamics.
+- Generic CUDA/GPU kernels — existing ML backends, or `myelin-accelerator` for specialized hybrid kernels.
+- GOZ1 / SAAQ experiment policy.
+- A universal Rust tensor framework.
 - Canonical GGUF v3 deserialization (header, KV metadata, tensor directory) and
   per-expert *raw* weight extraction — see the parser-boundary note below.
 - Safetensors header inspection, deterministic manifests, and MoE candidate
@@ -244,26 +253,27 @@ This crate **does not own**:
 SNN backend crates (`neuromod` today, evaluated individually) and,
 in future, the zero-dependency rmems parser crates.
 
-**Forbidden dependencies:** GPU backends (`cust`), inference frameworks as
-core dependencies (`tch`, `ort`, and `candle` outside the optional `candle`
-feature), domain/SNN orchestration crates, and any dependency on
-`rmems/corinth-canal`. `candle-core` is allowed only behind the `candle`
-feature, with GPU features off. The `burn` feature is a stub and must not
-depend on the `burn` crate in v0.3. Extraction from corinth-canal is a
+**Forbidden dependencies:** GPU backends (`cust`) as core dependencies,
+making an inference framework (`candle`, `burn`, `tch`, `ort`) a required
+dependency, domain/SNN orchestration crates (including `hybrid-fusion`), and
+any dependency on `rmems/corinth-canal`. Optional adapters must not leak native
+types into core. `candle-core` is allowed only behind the `candle` feature, with
+GPU features off. The `burn` feature is a stub and must not depend on the `burn`
+crate in v0.3. Extraction from corinth-canal is a
 **one-way copy**; that repo keeps an unmodified reference copy per its
 `PROMOTION_RULES.md`.
 
 | Crate | Role |
 |-------|------|
-| [`engram-parser`](https://github.com/rmems/engram-parser) | GGUF parse + per-expert raw weight extraction |
-| `cortex-tensor` (this crate) | Tensor math + MoE routing on extracted weights |
-| [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion) | ANN→SNN orchestration |
-| [`neuromod`](https://github.com/rmems/neuromod) | SNN neuron dynamics (downstream consumer) |
+| [`engram-parser`](https://github.com/rmems/engram-parser) | Checkpoint parsing and topology discovery |
+| `cortex-tensor` (this crate) | ANN stage contracts + deterministic reference backend |
+| [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion) | Placement and session orchestration (separate repo; not merged) |
+| [`neuromod`](https://github.com/rmems/neuromod) | SNN neuron dynamics, behind the optional `neuromod` feature |
 
 See [LIM-9](https://linear.app/saaq-spiking-adaptive-activity/issue/LIM-9/plan-rust-runtime-and-deployment-repo-boundary-matrix)
 for the full Rust runtime/deployment boundary matrix, and issues #5 (boundary
 doc), #8 (GGUF parser coordination), #9 / #32 (Safetensors provider), and #47
-(consume `engram-parser` 0.2.0) for this repo's tracking.
+(consume published `engram-parser` 0.3.x) for this repo's tracking.
 
 ### GGUF parser boundary (see #8)
 
@@ -288,9 +298,10 @@ adapters on top of parsed layout / extracted weights. Consume follow-up: [#47](h
 **Freeze until consume lands:** no new parser code and no dtype/GGUF format
 enhancements in `src/moe/checkpoint.rs`, `src/moe/gguf.rs`, or
 `src/moe/dequant.rs` until [#47](https://github.com/rmems/cortex-tensor/issues/47)
-can wrap `parse_checkpoint_layout` around engram-parser 0.2.0. That issue is
-blocked on [engram-parser#45](https://github.com/rmems/engram-parser/issues/45)
-(mmap + K-quant). Known gaps versus the corinth-canal reference — additional
+can consume published engram-parser 0.3.x checkpoint/tensor APIs. The older
+plan to wrap `parse_checkpoint_layout` around engram-parser 0.2.0 is
+superseded; engram-parser#45 (mmap + K-quant) is closed and is not the
+blocker. Known gaps versus the corinth-canal reference — additional
 dtypes (`BF16`, `Q6_K`, `IQ3_*`), a `ggml_type_label` helper, and the
 "GGUF wire type 31 is `Q4_0_4_4`, not IQ3_M" discipline — stay parked on
 engram-parser. **Do not add Q6_K / IQ3_* dequant in this crate.** Cross-repo
@@ -346,6 +357,11 @@ RMSNorm moments, and L2 norms accumulate in `f64`.
 
 Kernels are sequential, so a given input bit pattern is deterministic across debug/release and supported platforms.
 
+The deterministic numerical baseline and coverage inventory live in
+[Reference goldens](tests/fixtures/REFERENCE_GOLDENS.md). Run it with
+`cargo test --test reference_goldens`; intentional expectation changes require
+a documented semantic reason and independent arithmetic review.
+
 ### Integration notes (RM-1354)
 
 - **Public API:** Prefer `ops::try_softmax`, `Tensor::try_softmax_last`, `try_layer_norm`, and `try_rms_norm` for rank, shape, `eps`, and allocation checks. Row kernels in `tensor::finite` are crate-internal; they assume valid buffer lengths and (for norms) an `eps` already accepted by `validate_norm_eps`.
@@ -398,7 +414,14 @@ fn main() -> cortex_tensor::Result<()> {
 
 ## Status
 
-Extracted and compiling cleanly under Rust edition 2024. Public API is subject to change until `0.1.0` is tagged. Tests and benchmarks are incoming.
+Rust edition 2024, MSRV 1.98.1. Public API is pre-1.0.
+
+Linked work, not implemented by the boundary-reset docs:
+
+- Issue 57 — `AnnStage` / `AnnExecutor` (closed; on `main`).
+- Issue 58 — external Rust ML adapter and capability contracts (open).
+- Issue 47 — consume published engram-parser 0.3.x and retire in-tree GGUF (open; blocked on that publish).
+- Issue 35 — do not merge hybrid-fusion (closed; still in force).
 
 ## License
 

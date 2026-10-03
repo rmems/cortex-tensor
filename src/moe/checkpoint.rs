@@ -9,8 +9,9 @@
 //! **Frozen for parser work (see #8 / #47).** The canonical home for GGUF v3
 //! layout parsing and per-expert raw weight extraction is `rmems/engram-parser`
 //! (closed engram-parser#7, source corinth-canal#115). Parser/dtype freeze
-//! holds until #47 can wrap `parse_checkpoint_layout` around engram-parser
-//! 0.2.0 (blocked on engram-parser#45). Do not add Q6_K / IQ3_* here. What
+//! holds until #47 can consume published engram-parser 0.3.x
+//! checkpoint/tensor APIs. The older plan to wrap `parse_checkpoint_layout`
+//! around engram-parser 0.2.0 is superseded. Do not add Q6_K / IQ3_* here. What
 //! stays in this crate: mmap'd tensor access, dequantization to f32, routing,
 //! and model adapters.
 

@@ -20,8 +20,9 @@
 //! (see closed engram-parser#7 and corinth-canal#115). This crate stays the
 //! consumer: f32 math, `Tensor` ops, routing, dequantization, and model
 //! adapters on top. Parser/dtype freeze holds until a consume follow-up can
-//! wrap `parse_checkpoint_layout` around engram-parser 0.2.0 — that work is
-//! #47, blocked on engram-parser#45 (mmap + K-quant). Do not add Q6_K / IQ3_*
+//! take published engram-parser 0.3.x checkpoint/tensor APIs — that work is
+//! #47. The older plan to wrap `parse_checkpoint_layout` around engram-parser
+//! 0.2.0 is superseded. Do not add Q6_K / IQ3_*
 //! here. Dequantization itself stays owned by this crate; only widening the
 //! supported dtype set is frozen, since new dtypes arrive with the parser's
 //! type ids. No dependency on engram-parser is declared yet.

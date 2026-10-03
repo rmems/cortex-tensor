@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Crate identity is a backend-neutral ANN stage layer plus a deterministic `Vec<f32>` reference backend. README and Cargo description say so. Checkpoint parsing stays in engram-parser, orchestration stays in hybrid-fusion, and the closed decision not to merge hybrid-fusion (issue 35) stands. No new framework-generic numerical API (issue 56).
+- Parser-boundary docs no longer tell maintainers to wrap `parse_checkpoint_layout` around engram-parser 0.2.0. Issue 47's target is published engram-parser 0.3.x checkpoint/tensor APIs. This change does not consume that crate.
+
 ### Added
 
 - External adapter contract (`adapter` module, re-exported from `stage`): `ExternalAdapter` / `ExternalAdapterMarker`, `AdapterCapabilities`, `BackendLimitations`, `DeviceClass`, `HiddenStateBuffer`, and `NegotiationDocument`. Core traits do not name Candle or Burn types. `ExternalAdapterMarker` includes `import_hidden` and `export_hidden`. `ReferenceExecutor` implements the same contract and copies hidden state through `HiddenStateBuffer`. Optional `candle` feature adds a CPU `f32` Candle hidden-state adapter and does not advertise unbound stage kinds. Optional `burn` feature is a structured policy stub and does not depend on `burn` (burn 0.21's rustc 1.92 requirement is a minimum and is compatible with this pin). **Possible break for exhaustive `CortexError` matches:** new `UnsupportedOperation` variant (#58).
