@@ -196,14 +196,10 @@ impl AnnExecutor for CandleAdapter {
         // Stage kernels stay in the engine. This adapter refuses execution
         // that would require reimplementing them, and it does so before
         // looking at inputs.
-        Err(CortexError::UnsupportedOperation {
+        Err(CortexError::UnsupportedStage {
             backend: "candle",
-            stage_id: Some(stage.id.to_string()),
-            category: "stage_execution",
-            detail: format!(
-                "{} execution is not bound in the CPU hidden-state adapter",
-                stage.kind.tag()
-            ),
+            stage_id: stage.id.to_string(),
+            kind: format!("{:?}", stage.kind),
         })
     }
 }

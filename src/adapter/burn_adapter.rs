@@ -52,10 +52,10 @@ impl BurnAdapter {
         Self
     }
 
-    fn refusal(stage_id: Option<String>) -> CortexError {
+    fn refusal() -> CortexError {
         CortexError::UnsupportedOperation {
             backend: "burn",
-            stage_id,
+            stage_id: None,
             category: "policy",
             detail: "burn is not a dependency of cortex-tensor v0.3; the feature is a structured stub and does not link burn".to_string(),
         }
@@ -91,11 +91,11 @@ impl ExternalAdapterMarker for BurnAdapter {
     }
 
     fn export_hidden(&self, _tensor: &Self::Tensor) -> Result<HiddenStateBuffer> {
-        Err(Self::refusal(None))
+        Err(Self::refusal())
     }
 
     fn import_hidden(&self, _buffer: &HiddenStateBuffer) -> Result<Self::Tensor> {
-        Err(Self::refusal(None))
+        Err(Self::refusal())
     }
 }
 
@@ -111,6 +111,10 @@ impl AnnExecutor for BurnAdapter {
         stage: &AnnStage,
         _inputs: &[StageInput<Self::Tensor>],
     ) -> Result<Self::Tensor> {
-        Err(Self::refusal(Some(stage.id.to_string())))
+        Err(CortexError::UnsupportedStage {
+            backend: "burn",
+            stage_id: stage.id.to_string(),
+            kind: format!("{:?}", stage.kind),
+        })
     }
 }

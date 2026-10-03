@@ -340,7 +340,7 @@ fn candle_feature_adapter_is_wired_when_enabled() {
     #[cfg(feature = "candle")]
     {
         use cortex_tensor::stage::CandleAdapter;
-        let adapter = CandleAdapter::cpu();
+        let mut adapter = CandleAdapter::cpu();
         let caps = ExternalAdapter::capabilities(&adapter);
         assert_eq!(caps.ann.backend_name, "candle");
         assert!(caps.hidden_state_io);
@@ -374,6 +374,13 @@ fn candle_feature_adapter_is_wired_when_enabled() {
         assert!(matches!(
             err,
             CortexError::UnsupportedOperation { category, .. } if category == "dtype"
+        ));
+        let stage = add_stage();
+        let err = ExternalAdapter::execute(&mut adapter, &stage, &[]).unwrap_err();
+        assert!(matches!(
+            err,
+            CortexError::UnsupportedStage { backend, stage_id, kind }
+                if backend == "candle" && stage_id == "probe_add" && kind.contains("Add")
         ));
     }
     #[cfg(not(feature = "candle"))]
@@ -409,8 +416,8 @@ fn burn_feature_stays_a_structured_stub_on_this_toolchain() {
         let err = ExternalAdapter::execute(&mut { adapter }, &stage, &[]).unwrap_err();
         assert!(matches!(
             err,
-            CortexError::UnsupportedOperation { backend, category, .. }
-                if backend == "burn" && category == "policy"
+            CortexError::UnsupportedStage { backend, stage_id, kind }
+                if backend == "burn" && stage_id == "probe_add" && kind.contains("Add")
         ));
     }
 }
