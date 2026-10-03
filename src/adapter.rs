@@ -283,6 +283,9 @@ pub trait ExternalAdapterMarker: AnnExecutor {
 
 /// Checked element count for a hidden-state shape.
 pub(crate) fn checked_numel(shape: &[usize]) -> Result<usize> {
+    if shape.contains(&0) {
+        return Ok(0);
+    }
     shape.iter().try_fold(1usize, |acc, &dim| {
         acc.checked_mul(dim)
             .ok_or_else(|| CortexError::StageFailed {
@@ -333,6 +336,124 @@ fn all_stage_tags() -> [StageKindTag; 11] {
         StageKindTag::Custom,
     ]
 }
+
+#[cfg(any(feature = "candle", feature = "burn"))]
+fn policy_stub_capabilities(
+    backend_name: &'static str,
+    framework_name: &'static str,
+) -> AdapterCapabilities {
+    AdapterCapabilities {
+        ann: AnnCapabilities {
+            backend_name,
+            supported_tags: BTreeSet::new(),
+            supported_dtypes: BTreeSet::new(),
+            stateful: false,
+        },
+        devices: BTreeSet::new(),
+        batch: false,
+        sequence_cache: false,
+        hidden_state_io: false,
+        limitations: BackendLimitations {
+            unsupported_tags: BTreeSet::from(all_stage_tags()),
+            unsupported_dtypes: BTreeSet::from([DType::F32, DType::F16, DType::BF16]),
+            unsupported_devices: BTreeSet::from([
+                DeviceClass::Cpu,
+                DeviceClass::Cuda,
+                DeviceClass::Metal,
+            ]),
+            notes: vec![format!(
+                "{backend_name} adapter is a structured stub; cortex-tensor v0.3 does not depend on the {framework_name} crate"
+            )],
+        },
+    }
+}
+
+#[cfg(any(feature = "candle", feature = "burn"))]
+fn policy_stub_refusal(backend_name: &'static str, framework_name: &'static str) -> CortexError {
+    CortexError::UnsupportedOperation {
+        backend: backend_name,
+        stage_id: None,
+        category: "policy",
+        detail: format!(
+            "{framework_name} is not a dependency of cortex-tensor v0.3; the feature is a structured stub and does not link {framework_name}"
+        ),
+    }
+}
+
+#[cfg(any(feature = "candle", feature = "burn"))]
+macro_rules! define_policy_stub_adapter {
+    ($adapter:ident, $tensor:ident, $backend:literal, $framework:literal) => {
+        #[doc = concat!("Tensor stand-in used while ", $framework, " stays outside core.")]
+        #[derive(Debug, Clone, PartialEq)]
+        pub struct $tensor {
+            shape: Vec<usize>,
+            dtype: $crate::stage::DType,
+        }
+
+        impl $crate::stage::StageTensor for $tensor {
+            fn meta(&self) -> $crate::stage::TensorMeta {
+                $crate::stage::TensorMeta {
+                    shape: self.shape.clone(),
+                    dtype: self.dtype,
+                }
+            }
+        }
+
+        #[doc = concat!($framework, " participation stub.")]
+        #[derive(Debug, Clone, Copy)]
+        pub struct $adapter;
+
+        impl $adapter {
+            /// Adapter that reports the v0.3 dependency-policy gap.
+            pub fn unavailable() -> Self {
+                Self
+            }
+        }
+
+        impl $crate::adapter::ExternalAdapterMarker for $adapter {
+            fn adapter_capabilities(&self) -> $crate::adapter::AdapterCapabilities {
+                $crate::adapter::policy_stub_capabilities($backend, $framework)
+            }
+
+            fn export_hidden(
+                &self,
+                _tensor: &Self::Tensor,
+            ) -> $crate::Result<$crate::adapter::HiddenStateBuffer> {
+                Err($crate::adapter::policy_stub_refusal($backend, $framework))
+            }
+
+            fn import_hidden(
+                &self,
+                _buffer: &$crate::adapter::HiddenStateBuffer,
+            ) -> $crate::Result<Self::Tensor> {
+                Err($crate::adapter::policy_stub_refusal($backend, $framework))
+            }
+        }
+
+        impl $crate::stage::AnnExecutor for $adapter {
+            type Tensor = $tensor;
+
+            fn capabilities(&self) -> $crate::stage::AnnCapabilities {
+                $crate::adapter::ExternalAdapterMarker::adapter_capabilities(self).ann
+            }
+
+            fn execute(
+                &mut self,
+                stage: &$crate::stage::AnnStage,
+                _inputs: &[$crate::stage::StageInput<Self::Tensor>],
+            ) -> $crate::Result<Self::Tensor> {
+                Err($crate::CortexError::UnsupportedStage {
+                    backend: $backend,
+                    stage_id: stage.id.to_string(),
+                    kind: format!("{:?}", stage.kind),
+                })
+            }
+        }
+    };
+}
+
+#[cfg(any(feature = "candle", feature = "burn"))]
+pub(crate) use define_policy_stub_adapter;
 
 /// Reject a hidden-state dtype the reference path cannot store.
 pub(crate) fn require_f32_buffer(buffer: &HiddenStateBuffer) -> Result<()> {

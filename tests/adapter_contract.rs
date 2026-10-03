@@ -157,6 +157,19 @@ fn hidden_state_import_rejects_non_f32_and_shape_mismatch() {
 }
 
 #[test]
+fn hidden_state_import_accepts_zero_axis_after_overflowing_prefix() {
+    let buffer = HiddenStateBuffer {
+        data: Vec::new(),
+        shape: vec![usize::MAX, usize::MAX, 0],
+        dtype: DType::F32,
+    };
+
+    let imported = ReferenceExecutor::import_hidden(&buffer).expect("zero-sized hidden state");
+    assert_eq!(imported.shape(), buffer.shape);
+    assert!(imported.data().is_empty());
+}
+
+#[test]
 fn reference_rejects_unsupported_stage_before_touching_inputs() {
     let model = tiny_model(1);
     let (mut executor, _) = ReferenceExecutor::from_transformer(&model).expect("bind");
