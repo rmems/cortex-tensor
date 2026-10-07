@@ -1065,11 +1065,10 @@ mod tests {
         assert!(panicked.is_err());
     }
 
-    /// Reproduces RM-1488: unchecked `shape.iter().product()` wraps in release
-    /// and used to yield `numel == 0` with non-empty-looking strides.
+    /// Guards against unchecked shape products wrapping to `numel == 0` in release.
     #[test]
-    fn rm_1488_two_pow32_extents_reject_without_wrapped_numel() {
-        const EXT: usize = 1usize << 32;
+    fn equal_power_of_two_extents_reject_without_wrapped_numel() {
+        const EXT: usize = 1usize << (usize::BITS / 2);
         let shape = [EXT, EXT];
         for (name, result) in [
             ("try_zeros", Tensor::try_zeros(&shape)),
@@ -1085,6 +1084,7 @@ mod tests {
         assert!(checked_numel(&shape).is_err());
     }
 
+    /// Empty tensors divide by zero in `mean()`; rank-0 scalars use the sole element.
     #[test]
     fn mean_of_zero_element_tensor_is_nan() {
         let empty = Tensor::try_zeros(&[0, 3]).unwrap();
