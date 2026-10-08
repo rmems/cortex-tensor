@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Tensor constructors and JSON deserialization validate shape products and row-major stride arithmetic with checked multiplication, rejecting overflowing extents in release instead of wrapping to `numel == 0` (RM-1488). Documented rank-0 scalar vs zero-axis contracts and `mean()` returning `NaN` on empty tensors.
 - `MoeRouter::extract_token_embedding` returns checkpoint-native `hidden_size` without implicit resample to `EMBEDDING_DIM` or L2 normalization (RM-1519). Use `ExtractTokenOptions::for_projector_forward()` when feeding `MoeRouter::forward`.
 - MoE top-k routing now uses a total order: finite scores descending, ascending expert ID on ties, typed NaN rejection, and explicit ±Inf ranking (RM-1355). Selection ranks raw gate/membrane scores before softmax so non-finite logits cannot be masked into uniform weights.
 

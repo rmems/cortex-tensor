@@ -49,6 +49,17 @@ use std::fmt;
 /// Non-finite values cannot be serialized to JSON. Deserialization checks the
 /// shape and row-major stride arithmetic through [`Self::try_from_vec`]. Use
 /// [`crate::reference_json::from_slice_with_limit`] for untrusted input.
+///
+/// # Rank-0 scalars vs zero-sized axes
+///
+/// - `shape == []` is a rank-0 scalar with exactly one element (`numel == 1`).
+/// - Any axis equal to `0` yields `numel == 0`, even when other extents would
+///   overflow if multiplied without checked arithmetic (for example
+///   `[usize::MAX, 0, 2]`).
+/// - Constructors and [`Deserialize`] reject shapes whose element count or
+///   row-major stride product is not representable in `usize` (see
+///   [`checked_numel`] and [`try_compute_strides`]).
+/// - [`Self::mean`] on a zero-element tensor is `0.0 / 0.0`, which is `NaN`.
 #[derive(Clone)]
 pub struct Tensor {
     data: Vec<f32>,
@@ -482,6 +493,9 @@ impl Tensor {
         self.data.iter().sum()
     }
 
+    /// Arithmetic mean over all elements.
+    ///
+    /// Returns `NaN` when `numel() == 0` (zero-sized axis or empty buffer).
     pub fn mean(&self) -> f32 {
         self.sum() / self.numel() as f32
     }
@@ -1049,6 +1063,34 @@ mod tests {
             let _ = Tensor::zeros(&[usize::MAX, 2]);
         });
         assert!(panicked.is_err());
+    }
+
+    /// Guards against unchecked shape products wrapping to `numel == 0` in release.
+    #[test]
+    fn equal_power_of_two_extents_reject_without_wrapped_numel() {
+        const EXT: usize = 1usize << (usize::BITS / 2);
+        let shape = [EXT, EXT];
+        for (name, result) in [
+            ("try_zeros", Tensor::try_zeros(&shape)),
+            ("try_ones", Tensor::try_ones(&shape)),
+            ("try_full", Tensor::try_full(&shape, 1.0)),
+            ("try_from_vec", Tensor::try_from_vec(Vec::new(), &shape)),
+        ] {
+            assert!(
+                matches!(result, Err(CortexError::SizeOverflow { shape: ref got }) if got.as_slice() == shape),
+                "{name}: {result:?}"
+            );
+        }
+        assert!(checked_numel(&shape).is_err());
+    }
+
+    /// Empty tensors divide by zero in `mean()`; rank-0 scalars use the sole element.
+    #[test]
+    fn mean_of_zero_element_tensor_is_nan() {
+        let empty = Tensor::try_zeros(&[0, 3]).unwrap();
+        assert!(empty.mean().is_nan());
+        let scalar = Tensor::try_from_vec(vec![4.0], &[]).unwrap();
+        assert_eq!(scalar.mean(), 4.0);
     }
 
     #[test]
