@@ -75,3 +75,42 @@ fn stage_execution_apis_have_stable_signatures() {
     .expect("valid pin model");
     let (_exec, _topo) = from_transformer_pin(&model).expect("pin resolves");
 }
+
+#[test]
+fn external_adapter_contract_is_public() {
+    use cortex_tensor::stage::{
+        AdapterCapabilities, AnnCapabilities, BackendLimitations, DeviceClass, ExternalAdapter,
+        ExternalAdapterMarker, HiddenStateBuffer, NegotiationDocument,
+    };
+
+    fn marker<T: ExternalAdapterMarker<Tensor = cortex_tensor::Tensor>>() {}
+    marker::<ReferenceExecutor<'static>>();
+
+    let caps = AnnCapabilities {
+        backend_name: "pin",
+        supported_tags: Default::default(),
+        supported_dtypes: Default::default(),
+        stateful: false,
+    };
+    let report = AdapterCapabilities {
+        ann: caps,
+        devices: Default::default(),
+        batch: false,
+        sequence_cache: false,
+        hidden_state_io: true,
+        limitations: BackendLimitations {
+            unsupported_tags: Default::default(),
+            unsupported_dtypes: Default::default(),
+            unsupported_devices: Default::default(),
+            notes: Vec::new(),
+        },
+    };
+    let doc: NegotiationDocument = report.negotiation_document();
+    let _: fn(&Tensor) -> cortex_tensor::Result<HiddenStateBuffer> =
+        ReferenceExecutor::export_hidden;
+    let _: fn(&HiddenStateBuffer) -> cortex_tensor::Result<Tensor> =
+        ReferenceExecutor::import_hidden;
+    let _: ExternalAdapter = ExternalAdapter;
+    assert_eq!(DeviceClass::Cpu.as_str(), "cpu");
+    assert_eq!(doc.backend_name, "pin");
+}
