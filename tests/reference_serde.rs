@@ -205,6 +205,7 @@ fn routing_mode_rejects_unknown_strings() {
         "dense",
         "uniform",
         "Dense_Sim",
+        "Stub_Uniform",
         "",
     ] {
         assert!(
