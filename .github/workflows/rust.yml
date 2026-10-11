@@ -89,7 +89,7 @@ jobs:
     # Both OSS and SAST steps skip cleanly (exit 0) when SNYK_TOKEN is absent (fork PRs etc.) but run hard when token present.
     # continue-on-error only on OSS to tolerate "no supported files" in some Rust setups (see raulmc-26r).
     - name: Snyk setup (pinned SHA for branding)
-      uses: snyk/actions/setup@b075801f26076be9bb50521154cafab73f44da0c
+      uses: snyk/actions/setup@11b673cfb4b0dc0d860a1323caa199d54950dcce
     - name: Generate CycloneDX SBOM (for Rust Snyk scans)
       run: |
         cargo install --locked cargo-cyclonedx 2>/dev/null || true
