@@ -50,7 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- MSRV / toolchain target: Rust 1.98.1 (`rust-version` in `Cargo.toml`, `rust-toolchain.toml`).
+- MSRV / toolchain target: Rust 1.99.0 (`rust-version` in `Cargo.toml`, `rust-toolchain.toml`, CI, and `.agents/setup`).
+- Crate package excludes agent, CI, coverage, and `rust-toolchain.toml` paths. Sources, tests, licenses, README, and CHANGELOG still ship.
 - Softmax (tensor last-axis, attention, MoE routing) is max-subtracted with explicit NaN, `+Inf` split, and all-`-Inf` uniform behavior; partition sums use `f64`, then an `f32` residual so rows of length `≤ 4096` stay within `SOFTMAX_SUM_TOLERANCE` (RM-1354).
 - LayerNorm, RMSNorm, and L2 routing normalize accumulate moments in `f64` so large finite magnitudes stay finite; affine overflow saturates to `±f32::MAX` (RM-1354).
 - Panic-style constructors and ops (`from_vec`, `matmul`, `batched_matmul`, `embedding`, `layer_norm`, `rms_norm`) are now compatibility wrappers around the fallible APIs. Prefer `try_*` in new code; wrappers stay until a separate SemVer decision.
