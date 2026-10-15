@@ -60,9 +60,11 @@ impl fmt::Display for DeviceClass {
 
 /// What an adapter explicitly cannot do.
 ///
-/// Absence from [`AnnCapabilities`] already means "not advertised." This
-/// struct records the refusals an orchestrator should surface, including
-/// toolchain gaps that are not a stage kind.
+/// Absence from [`AnnCapabilities`] or [`AdapterCapabilities::devices`]
+/// already means "not advertised." [`AdapterCapabilities::require_supported`]
+/// rejects both these explicit refusals and any request the adapter never
+/// listed. This struct records the refusals an orchestrator should surface,
+/// including toolchain gaps that are not a stage kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendLimitations {
     /// Stage kinds the adapter will reject.
@@ -73,50 +75,6 @@ pub struct BackendLimitations {
     pub unsupported_devices: BTreeSet<DeviceClass>,
     /// Human-readable limits. Not a performance ranking.
     pub notes: Vec<String>,
-}
-
-impl BackendLimitations {
-    /// Refuse the first capability gap, in category order: stage kind, dtype, device.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CortexError::UnsupportedOperation`] for the first gap. A
-    /// supported request returns `Ok(())`.
-    pub fn require_supported(
-        &self,
-        backend: &'static str,
-        stage_id: &StageId,
-        kind: &StageKind,
-        dtype: DType,
-        device: DeviceClass,
-    ) -> Result<()> {
-        let tag = kind.tag();
-        if self.unsupported_tags.contains(&tag) {
-            return Err(CortexError::UnsupportedOperation {
-                backend,
-                stage_id: Some(stage_id.to_string()),
-                category: "stage_kind",
-                detail: format!("{tag} is not supported"),
-            });
-        }
-        if self.unsupported_dtypes.contains(&dtype) {
-            return Err(CortexError::UnsupportedOperation {
-                backend,
-                stage_id: Some(stage_id.to_string()),
-                category: "dtype",
-                detail: format!("{dtype} is not supported"),
-            });
-        }
-        if self.unsupported_devices.contains(&device) {
-            return Err(CortexError::UnsupportedOperation {
-                backend,
-                stage_id: Some(stage_id.to_string()),
-                category: "device",
-                detail: format!("{device} is not supported"),
-            });
-        }
-        Ok(())
-    }
 }
 
 /// Owned hidden-state bytes crossing an adapter boundary.
@@ -189,6 +147,60 @@ pub struct NegotiationDocument {
 }
 
 impl AdapterCapabilities {
+    /// Refuse a request the adapter did not advertise.
+    ///
+    /// Membership in [`AnnCapabilities::supported_tags`],
+    /// [`AnnCapabilities::supported_dtypes`], and [`Self::devices`] is
+    /// required. [`BackendLimitations`] supplies the reason when the gap is
+    /// an explicit refusal. A request absent from both the advertised set and
+    /// the refusal set is still rejected.
+    ///
+    /// Checks run in category order: stage kind, dtype, then device.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CortexError::UnsupportedOperation`] for the first gap.
+    pub fn require_supported(
+        &self,
+        stage_id: &StageId,
+        kind: &StageKind,
+        dtype: DType,
+        device: DeviceClass,
+    ) -> Result<()> {
+        let backend = self.ann.backend_name;
+        let tag = kind.tag();
+        if !self.ann.supported_tags.contains(&tag) {
+            let detail = if self.limitations.unsupported_tags.contains(&tag) {
+                format!("{tag} is not supported")
+            } else {
+                format!("{tag} is not advertised")
+            };
+            return Err(unsupported_operation(
+                backend,
+                stage_id,
+                "stage_kind",
+                detail,
+            ));
+        }
+        if !self.ann.supported_dtypes.contains(&dtype) {
+            let detail = if self.limitations.unsupported_dtypes.contains(&dtype) {
+                format!("{dtype} is not supported")
+            } else {
+                format!("{dtype} is not advertised")
+            };
+            return Err(unsupported_operation(backend, stage_id, "dtype", detail));
+        }
+        if !self.devices.contains(&device) {
+            let detail = if self.limitations.unsupported_devices.contains(&device) {
+                format!("{device} is not supported")
+            } else {
+                format!("{device} is not advertised")
+            };
+            return Err(unsupported_operation(backend, stage_id, "device", detail));
+        }
+        Ok(())
+    }
+
     /// Project this report into the document hybrid-fusion negotiation consumes.
     ///
     /// The projection is side-effect free. It does not choose a backend or
@@ -320,6 +332,20 @@ pub(crate) fn reference_adapter_capabilities(ann: AnnCapabilities) -> AdapterCap
                 "reference backend is f32, CPU-only, and dense; no batch axis and no sequence cache".to_string(),
             ],
         },
+    }
+}
+
+fn unsupported_operation(
+    backend: &'static str,
+    stage_id: &StageId,
+    category: &'static str,
+    detail: String,
+) -> CortexError {
+    CortexError::UnsupportedOperation {
+        backend,
+        stage_id: Some(stage_id.to_string()),
+        category,
+        detail,
     }
 }
 

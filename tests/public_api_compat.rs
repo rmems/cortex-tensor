@@ -79,8 +79,8 @@ fn stage_execution_apis_have_stable_signatures() {
 #[test]
 fn external_adapter_contract_is_public() {
     use cortex_tensor::stage::{
-        AdapterCapabilities, AnnCapabilities, BackendLimitations, DeviceClass, ExternalAdapter,
-        ExternalAdapterMarker, HiddenStateBuffer, NegotiationDocument,
+        AdapterCapabilities, AnnCapabilities, BackendLimitations, DType, DeviceClass,
+        ExternalAdapter, ExternalAdapterMarker, HiddenStateBuffer, NegotiationDocument, StageKind,
     };
 
     fn marker<T: ExternalAdapterMarker<Tensor = cortex_tensor::Tensor>>() {}
@@ -111,6 +111,13 @@ fn external_adapter_contract_is_public() {
     let _: fn(&HiddenStateBuffer) -> cortex_tensor::Result<Tensor> =
         ReferenceExecutor::import_hidden;
     let _: ExternalAdapter = ExternalAdapter;
+    let _: fn(
+        &AdapterCapabilities,
+        &StageId,
+        &StageKind,
+        DType,
+        DeviceClass,
+    ) -> cortex_tensor::Result<()> = AdapterCapabilities::require_supported;
     assert_eq!(DeviceClass::Cpu.as_str(), "cpu");
     assert_eq!(doc.backend_name, "pin");
 }

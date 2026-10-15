@@ -257,23 +257,42 @@ fn run_topology_uses_imported_hidden_state_without_reembedding() {
     );
 }
 
+fn probe_capabilities(
+    supported_tags: BTreeSet<StageKindTag>,
+    supported_dtypes: BTreeSet<DType>,
+    devices: BTreeSet<DeviceClass>,
+    limitations: BackendLimitations,
+) -> cortex_tensor::stage::AdapterCapabilities {
+    cortex_tensor::stage::AdapterCapabilities {
+        ann: AnnCapabilities {
+            backend_name: "probe",
+            supported_tags,
+            supported_dtypes,
+            stateful: false,
+        },
+        devices,
+        batch: false,
+        sequence_cache: false,
+        hidden_state_io: false,
+        limitations,
+    }
+}
+
 #[test]
 fn capability_gap_is_a_structured_error_not_a_ranking() {
-    let offered = AnnCapabilities {
-        backend_name: "probe",
-        supported_tags: BTreeSet::from([StageKindTag::Add]),
-        supported_dtypes: BTreeSet::from([DType::F32]),
-        stateful: false,
-    };
-    let limitations = BackendLimitations {
-        unsupported_tags: BTreeSet::from([StageKindTag::MoeRouter]),
-        unsupported_dtypes: BTreeSet::new(),
-        unsupported_devices: BTreeSet::from([DeviceClass::Cuda]),
-        notes: vec!["dense reference only".into()],
-    };
-    let err = limitations
+    let report = probe_capabilities(
+        BTreeSet::from([StageKindTag::Add]),
+        BTreeSet::from([DType::F32]),
+        BTreeSet::from([DeviceClass::Cpu]),
+        BackendLimitations {
+            unsupported_tags: BTreeSet::from([StageKindTag::MoeRouter]),
+            unsupported_dtypes: BTreeSet::new(),
+            unsupported_devices: BTreeSet::from([DeviceClass::Cuda]),
+            notes: vec!["dense reference only".into()],
+        },
+    );
+    let err = report
         .require_supported(
-            "probe",
             &StageId::new("attn").expect("id"),
             &StageKind::MoeRouter {
                 num_experts: 2,
@@ -294,32 +313,136 @@ fn capability_gap_is_a_structured_error_not_a_ranking() {
             assert_eq!(stage_id.as_deref(), Some("attn"));
             assert_eq!(category, "stage_kind");
             assert!(detail.contains("moe_router"), "{detail}");
+            assert!(detail.contains("not supported"), "{detail}");
         }
         other => panic!("expected UnsupportedOperation, got {other:?}"),
     }
-    let dtype_gap = BackendLimitations {
-        unsupported_tags: BTreeSet::new(),
-        unsupported_dtypes: BTreeSet::from([DType::BF16]),
-        unsupported_devices: BTreeSet::new(),
-        notes: Vec::new(),
-    };
+    let dtype_gap = probe_capabilities(
+        BTreeSet::from([StageKindTag::Add]),
+        BTreeSet::from([DType::F32]),
+        BTreeSet::from([DeviceClass::Cpu]),
+        BackendLimitations {
+            unsupported_tags: BTreeSet::new(),
+            unsupported_dtypes: BTreeSet::from([DType::BF16]),
+            unsupported_devices: BTreeSet::new(),
+            notes: Vec::new(),
+        },
+    );
     let dtype_err = dtype_gap
         .require_supported(
-            "probe",
             &StageId::new("add").expect("id"),
             &StageKind::Add,
             DType::BF16,
             DeviceClass::Cpu,
         )
         .unwrap_err();
-    assert!(matches!(
-        dtype_err,
+    match dtype_err {
         CortexError::UnsupportedOperation {
+            category, detail, ..
+        } => {
+            assert_eq!(category, "dtype");
+            assert!(detail.contains("bf16"), "{detail}");
+            assert!(detail.contains("not supported"), "{detail}");
+        }
+        other => panic!("expected dtype refusal, got {other:?}"),
+    }
+    report
+        .require_supported(
+            &StageId::new("add").expect("id"),
+            &StageKind::Add,
+            DType::F32,
+            DeviceClass::Cpu,
+        )
+        .expect("advertised add/f32/cpu");
+    let device_err = report
+        .require_supported(
+            &StageId::new("add").expect("id"),
+            &StageKind::Add,
+            DType::F32,
+            DeviceClass::Cuda,
+        )
+        .unwrap_err();
+    match device_err {
+        CortexError::UnsupportedOperation {
+            category, detail, ..
+        } => {
+            assert_eq!(category, "device");
+            assert!(detail.contains("cuda"), "{detail}");
+            assert!(detail.contains("not supported"), "{detail}");
+        }
+        other => panic!("expected device refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn require_supported_rejects_capabilities_the_adapter_never_listed() {
+    let report = probe_capabilities(
+        BTreeSet::from([StageKindTag::Add]),
+        BTreeSet::from([DType::F32]),
+        BTreeSet::from([DeviceClass::Cpu]),
+        BackendLimitations {
+            unsupported_tags: BTreeSet::from([StageKindTag::MoeRouter]),
+            unsupported_dtypes: BTreeSet::new(),
+            unsupported_devices: BTreeSet::new(),
+            notes: Vec::new(),
+        },
+    );
+    let stage_id = StageId::new("attn").expect("id");
+    let missing_stage = report
+        .require_supported(
+            &stage_id,
+            &StageKind::Attention,
+            DType::F32,
+            DeviceClass::Cpu,
+        )
+        .unwrap_err();
+    match missing_stage {
+        CortexError::UnsupportedOperation {
+            backend,
             category,
+            detail,
             ..
-        } if category == "dtype"
-    ));
-    let _ = offered;
+        } => {
+            assert_eq!(backend, "probe");
+            assert_eq!(category, "stage_kind");
+            assert!(detail.contains("attention"), "{detail}");
+            assert!(detail.contains("not advertised"), "{detail}");
+        }
+        other => panic!("expected unlisted stage refusal, got {other:?}"),
+    }
+
+    let missing_dtype = report
+        .require_supported(&stage_id, &StageKind::Add, DType::F16, DeviceClass::Cpu)
+        .unwrap_err();
+    match missing_dtype {
+        CortexError::UnsupportedOperation {
+            category, detail, ..
+        } => {
+            assert_eq!(category, "dtype");
+            assert!(detail.contains("f16"), "{detail}");
+            assert!(detail.contains("not advertised"), "{detail}");
+        }
+        other => panic!("expected unlisted dtype refusal, got {other:?}"),
+    }
+
+    let missing_device = report
+        .require_supported(
+            &StageId::new("add").expect("id"),
+            &StageKind::Add,
+            DType::F32,
+            DeviceClass::Metal,
+        )
+        .unwrap_err();
+    match missing_device {
+        CortexError::UnsupportedOperation {
+            category, detail, ..
+        } => {
+            assert_eq!(category, "device");
+            assert!(detail.contains("metal"), "{detail}");
+            assert!(detail.contains("not advertised"), "{detail}");
+        }
+        other => panic!("expected unlisted device refusal, got {other:?}"),
+    }
 }
 
 #[test]
