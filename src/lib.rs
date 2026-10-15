@@ -12,6 +12,7 @@
 //! | Module | Role |
 //! |--------|------|
 //! | [`stage`] | Backend-neutral ANN stage contracts; [`stage::ReferenceExecutor`] is the reference backend |
+//! | `adapter` | Optional Candle `AnnExecutor` (`candle` feature); absent from default builds |
 //! | [`tensor`] | Reference-backend `Tensor`, fallible construction, core ops |
 //! | [`transformer`] | Reference-backend transformer blocks |
 //! | [`moe`] | Reference-backend MoE routing; checkpoints come from `engram-parser` 0.3.0 |
@@ -23,6 +24,8 @@
 //! remain as pre-1.0 compatibility wrappers. New code should use
 //! [`Tensor::try_from_vec`] and the `try_*` functions in [`crate::tensor::ops`].
 
+#[cfg(feature = "candle")]
+pub mod adapter;
 pub mod error;
 pub mod moe;
 pub mod reference_json;

@@ -28,6 +28,10 @@
 //! descriptors ([`AnnStage`], [`StageSource`], [`AnnTopology`]) carry no serde
 //! derives: they describe identity, kind, and wiring only, not a persisted
 //! wire format.
+//!
+//! The optional `candle` feature adds `adapter::CandleExecutor`. That executor
+//! runs stages with Candle's modules and converts row-major `f32` hidden state
+//! only at the adapter boundary. It is not the deferred cross-backend wire format.
 
 use crate::error::{CortexError, Result};
 use crate::tensor::Tensor;
