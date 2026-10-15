@@ -23,8 +23,8 @@ are constraints: don't add GPU code or heavy ML frameworks.
 
 ## Toolchain
 
-- Rust **1.98.1** (`rust-toolchain.toml`, `rust-version`), edition 2024. CI installs exactly 1.98.1
-  with rustfmt and clippy.
+- Rust **1.99.0** (`rust-toolchain.toml`, `rust-version`), edition 2024. CI installs exactly 1.99.0
+  with rustfmt and clippy. `.agents/setup` installs the same pin.
 - `Cargo.lock` is gitignored (library crate), so don't pass `--locked` to build/test.
 - Features: `neuromod` (SNN backend adapter) and `axon-encoder` (SNN encoder adapter), both off by default.
 - No GPU or system packages needed.

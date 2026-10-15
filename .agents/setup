@@ -7,7 +7,7 @@
 #
 # Installs only what this repo's CI and manifests need:
 #   - apt: build-essential, pkg-config, curl, ca-certificates
-#   - Rust 1.98.1 (+rustfmt, clippy) [default]
+#   - Rust 1.99.0 (+rustfmt, clippy) [default]
 #   - cargo fetch
 #
 # It ends with a dependency fetch/prebuild, not a test run.
@@ -43,9 +43,9 @@ if ! command -v rustup >/dev/null 2>&1; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
     sh -s -- -y --default-toolchain none --profile minimal
 fi
-# rust-toolchain.toml and CI (rust.yml) pin 1.98.1.
-rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
-rustup default 1.98.1
+# rust-toolchain.toml and CI (rust.yml) pin 1.99.0.
+rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+rustup default 1.99.0
 
 # --- Prefetch crates (no build, no tests) ---
 # Cargo.lock is gitignored here, so this resolves a fresh (ignored) lockfile.
