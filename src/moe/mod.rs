@@ -26,7 +26,7 @@ mod routing;
 pub(crate) mod test_fixtures;
 
 use self::adapter::{ModelAdapter, resolve_adapter};
-use self::checkpoint::{MappedCheckpoint, open_mapped_checkpoint};
+use self::checkpoint::{BoundGate, MappedCheckpoint, open_mapped_checkpoint};
 use self::routing::{
     apply_extract_token_options, checkpoint_gate_scores, normalize_l2, resample_embedding,
     synthetic_gate_scores,
@@ -46,6 +46,8 @@ pub struct MoeRouter {
     adapter: Option<ModelAdapter>,
     routing_mode: RoutingMode,
     checkpoint: Option<MappedCheckpoint>,
+    /// Decoded once at load. `None` for the synthetic stub router.
+    bound_gate: Option<BoundGate>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -81,7 +83,12 @@ impl MoeRouter {
             return Self::build_stub_router(num_experts, top_k, routing_mode);
         }
 
-        let (metadata, checkpoint, adapter) = Self::probe_and_map(model_path)?;
+        let (metadata, mut checkpoint, adapter) = Self::probe_and_map(model_path)?;
+        let bound_gate = checkpoint.bind_router_weights(
+            &adapter.token_embedding_tensor,
+            &adapter.routing_tensor,
+            model_path,
+        )?;
         let effective_num_experts = if num_experts == 0 {
             metadata.num_experts
         } else {
@@ -108,6 +115,7 @@ impl MoeRouter {
             adapter: Some(adapter),
             routing_mode,
             checkpoint: Some(checkpoint),
+            bound_gate: Some(bound_gate),
         })
     }
 
@@ -135,6 +143,7 @@ impl MoeRouter {
             adapter: None,
             routing_mode,
             checkpoint: None,
+            bound_gate: None,
         })
     }
 
@@ -225,11 +234,12 @@ impl MoeRouter {
     /// policy. Exposed crate-wide so `snn::SpikingMoeRouter` can compose
     /// routing with an external [`crate::snn::SnnBackend`].
     pub(crate) fn gate_scores(&self, embedding: &[f32]) -> Result<Vec<f32>> {
-        if let (Some(checkpoint), Some(adapter)) = (&self.checkpoint, &self.adapter) {
+        if let (Some(gate), Some(adapter)) = (&self.bound_gate, &self.adapter) {
             let mut routed_embedding = resample_embedding(embedding, adapter.hidden_size);
             normalize_l2(&mut routed_embedding);
             return checkpoint_gate_scores(
-                checkpoint,
+                &gate.dims,
+                &gate.weights,
                 &self.model_path,
                 &adapter.routing_tensor,
                 self.num_experts,

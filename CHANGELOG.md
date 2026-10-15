@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking (checkpoint binding):** `MoeRouter` loads GGUF and Safetensors through published `engram-parser` 0.3.0 (`default-features = false`, `features = ["safetensors"]`; `mmap` is not enabled). Tensor shapes are that crate's outermost-first order, and gate weights are row-major on those shapes (GGUF `ne[0]` is the contiguous axis). Q8_0 and Q5_K rows are dequantized by engram-parser, including Q5_K's low-nibble-then-high-nibble group order. A checkpoint with no `general.file_type` reports quantization `unknown`. Validated against engram-parser 0.3.0 (RM-1265 / issue 47).
 - `MappedCheckpoint` is a temporary router binding shim. Remove it when callers take `engram_parser::Checkpoint` directly. Malformed input returns the engram-parser error; there is no in-tree parser fallback.
+- A loaded router decodes the F32 gate once and keeps the token-embedding payload, then releases the rest of the checkpoint. `mmap` stays off. A stored `expert_count` of 0 is rejected. Token lookup continues past an unsupported `token_embd.weight` and also accepts `embed_tokens.weight` names. Gate suffix search orders `layers.N`, `layer.N`, and `block(s).N` numerically, same as `blk.N` (RM-1265).
 
 ### Removed
 

@@ -182,7 +182,7 @@ custom stages return `UnsupportedStage`. Burn is still an open adapter (issue 58
   source the label there, not from cortex.
 - Checkpoint loading uses engram-parser 0.3.0. `MappedCheckpoint` in `src/moe/checkpoint.rs` is a temporary binding shim around `engram_parser::Checkpoint`. Remove it when callers take that trait directly. Do not add format parsers or mmap policy back into this crate.
 
-**Checkpoint substrate (engram-parser 0.3.0, see #47):** GGUF and Safetensors parsing, tensor inventory, raw payloads, and packed Q8_0/Q5_K dequantization live in `engram-parser`. This crate depends on that release with `features = ["safetensors"]` and does not enable `mmap`. `MoeRouter` binds the normalized outermost-first tensors into reference-backend routing. Model topology and tensor-role discovery stay on the engram-parser v0.4 track and are not required here.
+**Checkpoint substrate (engram-parser 0.3.0, see #47):** GGUF and Safetensors parsing, tensor inventory, raw payloads, and packed Q8_0/Q5_K dequantization live in `engram-parser`. This crate depends on that release with `features = ["safetensors"]` and does not enable `mmap`. `MoeRouter` binds the normalized outermost-first tensors into reference-backend routing, keeps the decoded gate and the token-embedding payload, and releases the rest of the checkpoint. Model topology and tensor-role discovery stay on the engram-parser v0.4 track and are not required here.
 
 ```toml
 engram-parser = { version = "0.3.0", default-features = false, features = ["safetensors"] }

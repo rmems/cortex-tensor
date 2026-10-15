@@ -7,7 +7,10 @@
 //! the `mmap` feature is not enabled). This module does not walk GGUF
 //! headers or Safetensors JSON. `open_checkpoint` chooses the backend.
 //! Malformed input returns that error; there is no in-tree parser to fall
-//! back to.
+//! back to. [`MappedCheckpoint::bind_router_weights`] copies the decoded
+//! gate and the token-embedding payload, then drops the engram checkpoint.
+//! A live router does not keep the rest of the file. Mapping policy stays
+//! in engram-parser.
 //!
 //! # Migration shim
 //! [`MappedCheckpoint`] exists so [`super::MoeRouter`] can keep its load,
@@ -24,6 +27,8 @@ use engram_parser::gguf::{
     DType, dequantize_q5_k, dequantize_q8_0, f16_bits_to_f32, packed_row_size,
 };
 use engram_parser::{ParserError, open_checkpoint};
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 
@@ -33,10 +38,24 @@ use crate::error::{HybridError, Result};
 #[cfg(test)]
 pub(super) const ENGRAM_PARSER_VERSION: &str = "0.3.0";
 
+/// Decoded rank-2 F32 gate, bound once per loaded router.
+#[derive(Debug, Clone)]
+pub(super) struct BoundGate {
+    pub(super) dims: Vec<usize>,
+    pub(super) weights: Vec<f32>,
+}
+
 /// Router-facing view of one opened checkpoint.
+///
+/// `inner` is the engram checkpoint. [`Self::bind_router_weights`] copies the
+/// tensors the router scores and then drops `inner`, so the full GGUF buffer
+/// or Safetensors file handles are not retained.
 #[derive(Debug)]
 pub(super) struct MappedCheckpoint {
-    inner: engram_parser::checkpoint::AnyCheckpoint,
+    metadata: engram_parser::checkpoint::CheckpointMetadata,
+    tensors: Vec<TensorInfo>,
+    payloads: HashMap<String, Vec<u8>>,
+    inner: Option<engram_parser::checkpoint::AnyCheckpoint>,
 }
 
 /// Outermost-first shape plus the dtypes the reference backend binds.
@@ -72,8 +91,7 @@ impl fmt::Display for TensorKind {
 
 impl MappedCheckpoint {
     pub(super) fn architecture(&self) -> &str {
-        self.inner
-            .metadata()
+        self.metadata
             .get("general.architecture")
             .and_then(MetadataValue::as_str)
             .filter(|value| !value.is_empty())
@@ -81,31 +99,63 @@ impl MappedCheckpoint {
     }
 
     pub(super) fn quantization(&self) -> String {
-        quantization_label(self.inner.metadata())
+        quantization_label(&self.metadata)
     }
 
     pub(super) fn numeric(&self, key: &str) -> Option<usize> {
-        metadata_usize(self.inner.metadata(), key)
+        metadata_usize(&self.metadata, key)
     }
 
     pub(super) fn tensor_names(&self) -> impl Iterator<Item = &str> {
-        self.inner
-            .tensors()
-            .iter()
-            .map(|tensor| tensor.name.as_str())
+        self.tensors.iter().map(|tensor| tensor.name.as_str())
     }
 
     pub(super) fn has_tensor(&self, name: &str) -> bool {
-        self.inner.tensor(name).is_some()
+        self.tensors.iter().any(|tensor| tensor.name == name)
     }
 
-    pub(super) fn find_first_tensor_with_suffix(&self, suffix: &str) -> Option<String> {
+    /// Names ending in `suffix`, lowest layer index first.
+    ///
+    /// Layer indexes come from `blk.N`, `block(s).N`, `layer(s).N`. Names
+    /// with no such component sort after every numbered layer, then by name.
+    pub(super) fn tensor_names_with_suffix(&self, suffix: &str) -> Vec<String> {
         let mut matches: Vec<&str> = self
             .tensor_names()
             .filter(|name| name.ends_with(suffix))
             .collect();
         matches.sort_unstable_by_key(|name| tensor_block_sort_key(name));
-        matches.first().map(|name| (*name).to_owned())
+        matches.into_iter().map(str::to_owned).collect()
+    }
+
+    pub(super) fn find_first_tensor_with_suffix(&self, suffix: &str) -> Option<String> {
+        self.tensor_names_with_suffix(suffix).into_iter().next()
+    }
+
+    /// Copy the gate and the token-embedding payload, then release the
+    /// engram checkpoint. Later reads of any other tensor fail.
+    pub(super) fn bind_router_weights(
+        &mut self,
+        token_name: &str,
+        gate_name: &str,
+        path: &str,
+    ) -> Result<BoundGate> {
+        let view = self.tensor_view(gate_name, path)?;
+        if view.kind != TensorKind::F32 {
+            return Err(HybridError::UnsupportedFormat(format!(
+                "tensor '{gate_name}' must be F32, got {}",
+                view.kind
+            )));
+        }
+        let gate_bytes = self.read_payload(gate_name, path)?;
+        let elements = element_count(&view.dims, path, gate_name)?;
+        let weights = decode_f32(&gate_bytes, elements, path, gate_name)?;
+        let token_bytes = self.read_payload(token_name, path)?;
+        self.payloads.insert(token_name.to_owned(), token_bytes);
+        self.inner = None;
+        Ok(BoundGate {
+            dims: view.dims,
+            weights,
+        })
     }
 
     pub(super) fn tensor_view(&self, name: &str, path: &str) -> Result<TensorView> {
@@ -116,6 +166,7 @@ impl MappedCheckpoint {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn f32_tensor(&self, name: &str, path: &str) -> Result<Vec<f32>> {
         let view = self.tensor_view(name, path)?;
         if view.kind != TensorKind::F32 {
@@ -124,7 +175,7 @@ impl MappedCheckpoint {
                 view.kind
             )));
         }
-        let bytes = self.payload(name)?;
+        let bytes = self.payload(name, path)?;
         let elements = element_count(&view.dims, path, name)?;
         decode_f32(&bytes, elements, path, name)
     }
@@ -143,7 +194,7 @@ impl MappedCheckpoint {
                 got: token_id,
             });
         }
-        let bytes = self.payload(tensor_name)?;
+        let bytes = self.payload(tensor_name, path)?;
         match view.kind {
             TensorKind::F32 => {
                 let row = row_bytes(&bytes, hidden * 4, token_id, path, tensor_name)?;
@@ -186,22 +237,45 @@ impl MappedCheckpoint {
     }
 
     fn tensor_info<'a>(&'a self, name: &str, path: &str) -> Result<&'a TensorInfo> {
-        self.inner
-            .tensor(name)
+        self.tensors
+            .iter()
+            .find(|tensor| tensor.name == name)
             .ok_or_else(|| HybridError::MissingTensor {
                 name: name.to_owned(),
                 path: path.to_owned(),
             })
     }
 
-    fn payload(&self, name: &str) -> Result<std::borrow::Cow<'_, [u8]>> {
-        self.inner.tensor_bytes(name).map_err(map_parser_error)
+    fn payload<'a>(&'a self, name: &str, path: &str) -> Result<Cow<'a, [u8]>> {
+        if let Some(bytes) = self.payloads.get(name) {
+            return Ok(Cow::Borrowed(bytes));
+        }
+        self.read_payload(name, path).map(Cow::Owned)
+    }
+
+    fn read_payload(&self, name: &str, path: &str) -> Result<Vec<u8>> {
+        if let Some(bytes) = self.payloads.get(name) {
+            return Ok(bytes.clone());
+        }
+        let Some(inner) = self.inner.as_ref() else {
+            return Err(HybridError::ModelLoad {
+                path: path.to_owned(),
+                reason: format!("tensor '{name}' is not bound"),
+            });
+        };
+        let bytes = inner.tensor_bytes(name).map_err(map_parser_error)?;
+        Ok(bytes.into_owned())
     }
 }
 
 pub(super) fn open_mapped_checkpoint(path: &str) -> Result<MappedCheckpoint> {
     let inner = open_checkpoint(Path::new(path)).map_err(map_parser_error)?;
-    Ok(MappedCheckpoint { inner })
+    Ok(MappedCheckpoint {
+        metadata: inner.metadata().clone(),
+        tensors: inner.tensors().to_vec(),
+        payloads: HashMap::new(),
+        inner: Some(inner),
+    })
 }
 
 fn kind_of(info: &TensorInfo) -> TensorKind {
@@ -350,12 +424,20 @@ fn whole_usize(value: f64) -> Option<usize> {
 }
 
 fn tensor_block_sort_key(name: &str) -> (usize, &str) {
-    let block = name
-        .strip_prefix("blk.")
-        .and_then(|rest| rest.split_once('.'))
-        .and_then(|(idx, _)| idx.parse::<usize>().ok())
-        .unwrap_or(usize::MAX);
-    (block, name)
+    (layer_ordinal(name), name)
+}
+
+/// First `blk` / `block` / `blocks` / `layer` / `layers` index in `name`.
+fn layer_ordinal(name: &str) -> usize {
+    let parts: Vec<&str> = name.split('.').collect();
+    for pair in parts.windows(2) {
+        if matches!(pair[0], "blk" | "block" | "blocks" | "layer" | "layers")
+            && let Ok(index) = pair[1].parse::<usize>()
+        {
+            return index;
+        }
+    }
+    usize::MAX
 }
 
 fn map_parser_error(err: ParserError) -> HybridError {
@@ -472,6 +554,101 @@ mod tests {
                 .as_deref(),
             Some("blk.2.ffn_gate_inp.weight")
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn suffix_search_orders_layers_numerically() {
+        let hidden = 32usize;
+        let gate = vec![0u8; hidden * 4 * std::mem::size_of::<f32>()];
+        let bytes = build_test_gguf(
+            vec![
+                (
+                    "model.layers.10.ffn_gate_inp.weight",
+                    vec![hidden, 4],
+                    GGML_TYPE_F32,
+                    gate.clone(),
+                ),
+                (
+                    "model.layers.2.mlp.experts.0.ffn_gate_inp.weight",
+                    vec![hidden, 4],
+                    GGML_TYPE_F32,
+                    gate,
+                ),
+                (
+                    "token_embd.weight",
+                    vec![hidden, 2],
+                    GGML_TYPE_F32,
+                    vec![0u8; hidden * 2 * std::mem::size_of::<f32>()],
+                ),
+            ],
+            32,
+            hidden,
+        );
+        let path = write_temp_file(&bytes, "layer-order");
+        let checkpoint = open_mapped_checkpoint(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            checkpoint
+                .find_first_tensor_with_suffix("ffn_gate_inp.weight")
+                .as_deref(),
+            Some("model.layers.2.mlp.experts.0.ffn_gate_inp.weight")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn bind_keeps_token_row_and_drops_other_tensors() {
+        let hidden = 32usize;
+        let experts = 4usize;
+        let vocab = 2usize;
+        let mut token = Vec::new();
+        for token_id in 0..vocab {
+            for dim in 0..hidden {
+                let value = token_id as f32 * 10.0 + dim as f32;
+                token.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        let gate = vec![0u8; hidden * experts * std::mem::size_of::<f32>()];
+        let bytes = build_test_gguf(
+            vec![
+                (
+                    "blk.0.ffn_gate_inp.weight",
+                    vec![hidden, experts],
+                    GGML_TYPE_F32,
+                    gate,
+                ),
+                (
+                    "blk.0.attn_q.weight",
+                    vec![hidden, hidden],
+                    GGML_TYPE_F32,
+                    vec![1u8; hidden * hidden * std::mem::size_of::<f32>()],
+                ),
+                (
+                    "token_embd.weight",
+                    vec![hidden, vocab],
+                    GGML_TYPE_F32,
+                    token,
+                ),
+            ],
+            32,
+            hidden,
+        );
+        let path = write_temp_file(&bytes, "bind-release");
+        let path_str = path.to_str().unwrap();
+        let mut checkpoint = open_mapped_checkpoint(path_str).unwrap();
+        let bound = checkpoint
+            .bind_router_weights("token_embd.weight", "blk.0.ffn_gate_inp.weight", path_str)
+            .unwrap();
+        assert_eq!(bound.dims, vec![experts, hidden]);
+        assert_eq!(bound.weights.len(), experts * hidden);
+        let row = checkpoint
+            .extract_token_embedding("token_embd.weight", path_str, 1)
+            .unwrap();
+        assert!((row[0] - 10.0).abs() <= 1e-6);
+        let err = checkpoint
+            .f32_tensor("blk.0.attn_q.weight", path_str)
+            .unwrap_err();
+        assert!(err.to_string().contains("not bound"));
         let _ = std::fs::remove_file(path);
     }
 

@@ -44,6 +44,11 @@ pub(super) fn resolve_adapter(checkpoint: &MappedCheckpoint, path: &str) -> Resu
                 "missing '{architecture}.expert_count' in '{path}'"
             ))
         })?;
+    if num_experts == 0 {
+        return Err(HybridError::UnsupportedFormat(format!(
+            "{architecture}.expert_count in '{path}' must be greater than 0"
+        )));
+    }
     let expert_used_count = checkpoint
         .numeric(&format!("{architecture}.expert_used_count"))
         .unwrap_or(1);
@@ -74,23 +79,48 @@ fn is_token_embedding_supported(info: &TensorView, hidden_size: usize) -> bool {
         }
 }
 
+const TOKEN_EMBEDDING_NAMES: &[&str] = &[
+    "token_embd.weight",
+    "tok_embeddings.weight",
+    "model.embed_tokens.weight",
+    "embed_tokens.weight",
+];
+
+fn token_embedding_candidates(checkpoint: &MappedCheckpoint) -> Vec<String> {
+    let mut names = Vec::new();
+    for name in TOKEN_EMBEDDING_NAMES {
+        if checkpoint.has_tensor(name) {
+            names.push((*name).to_owned());
+        }
+    }
+    for name in checkpoint.tensor_names_with_suffix("embed_tokens.weight") {
+        if !names.iter().any(|existing| existing == &name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 fn resolve_token_embedding_tensor(
     checkpoint: &MappedCheckpoint,
     hidden_size: usize,
     path: &str,
 ) -> Result<String> {
-    for name in ["token_embd.weight", "tok_embeddings.weight"] {
-        if !checkpoint.has_tensor(name) {
-            continue;
-        }
-        let info = checkpoint.tensor_view(name, path)?;
+    let mut unsupported = None;
+    for name in token_embedding_candidates(checkpoint) {
+        let info = checkpoint.tensor_view(&name, path)?;
         if is_token_embedding_supported(&info, hidden_size) {
-            return Ok(name.to_owned());
+            return Ok(name);
         }
-        return Err(HybridError::UnsupportedFormat(format!(
-            "token embedding tensor '{name}' in '{path}' has unsupported shape/type: dtype={} dims={:?} (expected [vocab>0, hidden_size={hidden_size}])",
-            info.kind, info.dims
-        )));
+        if unsupported.is_none() {
+            unsupported = Some(HybridError::UnsupportedFormat(format!(
+                "token embedding tensor '{name}' in '{path}' has unsupported shape/type: dtype={} dims={:?} (expected [vocab>0, hidden_size={hidden_size}])",
+                info.kind, info.dims
+            )));
+        }
+    }
+    if let Some(err) = unsupported {
+        return Err(err);
     }
     Err(HybridError::MissingTensor {
         name: "token_embd.weight".into(),

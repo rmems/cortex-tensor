@@ -73,6 +73,15 @@ pub(crate) fn build_test_gguf(
     alignment: u32,
     hidden_size: usize,
 ) -> Vec<u8> {
+    build_test_gguf_with_expert_count(tensors, alignment, hidden_size, 64)
+}
+
+pub(crate) fn build_test_gguf_with_expert_count(
+    tensors: Vec<(&str, Vec<usize>, u32, Vec<u8>)>,
+    alignment: u32,
+    hidden_size: usize,
+    expert_count: u32,
+) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&GGUF_MAGIC);
     push_u32(&mut out, GGUF_VERSION);
@@ -87,7 +96,7 @@ pub(crate) fn build_test_gguf(
         hidden_size as u32,
     );
     push_kv_u32(&mut out, "reference_moe.block_count", 16);
-    push_kv_u32(&mut out, "reference_moe.expert_count", 64);
+    push_kv_u32(&mut out, "reference_moe.expert_count", expert_count);
     push_kv_u32(&mut out, "reference_moe.expert_used_count", 8);
 
     let mut data_offset = 0usize;

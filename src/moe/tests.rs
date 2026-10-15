@@ -396,6 +396,197 @@ fn gguf_and_safetensors_bind_the_same_normalized_weights() {
 }
 
 #[test]
+fn unsupported_token_embd_falls_through_to_the_next_candidate() {
+    let hidden = 32usize;
+    let experts = 4usize;
+    let vocab = 2usize;
+    let bytes = build_test_gguf_with_expert_count(
+        vec![
+            (
+                "blk.0.ffn_gate_inp.weight",
+                vec![hidden, experts],
+                GGML_TYPE_F32,
+                vec![0u8; hidden * experts * size_of::<f32>()],
+            ),
+            (
+                "token_embd.weight",
+                vec![1, 1],
+                GGML_TYPE_F32,
+                vec![0u8; size_of::<f32>()],
+            ),
+            (
+                "tok_embeddings.weight",
+                vec![hidden, vocab],
+                GGML_TYPE_F32,
+                vec![0u8; hidden * vocab * size_of::<f32>()],
+            ),
+        ],
+        32,
+        hidden,
+        experts as u32,
+    );
+    let (path, mapped) = adapter_probe(&bytes, "token-fallback");
+    let adapter = super::adapter::resolve_adapter(&mapped, path.to_str().unwrap()).unwrap();
+    assert_eq!(adapter.token_embedding_tensor, "tok_embeddings.weight");
+    let _ = remove_file(path);
+}
+
+#[test]
+fn hugging_face_embed_tokens_name_resolves() {
+    let hidden = 4usize;
+    let experts = 4usize;
+    let vocab = 2usize;
+    let bytes = safetensors_bytes(
+        &[
+            ("general.architecture", "reference_moe"),
+            ("general.file_type", "1"),
+            ("reference_moe.embedding_length", "4"),
+            ("reference_moe.block_count", "1"),
+            ("reference_moe.expert_count", "4"),
+            ("reference_moe.expert_used_count", "1"),
+        ],
+        &[
+            (
+                "model.layers.0.ffn_gate_inp.weight",
+                &[experts, hidden],
+                &vec![0u8; experts * hidden * size_of::<f32>()],
+            ),
+            (
+                "model.embed_tokens.weight",
+                &[vocab, hidden],
+                &vec![0u8; vocab * hidden * size_of::<f32>()],
+            ),
+        ],
+    );
+    let path = write_temp_file_with_extension(&bytes, "hf-embed", "safetensors");
+    let mapped = super::checkpoint::open_mapped_checkpoint(path.to_str().unwrap()).unwrap();
+    let adapter = super::adapter::resolve_adapter(&mapped, path.to_str().unwrap()).unwrap();
+    assert_eq!(adapter.token_embedding_tensor, "model.embed_tokens.weight");
+    let _ = remove_file(path);
+}
+
+#[test]
+fn stored_expert_count_of_zero_is_rejected() {
+    let hidden = 32usize;
+    let bytes = build_test_gguf_with_expert_count(
+        vec![
+            (
+                "blk.0.ffn_gate_inp.weight",
+                vec![hidden, 4],
+                GGML_TYPE_F32,
+                vec![0u8; hidden * 4 * size_of::<f32>()],
+            ),
+            (
+                "token_embd.weight",
+                vec![hidden, 2],
+                GGML_TYPE_F32,
+                vec![0u8; hidden * 2 * size_of::<f32>()],
+            ),
+        ],
+        32,
+        hidden,
+        0,
+    );
+    let (path, mapped) = adapter_probe(&bytes, "zero-experts");
+    let err = super::adapter::resolve_adapter(&mapped, path.to_str().unwrap()).unwrap_err();
+    assert!(err.to_string().contains("expert_count"));
+    let load_err =
+        match MoeRouter::load_with_mode(path.to_str().unwrap(), 0, 1, RoutingMode::DenseSim) {
+            Err(err) => err,
+            Ok(_) => panic!("zero expert_count should not load"),
+        };
+    assert!(load_err.to_string().contains("expert_count"));
+    let _ = remove_file(path);
+}
+
+#[test]
+fn square_gate_scores_follow_contiguous_expert_rows() {
+    const HIDDEN: usize = 4;
+    let mut gate = [0f32; HIDDEN * HIDDEN];
+    gate[2 * HIDDEN] = 5.0;
+    gate[2] = 1.0;
+    let gate_bytes: Vec<u8> = gate.iter().copied().flat_map(f32::to_le_bytes).collect();
+    let bytes = build_test_gguf_with_expert_count(
+        vec![
+            (
+                "blk.0.ffn_gate_inp.weight",
+                vec![HIDDEN, HIDDEN],
+                GGML_TYPE_F32,
+                gate_bytes,
+            ),
+            (
+                "token_embd.weight",
+                vec![HIDDEN, 2],
+                GGML_TYPE_F32,
+                vec![0u8; HIDDEN * 2 * size_of::<f32>()],
+            ),
+        ],
+        32,
+        HIDDEN,
+        HIDDEN as u32,
+    );
+    let path = write_temp_file(&bytes, "square-gate");
+    let router =
+        MoeRouter::load_with_mode(path.to_str().unwrap(), 0, 1, RoutingMode::DenseSim).unwrap();
+    let mut embedding = vec![0.0f32; HIDDEN];
+    embedding[0] = 1.0;
+    let scores = router.gate_scores(&embedding).unwrap();
+    assert!(
+        (scores[2] - 5.0).abs() <= 1e-5,
+        "expert-row layout should read 5.0, got {scores:?}"
+    );
+    assert!(
+        scores
+            .iter()
+            .enumerate()
+            .all(|(expert, score)| { expert == 2 || score.abs() <= 1e-5 })
+    );
+    let _ = remove_file(path);
+}
+
+#[test]
+fn bound_safetensors_router_ignores_later_file_rewrites() {
+    let hidden = 4usize;
+    let experts = 4usize;
+    let vocab = 2usize;
+    let mut token = Vec::new();
+    for token_id in 0..vocab {
+        for dim in 0..hidden {
+            token.extend_from_slice(&(token_id as f32 * 10.0 + dim as f32).to_le_bytes());
+        }
+    }
+    let mut gate = vec![0f32; experts * hidden];
+    gate[hidden] = 3.0;
+    let gate_bytes: Vec<u8> = gate.iter().copied().flat_map(f32::to_le_bytes).collect();
+    let bytes = safetensors_bytes(
+        &[
+            ("general.architecture", "reference_moe"),
+            ("general.file_type", "1"),
+            ("reference_moe.embedding_length", "4"),
+            ("reference_moe.block_count", "1"),
+            ("reference_moe.expert_count", "4"),
+            ("reference_moe.expert_used_count", "1"),
+        ],
+        &[
+            ("blk.0.ffn_gate_inp.weight", &[experts, hidden], &gate_bytes),
+            ("token_embd.weight", &[vocab, hidden], &token),
+        ],
+    );
+    let path = write_temp_file_with_extension(&bytes, "bound-st", "safetensors");
+    let mut router =
+        MoeRouter::load_with_mode(path.to_str().unwrap(), 0, 1, RoutingMode::DenseSim).unwrap();
+    let row = router.extract_token_embedding(1).unwrap();
+    let mut embedding = vec![0.0f32; hidden];
+    embedding[0] = 1.0;
+    let scores = router.gate_scores(&embedding).unwrap();
+    std::fs::write(&path, b"not a checkpoint anymore").unwrap();
+    assert_eq!(router.extract_token_embedding(1).unwrap(), row);
+    assert_eq!(router.gate_scores(&embedding).unwrap(), scores);
+    assert!((scores[1] - 3.0).abs() <= 1e-5);
+    let _ = remove_file(path);
+}
+
+#[test]
 fn malformed_safetensors_fails_closed() {
     let path = write_temp_file_with_extension(b"not a checkpoint", "bad-st", "safetensors");
     let err = super::checkpoint::open_mapped_checkpoint(path.to_str().unwrap()).unwrap_err();

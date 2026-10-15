@@ -6,33 +6,29 @@
 //! finite scores descending, ascending expert ID on ties, typed NaN
 //! rejection, and explicit ±Inf ranking. See [`top_k_indices`].
 
-use super::checkpoint::{MappedCheckpoint, TensorKind};
 use crate::error::{HybridError, Result};
 use crate::tensor::finite::{l2_normalize, softmax_vec};
 use crate::types::ExtractTokenOptions;
 use std::cmp::Ordering;
 
 pub(super) fn checkpoint_gate_scores(
-    checkpoint: &MappedCheckpoint,
+    dims: &[usize],
+    weights: &[f32],
     model_path: &str,
     routing_tensor_name: &str,
     num_experts: usize,
     embedding: &[f32],
 ) -> Result<Vec<f32>> {
-    let info = checkpoint.tensor_view(routing_tensor_name, model_path)?;
-    if info.kind != TensorKind::F32 || info.dims.len() != 2 {
+    if dims.len() != 2 {
         return Err(HybridError::UnsupportedFormat(format!(
-            "routing tensor '{routing_tensor_name}' must be rank-2 F32 in '{model_path}', got dims={:?} dtype={}",
-            info.dims, info.kind
+            "routing tensor '{routing_tensor_name}' must be rank-2 F32 in '{model_path}', got dims={dims:?}"
         )));
     }
-    let weights = checkpoint.f32_tensor(routing_tensor_name, model_path)?;
     let mut gate_scores = Vec::with_capacity(num_experts);
     for expert_id in 0..num_experts {
         let mut score = 0.0f32;
         for (dim, &value) in embedding.iter().enumerate() {
-            let index =
-                routing_weight_index(&info.dims, expert_id, dim, num_experts, embedding.len())?;
+            let index = routing_weight_index(dims, expert_id, dim, num_experts, embedding.len())?;
             let weight = weights
                 .get(index)
                 .copied()
@@ -182,10 +178,11 @@ pub(super) fn apply_extract_token_options(input: &[f32], options: ExtractTokenOp
 
 /// Index one gate weight in outermost-first row-major order.
 ///
-/// The last axis is contiguous. A GGUF gate stored as `ne = [hidden, experts]`
-/// is normalized to `[experts, hidden]`, so expert `e` occupies
-/// `weights[e * hidden + dim]`. When both axes equal `hidden_size`, that
-/// expert-row layout wins.
+/// The last axis is the contiguous on-disk axis (GGUF `ne[0]` after
+/// engram-parser reverses the shape). A gate stored as `ne = [hidden, experts]`
+/// is `[experts, hidden]` here, so expert `e` occupies
+/// `weights[e * hidden + dim]`. A square matrix has no shape cue for which
+/// axis is hidden; expert rows still win because the contiguous axis is hidden.
 fn routing_weight_index(
     dims: &[usize],
     expert_id: usize,
