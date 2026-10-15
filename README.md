@@ -256,7 +256,7 @@ This crate **does not own**:
 - Tokenization and automatic differentiation (see [Non-goals](#non-goals)).
 
 **Allowed dependencies:** the current small set — `serde`, `serde_json`,
-`thiserror`, `rand`, `rayon`, `memmap2`, `half` — optional feature-gated
+`thiserror`, `rand`, `memmap2`, `half` — optional feature-gated
 SNN backend crates (`neuromod` today, evaluated individually), the optional
 `candle` feature's `candle-core` and `candle-nn` (CPU only; CUDA, MKL, and
 Metal stay off), and, in future, the zero-dependency rmems parser crates.
