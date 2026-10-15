@@ -4,7 +4,6 @@ use super::test_fixtures::*;
 use super::*;
 use crate::error::HybridError;
 use crate::types::ExtractTokenOptions;
-use half::f16;
 use std::fs::remove_file;
 use std::mem::size_of;
 use std::path::PathBuf;
@@ -86,23 +85,23 @@ fn test_real_checkpoint_probe_via_env() {
     assert!(!metadata.routing_tensor_name.is_empty());
 }
 
-/// Smoke test to exercise the full Q5_K dequant loop (4 chunks of 32 bytes
-/// for a 256-wide row). This runs the u1/u2 shifts and dequant math in debug
-/// mode (where overflow would previously panic on <<= for u8).
 #[test]
-fn test_q5k_dequant_smoke_runs_full_block_loop() {
-    // Zeroed 176-byte block is enough to execute all 4 ql chunks + shifts
-    // without format errors (the math will produce garbage but the control
-    // flow and bit ops execute).
-    let block = vec![0u8; 176];
-    let out =
-        super::dequant::dequantize_row_q5_k(&block, 256).expect("Q5_K row size should be accepted");
+fn test_q5k_dequant_follows_engram_group_order() {
+    let mut block = [0u8; 176];
+    block[0..2].copy_from_slice(&0x3C00u16.to_le_bytes());
+    block[4] = 1;
+    for byte in block[48..80].iter_mut() {
+        *byte = 0x05;
+    }
+    let out = engram_parser::dequantize_q5_k(&block, &[256]).expect("Q5_K row should dequantize");
     assert_eq!(out.len(), 256);
+    assert!(out[..32].iter().all(|value| (value - 5.0).abs() <= 1e-4));
+    assert!(out[32..64].iter().all(|value| value.abs() <= 1e-4));
 }
 
-fn adapter_probe(bytes: &[u8], label: &str) -> (PathBuf, super::checkpoint::MappedGgufCheckpoint) {
+fn adapter_probe(bytes: &[u8], label: &str) -> (PathBuf, super::checkpoint::MappedCheckpoint) {
     let path = write_temp_file(bytes, label);
-    let (_metadata, mapped) = super::checkpoint::probe_and_map_checkpoint(path.to_str().unwrap())
+    let mapped = super::checkpoint::open_mapped_checkpoint(path.to_str().unwrap())
         .expect("synthetic GGUF should map");
     (path, mapped)
 }
@@ -124,9 +123,9 @@ fn adapter_fixture(
             ),
             (
                 "blk.0.attn_q.weight",
-                vec![EMBEDDING_DIM, EMBEDDING_DIM],
-                GGML_TYPE_IQ3_S,
-                vec![0u8; 16],
+                vec![1, 1],
+                GGML_TYPE_F32,
+                vec![0u8; 4],
             ),
             ("token_embd.weight", token_dims, token_ggml, token_payload),
         ],
@@ -146,8 +145,7 @@ fn test_adapter_resolve_routing_insufficient_experts() {
         vec![0u8; EMBEDDING_DIM * 32 * 2],
     );
     let (path, mapped) = adapter_probe(&checkpoint, "routing-insufficient-experts");
-    let result =
-        super::adapter::resolve_adapter(mapped.metadata(), &mapped, path.to_str().unwrap());
+    let result = super::adapter::resolve_adapter(&mapped, path.to_str().unwrap());
     assert!(matches!(
         result,
         Err(HybridError::UnsupportedFormat(msg)) if msg.contains("only exposes 1 experts")
@@ -167,8 +165,7 @@ fn test_adapter_resolve_routing_invalid_orientation() {
         vec![0u8; EMBEDDING_DIM * 32 * 2],
     );
     let (path, mapped) = adapter_probe(&checkpoint, "routing-invalid-orientation");
-    let result =
-        super::adapter::resolve_adapter(mapped.metadata(), &mapped, path.to_str().unwrap());
+    let result = super::adapter::resolve_adapter(&mapped, path.to_str().unwrap());
     assert!(matches!(
         result,
         Err(HybridError::UnsupportedFormat(msg)) if msg.contains("unsupported orientation")
@@ -239,10 +236,13 @@ fn extract_token_embedding_returns_native_hidden_size() {
 #[test]
 fn extract_f16_neg_zero_keeps_sign_bit_at_native_length() {
     const HIDDEN: usize = 32;
+    const F16_NEG_ZERO: u16 = 0x8000;
+    const F16_ONE: u16 = 0x3C00;
+    const F16_SUBNORMAL: u16 = 0x0001;
     let mut payload = vec![0u8; HIDDEN * 2];
-    payload[0..2].copy_from_slice(&f16::from_f32(-0.0).to_bits().to_le_bytes());
-    payload[2..4].copy_from_slice(&f16::from_f32(1.0).to_bits().to_le_bytes());
-    payload[4..6].copy_from_slice(&f16::from_bits(0x0001).to_bits().to_le_bytes());
+    payload[0..2].copy_from_slice(&F16_NEG_ZERO.to_le_bytes());
+    payload[2..4].copy_from_slice(&F16_ONE.to_le_bytes());
+    payload[4..6].copy_from_slice(&F16_SUBNORMAL.to_le_bytes());
 
     let gate_payload = vec![0u8; HIDDEN * 64 * size_of::<f32>()];
     let checkpoint = build_test_gguf(
@@ -271,7 +271,7 @@ fn extract_f16_neg_zero_keeps_sign_bit_at_native_length() {
     assert_eq!(embedding.len(), HIDDEN);
     assert_eq!(embedding[0].to_bits(), (-0.0f32).to_bits());
     assert!((embedding[1] - 1.0).abs() <= f32::EPSILON);
-    assert_eq!(embedding[2], f16::from_bits(0x0001).to_f32());
+    assert_eq!(embedding[2], engram_parser::f16_bits_to_f32(F16_SUBNORMAL));
 
     let _ = remove_file(path);
 }
@@ -283,15 +283,160 @@ fn test_adapter_resolve_rejects_iq3_s_token_embedding() {
         vec![EMBEDDING_DIM, 64],
         gate_payload,
         GGML_TYPE_IQ3_S,
-        vec![EMBEDDING_DIM, 32],
-        vec![0u8; 16],
+        vec![256, 1],
+        vec![0u8; 110],
     );
     let (path, mapped) = adapter_probe(&checkpoint, "iq3s-token-embd");
-    let result =
-        super::adapter::resolve_adapter(mapped.metadata(), &mapped, path.to_str().unwrap());
+    let result = super::adapter::resolve_adapter(&mapped, path.to_str().unwrap());
     assert!(matches!(
         result,
         Err(HybridError::UnsupportedFormat(msg)) if msg.contains("token embedding tensor")
     ));
     let _ = remove_file(path);
+}
+
+#[test]
+fn gguf_and_safetensors_bind_the_same_normalized_weights() {
+    const HIDDEN: usize = 32;
+    const EXPERTS: usize = 64;
+    const VOCAB: usize = 3;
+
+    let mut token = Vec::new();
+    for token_id in 0..VOCAB {
+        for dim in 0..HIDDEN {
+            token.extend_from_slice(&(token_id as f32 * 100.0 + dim as f32).to_le_bytes());
+        }
+    }
+    let mut gate = vec![0f32; EXPERTS * HIDDEN];
+    gate[3 * HIDDEN] = 4.0;
+    let gate_bytes: Vec<u8> = gate.iter().copied().flat_map(f32::to_le_bytes).collect();
+
+    let gguf = build_test_gguf(
+        vec![
+            (
+                "blk.0.ffn_gate_inp.weight",
+                vec![HIDDEN, EXPERTS],
+                GGML_TYPE_F32,
+                gate_bytes.clone(),
+            ),
+            (
+                "token_embd.weight",
+                vec![HIDDEN, VOCAB],
+                GGML_TYPE_F32,
+                token.clone(),
+            ),
+        ],
+        32,
+        HIDDEN,
+    );
+    let safetensors = safetensors_bytes(
+        &[
+            ("general.architecture", "reference_moe"),
+            ("general.file_type", "1"),
+            ("reference_moe.embedding_length", "32"),
+            ("reference_moe.block_count", "16"),
+            ("reference_moe.expert_count", "64"),
+            ("reference_moe.expert_used_count", "8"),
+        ],
+        &[
+            ("blk.0.ffn_gate_inp.weight", &[EXPERTS, HIDDEN], &gate_bytes),
+            ("token_embd.weight", &[VOCAB, HIDDEN], &token),
+        ],
+    );
+
+    let gguf_path = write_temp_file(&gguf, "equiv-gguf");
+    let st_path = write_temp_file_with_extension(&safetensors, "equiv-st", "safetensors");
+    let mut gguf_router =
+        MoeRouter::load_with_mode(gguf_path.to_str().unwrap(), 0, 1, RoutingMode::DenseSim)
+            .unwrap();
+    let mut st_router =
+        MoeRouter::load_with_mode(st_path.to_str().unwrap(), 0, 1, RoutingMode::DenseSim).unwrap();
+
+    assert_eq!(gguf_router.architecture(), st_router.architecture());
+    assert_eq!(gguf_router.hidden_size(), st_router.hidden_size());
+    assert_eq!(gguf_router.checkpoint_num_experts(), EXPERTS);
+    assert_eq!(
+        gguf_router.checkpoint_num_experts(),
+        st_router.checkpoint_num_experts()
+    );
+    assert_eq!(gguf_router.quantization(), st_router.quantization());
+    assert_eq!(
+        gguf_router.routing_tensor_name(),
+        st_router.routing_tensor_name()
+    );
+    assert_eq!(
+        gguf_router.extract_token_embedding(2).unwrap(),
+        st_router.extract_token_embedding(2).unwrap()
+    );
+
+    let mut embedding = vec![0.0f32; HIDDEN];
+    embedding[0] = 1.0;
+    let gguf_scores = gguf_router.gate_scores(&embedding).unwrap();
+    let st_scores = st_router.gate_scores(&embedding).unwrap();
+    assert_eq!(gguf_scores, st_scores);
+    assert!(gguf_scores[3] > gguf_scores[0]);
+
+    let gguf_ckpt = super::checkpoint::open_mapped_checkpoint(gguf_path.to_str().unwrap()).unwrap();
+    let st_ckpt = super::checkpoint::open_mapped_checkpoint(st_path.to_str().unwrap()).unwrap();
+    let gguf_gate = gguf_ckpt
+        .tensor_view("blk.0.ffn_gate_inp.weight", gguf_path.to_str().unwrap())
+        .unwrap();
+    let st_gate = st_ckpt
+        .tensor_view("blk.0.ffn_gate_inp.weight", st_path.to_str().unwrap())
+        .unwrap();
+    assert_eq!(gguf_gate.dims, vec![EXPERTS, HIDDEN]);
+    assert_eq!(gguf_gate.dims, st_gate.dims);
+    assert_eq!(
+        gguf_ckpt.tensor_names().collect::<Vec<_>>(),
+        st_ckpt.tensor_names().collect::<Vec<_>>()
+    );
+
+    let _ = remove_file(gguf_path);
+    let _ = remove_file(st_path);
+}
+
+#[test]
+fn malformed_safetensors_fails_closed() {
+    let path = write_temp_file_with_extension(b"not a checkpoint", "bad-st", "safetensors");
+    let err = super::checkpoint::open_mapped_checkpoint(path.to_str().unwrap()).unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("unsupported")
+            || message.contains("invalid")
+            || message.contains("model load"),
+        "expected an explicit parser error, got {message}"
+    );
+    let _ = remove_file(path);
+}
+
+fn safetensors_bytes(metadata: &[(&str, &str)], tensors: &[(&str, &[usize], &[u8])]) -> Vec<u8> {
+    let mut data = Vec::new();
+    let mut header = serde_json::Map::new();
+    let mut meta = serde_json::Map::new();
+    for (key, value) in metadata {
+        meta.insert(
+            (*key).to_owned(),
+            serde_json::Value::String((*value).to_owned()),
+        );
+    }
+    header.insert("__metadata__".into(), serde_json::Value::Object(meta));
+    for (name, shape, bytes) in tensors {
+        let start = data.len();
+        data.extend_from_slice(bytes);
+        let end = data.len();
+        header.insert(
+            (*name).to_owned(),
+            serde_json::json!({
+                "dtype": "F32",
+                "shape": shape,
+                "data_offsets": [start, end],
+            }),
+        );
+    }
+    let json = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+    let mut out = Vec::new();
+    out.extend_from_slice(&(json.len() as u64).to_le_bytes());
+    out.extend_from_slice(&json);
+    out.extend_from_slice(&data);
+    out
 }

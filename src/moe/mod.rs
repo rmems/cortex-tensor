@@ -4,49 +4,29 @@
 // full public API, loading logic, multiple routing modes, and extensive tests.
 // Further modularization planned.
 
-//! Public MoE router API backed by a GGUF checkpoint bridge.
+//! Public MoE router API. Checkpoint bytes come from `engram-parser` 0.3.0.
 //!
 //! Private helpers live in:
-//! - `moe/checkpoint.rs` for GGUF parsing + mapped tensor access
+//! - `moe/checkpoint.rs` for normalized tensor binding (migration shim)
 //! - `moe/adapter.rs` for checkpoint adapter resolution and tensor selection
-//! - `moe/dequant.rs` for quantized tensor dequantization
-//! - `moe/gguf.rs` for GGUF constants
 //! - `moe/routing.rs` for routing math and embedding resampling
 //!
-//! ## Parser boundary (see #8 / #47)
-//! `rmems/engram-parser` is the parser-layer provider for this
-//! ecosystem: the canonical home for GGUF v3 layout parsing (header, KV
-//! metadata, tensor directory) and MoE per-expert *raw* weight extraction
-//! (see closed engram-parser#7 and corinth-canal#115). This crate stays the
-//! consumer: f32 math, `Tensor` ops, routing, dequantization, and model
-//! adapters on top. Parser/dtype freeze holds until a consume follow-up can
-//! take published engram-parser 0.3.x checkpoint/tensor APIs — that work is
-//! #47. The older plan to wrap `parse_checkpoint_layout` around engram-parser
-//! 0.2.0 is superseded. Do not add Q6_K / IQ3_*
-//! here. Dequantization itself stays owned by this crate; only widening the
-//! supported dtype set is frozen, since new dtypes arrive with the parser's
-//! type ids. No dependency on engram-parser is declared yet.
-//!
-//! ## Ecosystem note (see #9 / #32)
-//! Safetensors header inspection, deterministic manifests, and MoE candidate
-//! discovery belong in `rmems/engram-parser` behind the off-by-default
-//! `safetensors` cargo feature (engram-parser#10, corinth-canal#116). This
-//! crate still does not own that parse surface; the eventual dependency is
-//! one crate (`engram-parser` with `features = ["safetensors"]`), not a
-//! dedicated `safetensors-parser` crate. Planning/alignment only — no
-//! Safetensors backend or dep is implemented here.
+//! GGUF and Safetensors parsing, inventory, and packed dequantization are
+//! owned by `engram-parser` (`features = ["safetensors"]`, validated on
+//! 0.3.0). This crate binds those tensors into reference-backend `f32`
+//! routing. It does not know the container format in the scoring loop.
+//! `MappedCheckpoint` is a temporary shim; see that module for the removal
+//! condition. Do not add format parsers or Q6_K / IQ3_* dequant here.
 
 mod adapter;
 mod checkpoint;
-mod dequant;
-mod gguf;
 mod routing;
 
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 
 use self::adapter::{ModelAdapter, resolve_adapter};
-use self::checkpoint::{MappedGgufCheckpoint, probe_and_map_checkpoint};
+use self::checkpoint::{MappedCheckpoint, open_mapped_checkpoint};
 use self::routing::{
     apply_extract_token_options, checkpoint_gate_scores, normalize_l2, resample_embedding,
     synthetic_gate_scores,
@@ -54,14 +34,6 @@ use self::routing::{
 use crate::error::{HybridError, Result};
 pub use crate::types::RoutingMode;
 pub use crate::types::{EMBEDDING_DIM, ExtractTokenOptions};
-
-pub(crate) use self::gguf::{
-    GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_IQ3_S, GGML_TYPE_Q5_K, GGML_TYPE_Q8_0, GGUF_MAGIC,
-    GGUF_VALUE_TYPE_ARRAY, GGUF_VALUE_TYPE_BOOL, GGUF_VALUE_TYPE_FLOAT32, GGUF_VALUE_TYPE_FLOAT64,
-    GGUF_VALUE_TYPE_INT8, GGUF_VALUE_TYPE_INT16, GGUF_VALUE_TYPE_INT32, GGUF_VALUE_TYPE_INT64,
-    GGUF_VALUE_TYPE_STRING, GGUF_VALUE_TYPE_UINT8, GGUF_VALUE_TYPE_UINT16, GGUF_VALUE_TYPE_UINT32,
-    GGUF_VALUE_TYPE_UINT64, GGUF_VERSION,
-};
 
 pub(crate) use self::routing::{reject_nan_routing_scores, route_top_k};
 
@@ -73,7 +45,7 @@ pub struct MoeRouter {
     metadata: RouterMetadata,
     adapter: Option<ModelAdapter>,
     routing_mode: RoutingMode,
-    checkpoint: Option<MappedGgufCheckpoint>,
+    checkpoint: Option<MappedCheckpoint>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -205,7 +177,7 @@ impl MoeRouter {
             })?;
         let checkpoint = self
             .checkpoint
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| HybridError::ModelLoad {
                 path: self.model_path.clone(),
                 reason: "checkpoint not loaded".into(),
@@ -218,9 +190,9 @@ impl MoeRouter {
         Ok(apply_extract_token_options(&embedding, options))
     }
 
-    fn probe_and_map(path: &str) -> Result<(RouterMetadata, MappedGgufCheckpoint, ModelAdapter)> {
-        let (_raw_metadata, checkpoint) = probe_and_map_checkpoint(path)?;
-        let adapter = resolve_adapter(checkpoint.metadata(), &checkpoint, path)?;
+    fn probe_and_map(path: &str) -> Result<(RouterMetadata, MappedCheckpoint, ModelAdapter)> {
+        let checkpoint = open_mapped_checkpoint(path)?;
+        let adapter = resolve_adapter(&checkpoint, path)?;
         let metadata = RouterMetadata {
             architecture: adapter.architecture.clone(),
             hidden_size: adapter.hidden_size,

@@ -29,7 +29,7 @@ Design boundaries:
 - **Reference backend, not the product surface.** `Tensor` is a contiguous row-major `Vec<f32>`. Public stage contracts (`AnnStage`, `AnnExecutor`) do not name it. New framework-generic numerical features are out of scope unless a conformance or reference test needs them.
 - **No mandatory ML framework.** Default features do not depend on Candle, Burn, `tch`, or `ort`.
 - **No GPU kernels in this crate.** Specialized hybrid GPU kernels belong to `myelin-accelerator`.
-- **Checkpoint parsing is not owned here.** In-tree GGUF stays until issue 47 can consume a published `engram-parser` 0.3.x crate. This boundary reset does not implement that consume, and it does not add parser or dtype coverage.
+- **Checkpoint parsing is not owned here.** Loading goes through published `engram-parser` 0.3.0 (`features = ["safetensors"]`; `mmap` is off). GGUF and Safetensors share one normalized tensor inventory. This crate binds those weights into the reference backend and does not parse either container.
 - **Orchestration is not owned here.** ANN↔SNN placement stays in [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion). The closed decision not to merge that crate (issue 35) stands.
 
 ## Architecture
@@ -51,10 +51,9 @@ src/
 └── moe/
     ├── mod.rs        # MoeRouter public API, RoutingMode
     ├── adapter.rs    # checkpoint adapter resolution + tensor selection
-    ├── checkpoint.rs # GGUF parser, mmap'd F32/F16/Q8_0/Q5_K access
-    ├── dequant.rs    # Q8_0 / Q5_K row dequant, f16→f32, row sizing
-    ├── gguf.rs       # GGUF magic/version + GGML type constants
+    ├── checkpoint.rs # normalized checkpoint binding (engram-parser shim)
     ├── routing.rs    # softmax, top-k, L2 normalize, embedding resample
+    ├── test_fixtures.rs
     └── tests.rs      # router + checkpoint unit tests
 ```
 
@@ -95,13 +94,13 @@ Unversioned pre-1.0 JSON and the older `strides` field must be migrated explicit
 
 | Item | Purpose |
 |---|---|
-| `MoeRouter` | MoE router. Loads a GGUF checkpoint and produces top-k expert selections. |
+| `MoeRouter` | MoE router. Opens a GGUF or Safetensors checkpoint through engram-parser and produces top-k expert selections. |
 | `RoutingMode` | `StubUniform`, `DenseSim` (default). Spiking routing moved to `snn::SpikingMoeRouter` + an `SnnBackend` adapter. |
 | `ExtractTokenOptions` | Optional resample / L2 when extracting token rows (`for_projector_forward()` matches legacy 2048 + L2). |
 
 Top-k selection ranks finite scores descending and breaks ties by ascending expert ID. NaN scores are rejected (`NanRoutingScore`); `+Inf` ranks above all finite values and `-Inf` below them. The helper is pure: the same `(scores, top_k)` pair always produces the same expert IDs.
 
-Supported GGUF tensor types: `F32`, `F16`, `Q8_0`, `Q5_K`. `IQ3_S` is detected and rejected (for token embeddings) with a clear error so callers can fall back to `llama.cpp` prompt embeddings.
+Supported token-row dtypes, dequantized by engram-parser: `F32`, `F16`, `Q8_0`, `Q5_K`. `IQ3_S` is detected and rejected for token embeddings with a clear error so callers can fall back to `llama.cpp` prompt embeddings. Shapes are outermost-first (`[vocab, hidden]` for token rows). Gate weights use that same row-major layout.
 
 ### `snn`
 
@@ -172,34 +171,21 @@ identity, kind, and wiring.
   read a `synapse_source` manifest label (e.g. `Surrogate_Viz.jl`) keep working
   against artifacts emitted by those downstream pipelines; new artifacts should
   source the label there, not from cortex.
-- GGUF parsing/mmap stays as-is pending #47 (engram-parser 0.3.x consume).
+- Checkpoint loading uses engram-parser 0.3.0. `MappedCheckpoint` in `src/moe/checkpoint.rs` is a temporary binding shim around `engram_parser::Checkpoint`. Remove it when callers take that trait directly. Do not add format parsers or mmap policy back into this crate.
 
-**Parser layer (planning, see #8 / #47):** the canonical home for GGUF v3
-deserialization and per-expert raw weight extraction is `engram-parser`, not this
-crate. Parser/dtype freeze holds until #47 can consume published engram-parser
-0.3.x checkpoint/tensor APIs and retire in-tree GGUF — see
-[GGUF parser boundary](#gguf-parser-boundary-see-8).
-
-**Future formats (planning, see #9 / #32):** Safetensors header inspection,
-deterministic manifests, and MoE candidate discovery belong in `engram-parser`
-behind the off-by-default `safetensors` cargo feature (engram-parser#10,
-corinth-canal#116). This crate still does not own that parse surface. The
-eventual dependency is one crate, not two:
+**Checkpoint substrate (engram-parser 0.3.0, see #47):** GGUF and Safetensors parsing, tensor inventory, raw payloads, and packed Q8_0/Q5_K dequantization live in `engram-parser`. This crate depends on that release with `features = ["safetensors"]` and does not enable `mmap`. `MoeRouter` binds the normalized outermost-first tensors into reference-backend routing. Model topology and tensor-role discovery stay on the engram-parser v0.4 track and are not required here.
 
 ```toml
-engram-parser = { version = "...", features = ["safetensors"] }
+engram-parser = { version = "0.3.0", default-features = false, features = ["safetensors"] }
 ```
-
-No implementation or dependency is present yet — this keeps the reusable parser
-boundary clean. Cross-links and notes are maintained for alignment.
 
 ### GGUF adapter (code paths)
 
 - `MoeRouter::load` / `load_with_mode` → `probe_and_map` calls `resolve_adapter` (adapter.rs).
-- `resolve_adapter` reads `{architecture}.*` metadata keys (the arch string is opaque checkpoint data), validates routing tensor (rank-2 F32 with one dim equal to `hidden_size` and the other ≥ expert count), validates token embeddings (F32/F16/Q8_0/Q5_K, shape `[hidden, vocab]`).
-- Routing always uses `routing_tensor` via `checkpoint_gate_scores` (routing.rs) when checkpoint loaded (never synthetic for real loads).
-- `extract_named_token_embedding_from_checkpoint` (checkpoint.rs) supports dequant for Q8_0/Q5_K (and F32/F16); IQ3_S errors for embeddings.
-- Checkpoint topology (which tensors exist) is reported via `RouterMetadata` / adapter internals. **SAAQ/GPU synapse-source policy is no longer owned here** — it moved downstream to the experimental repos (`corinth-canal` / `grok-ozempic`) that consume these checkpoints; see [Migration notes](#migration-notes).
+- `resolve_adapter` reads `{architecture}.*` metadata keys (the arch string is opaque checkpoint data). Numeric metadata may be an integer or a numeric string, so the same keys work for GGUF and Safetensors. It validates the routing tensor (rank-2 F32, one outermost-first dim equal to `hidden_size`, the other ≥ expert count) and token embeddings (F32/F16/Q8_0/Q5_K, shape `[vocab, hidden]`).
+- Routing always uses `routing_tensor` via `checkpoint_gate_scores` (routing.rs) when a checkpoint is loaded.
+- Token-row extraction supports F32/F16/Q8_0/Q5_K through engram-parser dequant. IQ3_S returns an explicit error.
+- Checkpoint inventory is reported via `RouterMetadata` / adapter internals. **SAAQ/GPU synapse-source policy is no longer owned here** — it moved downstream to the experimental repos (`corinth-canal` / `grok-ozempic`); see [Migration notes](#migration-notes).
 
 ## Scope / Boundaries
 
@@ -215,26 +201,19 @@ This crate **owns**:
 - The ANN↔SNN execution/interchange contract (`snn` module): `SnnBackend`,
   `SnnEncoder`/`SnnDecoder` boundary types, `SnnCapabilities`, and
   `SpikingMoeRouter` composing the MoE router with an external SNN backend.
-- Checkpoint adapter and tensor selection.
-- Dequantization of supported GGUF quants to `f32` (`Q8_0`, `Q5_K`, `F16`).
-- The consumer-side GGUF bridge it needs today: mmap'd tensor access and
-  token-embedding extraction.
+- Checkpoint adapter and tensor selection on engram-parser's normalized inventory.
+- Reference-backend binding of F32/F16/Q8_0/Q5_K token rows. Packed dequantization is engram-parser's.
 
 This crate **does not own**:
 
-- Checkpoint parsing — [`engram-parser`](https://github.com/rmems/engram-parser).
-  Issue 47 (consume published engram-parser 0.3.x and retire in-tree GGUF) is
-  open and is not part of this boundary reset.
+- Checkpoint parsing, GGUF mmap policy, or Safetensors parsing — [`engram-parser`](https://github.com/rmems/engram-parser) 0.3.0 (`safetensors` feature). Issue 47 is the consume that landed here. Model topology / tensor-role discovery remains engram-parser v0.4 and is not an acceptance gate for this binding.
 - ANN↔SNN placement and session orchestration — [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion).
   Issue 35, the decision not to merge hybrid-fusion into this repo, is closed and stands.
 - SNN neuron dynamics.
 - Generic CUDA/GPU kernels — existing ML backends, or `myelin-accelerator` for specialized hybrid kernels.
 - GOZ1 / SAAQ experiment policy.
 - A universal Rust tensor framework.
-- Canonical GGUF v3 deserialization (header, KV metadata, tensor directory) and
-  per-expert *raw* weight extraction — see the parser-boundary note below.
-- Safetensors header inspection, deterministic manifests, and MoE candidate
-  discovery — `engram-parser` feature `safetensors` (see #9, #32).
+- Canonical GGUF v3 deserialization and Safetensors manifests — engram-parser, not this crate.
 - CUDA / GPU / SIMD execution, and any GPU host registration.
 - SNN neuron dynamics — delegated to reusable crates behind `snn::SnnBackend`
   ([`neuromod`](https://github.com/rmems/neuromod) via the optional `neuromod`
@@ -246,10 +225,7 @@ This crate **does not own**:
 - Specialized SNN/hybrid GPU kernels — `myelin-accelerator`.
 - Tokenization and automatic differentiation (see [Non-goals](#non-goals)).
 
-**Allowed dependencies:** the current small set — `serde`, `serde_json`,
-`thiserror`, `rand`, `rayon`, `memmap2`, `half` — optional feature-gated
-SNN backend crates (`neuromod` today, evaluated individually) and,
-in future, the zero-dependency rmems parser crates.
+**Allowed dependencies:** `serde`, `serde_json`, `thiserror`, `rand`, `rayon`, and `engram-parser` 0.3.0 with the `safetensors` feature — plus optional feature-gated SNN backend crates (`neuromod`, `axon-encoder`), evaluated individually.
 
 **Forbidden dependencies:** GPU backends (`cust`) as core dependencies,
 making an inference framework (`candle`, `burn`, `tch`, `ort`) a required
@@ -271,37 +247,26 @@ for the full Rust runtime/deployment boundary matrix, and issues #5 (boundary
 doc), #8 (GGUF parser coordination), #9 / #32 (Safetensors provider), and #47
 (consume published `engram-parser` 0.3.x) for this repo's tracking.
 
-### GGUF parser boundary (see #8)
+### Checkpoint boundary (see #8 / #47)
 
-`engram-parser` is the parser-layer provider for this ecosystem: it is the
-canonical home for GGUF v3 layout parsing and MoE per-expert raw weight
-extraction, extracted from the experimental `rmems/corinth-canal` reference
-implementation (see closed
-[engram-parser#7](https://github.com/rmems/engram-parser/issues/7) and
-[corinth-canal#115](https://github.com/rmems/corinth-canal/issues/115)).
-`cortex-tensor` stays the consumer: `f32` math, `Tensor` ops, routing, and model
-adapters on top of parsed layout / extracted weights. Consume follow-up: [#47](https://github.com/rmems/cortex-tensor/issues/47).
+`engram-parser` 0.3.0 owns GGUF and Safetensors parsing. Validated dependency:
 
-| Layer | Canonical owner | Where it lives in this crate today |
-|---|---|---|
-| GGUF magic + v3 header, KV metadata, tensor directory | `engram-parser` | `src/moe/checkpoint.rs` (`parse_checkpoint_layout`) |
-| GGML type + GGUF value-type constants | `engram-parser` | `src/moe/gguf.rs` |
-| Per-expert raw weight extraction | `engram-parser` | not implemented here |
-| mmap'd tensor access for the router | `cortex-tensor` | `src/moe/checkpoint.rs` (`probe_and_map_checkpoint`) |
-| Dequantization to `f32` | `cortex-tensor` | `src/moe/dequant.rs` |
-| Routing math, top-k, checkpoint adapter | `cortex-tensor` | `src/moe/routing.rs`, `src/moe/adapter.rs` |
+```toml
+engram-parser = { version = "0.3.0", default-features = false, features = ["safetensors"] }
+```
 
-**Freeze until consume lands:** no new parser code and no dtype/GGUF format
-enhancements in `src/moe/checkpoint.rs`, `src/moe/gguf.rs`, or
-`src/moe/dequant.rs` until [#47](https://github.com/rmems/cortex-tensor/issues/47)
-can consume published engram-parser 0.3.x checkpoint/tensor APIs. The older
-plan to wrap `parse_checkpoint_layout` around engram-parser 0.2.0 is
-superseded; engram-parser#45 (mmap + K-quant) is closed and is not the
-blocker. Known gaps versus the corinth-canal reference — additional
-dtypes (`BF16`, `Q6_K`, `IQ3_*`), a `ggml_type_label` helper, and the
-"GGUF wire type 31 is `Q4_0_4_4`, not IQ3_M" discipline — stay parked on
-engram-parser. **Do not add Q6_K / IQ3_* dequant in this crate.** Cross-repo
-planning is tracked in Linear LIM-88 (under LIM-9).
+`mmap` is intentionally not enabled. `open_checkpoint` reads GGUF into memory and serves Safetensors with bounded per-tensor reads. Cortex copies F32 payloads with `f32::from_le_bytes` because the borrowed bytes are not promised to be aligned, so `src/moe/` has no `unsafe`.
+
+| Layer | Owner |
+|---|---|
+| GGUF and Safetensors parsing, tensor inventory, raw payloads | `engram-parser` |
+| Packed Q8_0 / Q5_K / Q6_K / IQ3_M dequant | `engram-parser` (this crate calls Q8_0 and Q5_K) |
+| mmap policy | `engram-parser` (`mmap` feature; not used here) |
+| Router weight binding, top-k, adapter selection | `cortex-tensor` (`src/moe/checkpoint.rs`, `adapter.rs`, `routing.rs`) |
+
+`MappedCheckpoint` is a migration shim. Remove it when `MoeRouter` callers take `engram_parser::Checkpoint` directly. Malformed or unsupported files return the engram-parser error. There is no in-tree parser to fall back to.
+
+Do not add Q6_K / IQ3_* dequant, GGUF dtype coverage, or format parsers in this crate. Topology and tensor-role discovery are engram-parser v0.4 and are not required to bind weights.
 
 ## Install
 
@@ -414,7 +379,7 @@ Linked work, not implemented by the boundary-reset docs:
 
 - Issue 57 — `AnnStage` / `AnnExecutor` (closed; on `main`).
 - Issue 58 — external Rust ML adapter and capability contracts (open).
-- Issue 47 — consume published engram-parser 0.3.x and retire in-tree GGUF (open; blocked on that publish).
+- Issue 47 — consume published engram-parser 0.3.0 and retire in-tree GGUF (this tree).
 - Issue 35 — do not merge hybrid-fusion (closed; still in force).
 
 ## License

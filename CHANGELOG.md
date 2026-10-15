@@ -9,8 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking (checkpoint binding):** `MoeRouter` loads GGUF and Safetensors through published `engram-parser` 0.3.0 (`default-features = false`, `features = ["safetensors"]`; `mmap` is not enabled). Tensor shapes are that crate's outermost-first order, and gate weights are row-major on those shapes (GGUF `ne[0]` is the contiguous axis). Q8_0 and Q5_K rows are dequantized by engram-parser, including Q5_K's low-nibble-then-high-nibble group order. A checkpoint with no `general.file_type` reports quantization `unknown`. Validated against engram-parser 0.3.0 (RM-1265 / issue 47).
+- `MappedCheckpoint` is a temporary router binding shim. Remove it when callers take `engram_parser::Checkpoint` directly. Malformed input returns the engram-parser error; there is no in-tree parser fallback.
+
+### Removed
+
+- In-tree GGUF header/KV/tensor-directory parsing, copy-on-write mmap, `src/moe/gguf.rs`, and `src/moe/dequant.rs`. The `memmap2` and `half` dependencies are gone (RM-1265).
+
+### Changed
+
 - Crate identity is a backend-neutral ANN stage layer plus a deterministic `Vec<f32>` reference backend. README and Cargo description say so. Checkpoint parsing stays in engram-parser, orchestration stays in hybrid-fusion, and the closed decision not to merge hybrid-fusion (issue 35) stands. No new framework-generic numerical API (issue 56).
-- Parser-boundary docs no longer tell maintainers to wrap `parse_checkpoint_layout` around engram-parser 0.2.0. Issue 47's target is published engram-parser 0.3.x checkpoint/tensor APIs. This change does not consume that crate.
+- Parser-boundary docs point at the engram-parser 0.3.0 consume in this unreleased section (RM-1265). The older plan to wrap `parse_checkpoint_layout` around engram-parser 0.2.0 stays superseded.
 
 ### Added
 
