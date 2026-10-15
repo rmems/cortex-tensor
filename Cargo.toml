@@ -37,6 +37,11 @@ default = []
 neuromod = ["dep:neuromod"]
 # SNN encoder adapter: `axon-encoder` spike encoders behind `snn::SnnEncoder`.
 axon-encoder = ["dep:axon-encoder"]
+# ANN execution adapter: Candle CPU modules behind `adapter::CandleExecutor`.
+# CUDA, cuDNN, MKL, Accelerate, and Metal stay off — this crate does not ship
+# GPU kernels. Default features of both crates are empty; disable them
+# explicitly so a future default cannot pull those backends in.
+candle = ["dep:candle-core", "dep:candle-nn"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -48,6 +53,8 @@ memmap2 = "0.9"
 half = "2"
 neuromod = { version = "0.7", optional = true }
 axon-encoder = { version = "0.5", optional = true }
+candle-core = { version = "0.11", optional = true, default-features = false }
+candle-nn = { version = "0.11", optional = true, default-features = false }
 
 [profile.release]
 opt-level = 3
