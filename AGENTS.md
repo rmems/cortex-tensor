@@ -18,15 +18,16 @@ are constraints: don't add GPU code or heavy ML frameworks.
 | `src/transformer/` | Attention, transformer block, decoder-only LM |
 | `src/moe/` | MoE router, GGUF checkpoint parsing/dequant, adapters, routing |
 | `src/snn/` | Optional SNN backend/encoder adapters |
+| `src/adapter.rs` | External-adapter capability contract; `candle` executor and `burn` policy stub live behind features |
 | `src/stage.rs`, `src/reference_json.rs`, `src/types.rs`, `src/error.rs` | Stage execution, reference serde, shared types, errors |
 | `tests/` (+ `tests/fixtures/`) | Integration tests (public API compatibility, reference serde, stage execution) |
 
 ## Toolchain
 
-- Rust **1.98.1** (`rust-toolchain.toml`, `rust-version`), edition 2024. CI installs exactly 1.98.1
-  with rustfmt and clippy.
+- Rust **1.99.0** (`rust-toolchain.toml`, `rust-version`), edition 2024. CI installs exactly 1.99.0
+  with rustfmt and clippy. `.agents/setup` installs the same pin.
 - `Cargo.lock` is gitignored (library crate), so don't pass `--locked` to build/test.
-- Features: `neuromod` (SNN backend adapter) and `axon-encoder` (SNN encoder adapter), both off by default.
+- Features: `neuromod` (SNN backend adapter), `axon-encoder` (SNN encoder adapter), `candle` (CPU `f32` `AnnExecutor`), and `burn` (policy stub, no `burn` crate), all off by default. The `candle` feature must not enable CUDA, MKL, or Metal.
 - No GPU or system packages needed.
 
 ## Commands (from `.github/workflows/rust.yml`)

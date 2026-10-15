@@ -2,12 +2,28 @@
 name = "cortex-tensor"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.98.1"
+# Development toolchain and MSRV are the same pin. Keep this equal to
+# `rust-toolchain.toml` `channel` and the CI / `.agents/setup` install.
+rust-version = "1.99.0"
 description = "Backend-neutral ANN stage layer and deterministic Vec reference backend for hybrid ANN/SNN systems."
 authors = ["Raul Cardenas Montoya"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rmems/cortex-tensor"
 homepage = "https://github.com/rmems/cortex-tensor"
+# crates.io surface: keep licenses, README, CHANGELOG, sources, and tests.
+# Drop agent/CI/dev-only paths. Hidden git-tracked files still pack unless
+# listed here (e.g. .gitignore). `rust-toolchain.toml` stays in the git repo
+# so local and CI builds use the pinned toolchain; MSRV for dependents is
+# `rust-version` above.
+exclude = [
+    "/.agents/",
+    "/.coderabbit.yaml",
+    "/.github/",
+    "/.gitignore",
+    "/AGENTS.md",
+    "/codecov.yml",
+    "/rust-toolchain.toml",
+]
 
 [lib]
 name = "cortex_tensor"
@@ -21,13 +37,15 @@ default = []
 neuromod = ["dep:neuromod"]
 # SNN encoder adapter: `axon-encoder` spike encoders behind `snn::SnnEncoder`.
 axon-encoder = ["dep:axon-encoder"]
-# Candle adapter slot. Not in `default`. v0.3 keeps this a structured stub and
-# does not depend on the `candle-core` crate so core stays framework-free.
-candle = []
-# Burn adapter slot. Not in `default`. v0.3 keeps this a structured stub and
-# does not depend on the `burn` crate. burn 0.21's rust-version 1.92 is a
-# minimum and is compatible with this pin; omitting the dependency is policy,
-# not a toolchain conflict.
+# ANN execution adapter: Candle CPU modules behind `adapter::CandleExecutor`.
+# CUDA, cuDNN, MKL, Accelerate, and Metal stay off — this crate does not ship
+# GPU kernels. Default features of both crates are empty; disable them
+# explicitly so a future default cannot pull those backends in.
+candle = ["dep:candle-core", "dep:candle-nn"]
+# Burn adapter slot. Not in `default`. This stays a structured stub and does
+# not depend on the `burn` crate. burn 0.21's rust-version 1.92 is a minimum
+# and is compatible with this pin; omitting the dependency is policy, not a
+# toolchain conflict.
 burn = []
 
 [dependencies]
@@ -40,6 +58,8 @@ memmap2 = "0.9"
 half = "2"
 neuromod = { version = "0.7", optional = true }
 axon-encoder = { version = "0.5", optional = true }
+candle-core = { version = "0.11", optional = true, default-features = false }
+candle-nn = { version = "0.11", optional = true, default-features = false }
 
 [profile.release]
 opt-level = 3

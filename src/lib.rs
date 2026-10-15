@@ -12,7 +12,7 @@
 //! | Module | Role |
 //! |--------|------|
 //! | [`stage`] | Backend-neutral ANN stage contracts; [`stage::ReferenceExecutor`] is the reference backend |
-//! | [`adapter`] | External-engine capability and hidden-state contract |
+//! | [`adapter`] | External-adapter capability contract, plus optional Candle `AnnExecutor` |
 //! | [`tensor`] | Reference-backend `Tensor`, fallible construction, core ops |
 //! | [`transformer`] | Reference-backend transformer blocks |
 //! | [`moe`] | Reference-backend MoE routing; in-tree GGUF is transitional (issue 47) |

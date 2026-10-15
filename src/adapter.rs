@@ -2,11 +2,13 @@
 
 //! External Rust ML adapter contract.
 //!
-//! Core never names Candle, Burn, or any other engine's tensor, device, or
-//! module types. An adapter implements [`ExternalAdapter`] with its own
+//! The types in this file never name Candle, Burn, or any other engine's
+//! tensor, device, or module types. An adapter implements [`ExternalAdapterMarker`] with its own
 //! associated tensor, reports capabilities in cortex terms, and converts
-//! hidden state through [`HiddenStateBuffer`]. Optional engine crates live
-//! behind features and are not required to use [`crate::stage::ReferenceExecutor`].
+//! hidden state through [`HiddenStateBuffer`]. The optional `candle` feature
+//! compiles `CandleExecutor` in a child module. That executor copies row-major
+//! `f32` values through its own `HiddenState` type and does not implement this
+//! contract. The optional `burn` feature is a policy stub.
 //!
 //! Capability reports are facts an orchestrator can translate. This module
 //! does not select a backend, rank engines, or place ANN stages against SNN
@@ -337,7 +339,7 @@ fn all_stage_tags() -> [StageKindTag; 11] {
     ]
 }
 
-#[cfg(any(feature = "candle", feature = "burn"))]
+#[cfg(feature = "burn")]
 fn policy_stub_capabilities(
     backend_name: &'static str,
     framework_name: &'static str,
@@ -368,7 +370,7 @@ fn policy_stub_capabilities(
     }
 }
 
-#[cfg(any(feature = "candle", feature = "burn"))]
+#[cfg(feature = "burn")]
 fn policy_stub_refusal(backend_name: &'static str, framework_name: &'static str) -> CortexError {
     CortexError::UnsupportedOperation {
         backend: backend_name,
@@ -380,7 +382,7 @@ fn policy_stub_refusal(backend_name: &'static str, framework_name: &'static str)
     }
 }
 
-#[cfg(any(feature = "candle", feature = "burn"))]
+#[cfg(feature = "burn")]
 macro_rules! define_policy_stub_adapter {
     ($adapter:ident, $tensor:ident, $backend:literal, $framework:literal) => {
         #[doc = concat!("Tensor stand-in used while ", $framework, " stays outside core.")]
@@ -452,7 +454,7 @@ macro_rules! define_policy_stub_adapter {
     };
 }
 
-#[cfg(any(feature = "candle", feature = "burn"))]
+#[cfg(feature = "burn")]
 pub(crate) use define_policy_stub_adapter;
 
 /// Reject a hidden-state dtype the reference path cannot store.
@@ -479,8 +481,8 @@ pub(crate) fn require_f32_buffer(buffer: &HiddenStateBuffer) -> Result<()> {
 
 /// Namespace for generic calls against [`ExternalAdapterMarker`].
 ///
-/// `ReferenceExecutor`, [`CandleAdapter`], and [`BurnAdapter`] also expose the
-/// same methods inherently. This helper lets tests and generic callers write
+/// `ReferenceExecutor` and the burn policy stub also expose the same methods
+/// inherently. This helper lets tests and generic callers write
 /// `ExternalAdapter::capabilities(backend)` without naming an engine.
 pub struct ExternalAdapter;
 
@@ -540,9 +542,13 @@ pub fn require_supported_dtype<T: StageTensor>(
 }
 
 #[cfg(feature = "candle")]
-mod candle_adapter;
+mod candle;
 #[cfg(feature = "candle")]
-pub use candle_adapter::CandleAdapter;
+pub use candle::{
+    AttentionWeights, CandleExecutor, CandleTensor, EmbeddingWeights, GatedMlpWeights, HiddenState,
+    LayerNormWeights, LinearWeights, MlpWeights, RmsNormWeights, export_hidden_state,
+    export_reference, import_hidden_state, import_reference,
+};
 
 #[cfg(feature = "burn")]
 mod burn_adapter;

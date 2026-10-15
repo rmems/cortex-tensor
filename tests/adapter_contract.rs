@@ -349,50 +349,6 @@ fn _adapter_object_safety() {
 }
 
 #[test]
-fn candle_feature_adapter_is_wired_when_enabled() {
-    #[cfg(feature = "candle")]
-    {
-        use cortex_tensor::stage::CandleAdapter;
-        let adapter = CandleAdapter::unavailable();
-        let caps = ExternalAdapter::capabilities(&adapter);
-        assert_eq!(caps.ann.backend_name, "candle");
-        assert!(!caps.hidden_state_io);
-        assert!(caps.devices.is_empty());
-        assert!(caps.ann.supported_dtypes.is_empty());
-        assert_eq!(caps.limitations.unsupported_tags.len(), 11);
-        assert!(
-            caps.limitations
-                .notes
-                .iter()
-                .any(|note| note.contains("does not depend on the candle crate"))
-        );
-        let buffer = HiddenStateBuffer {
-            data: vec![1.5, -2.0, 0.0, 4.0],
-            shape: vec![2, 2],
-            dtype: DType::F32,
-        };
-        let err = ExternalAdapter::import_hidden(&adapter, &buffer).unwrap_err();
-        assert!(matches!(
-            err,
-            CortexError::UnsupportedOperation { backend, category, .. }
-                if backend == "candle" && category == "policy"
-        ));
-        let stage = add_stage();
-        let err = ExternalAdapter::execute(&mut { adapter }, &stage, &[]).unwrap_err();
-        assert!(matches!(
-            err,
-            CortexError::UnsupportedStage { backend, stage_id, kind }
-                if backend == "candle" && stage_id == "probe_add" && kind.contains("Add")
-        ));
-    }
-    #[cfg(not(feature = "candle"))]
-    {
-        // Default builds must not require the Candle feature to exercise the contract.
-        let _ = std::any::type_name::<HiddenStateBuffer>();
-    }
-}
-
-#[test]
 fn burn_feature_stays_a_structured_stub_on_this_toolchain() {
     #[cfg(feature = "burn")]
     {

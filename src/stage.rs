@@ -28,6 +28,12 @@
 //! descriptors ([`AnnStage`], [`StageSource`], [`AnnTopology`]) carry no serde
 //! derives: they describe identity, kind, and wiring only, not a persisted
 //! wire format.
+//!
+//! The optional `candle` feature adds `adapter::CandleExecutor`. That executor
+//! runs stages with Candle's modules and copies row-major `f32` values through
+//! `import_hidden_state` / `export_hidden_state`. That path is `HiddenState`,
+//! not [`crate::adapter::HiddenStateBuffer`], and it is not the deferred
+//! cross-backend wire format.
 
 use crate::adapter::{self, require_f32_buffer};
 use crate::error::{CortexError, Result};
@@ -40,8 +46,6 @@ use std::fmt;
 
 #[cfg(feature = "burn")]
 pub use crate::adapter::BurnAdapter;
-#[cfg(feature = "candle")]
-pub use crate::adapter::CandleAdapter;
 pub use crate::adapter::{
     AdapterCapabilities, BackendLimitations, DeviceClass, ExternalAdapter, ExternalAdapterMarker,
     HiddenStateBuffer, NegotiationDocument,

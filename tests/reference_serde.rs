@@ -167,3 +167,50 @@ fn standalone_transformer_parts_reject_inconsistent_weights() {
     block["ln1_w"]["shape"] = json!([1, 4]);
     assert!(serde_json::from_value::<TransformerBlock>(block).is_err());
 }
+
+#[test]
+fn routing_mode_serializes_as_slug_wire_form() {
+    use cortex_tensor::moe::RoutingMode;
+
+    for (mode, slug) in [
+        (RoutingMode::StubUniform, "stub_uniform"),
+        (RoutingMode::DenseSim, "dense_sim"),
+    ] {
+        assert_eq!(serde_json::to_string(&mode).unwrap(), format!("\"{slug}\""));
+        let restored: RoutingMode = serde_json::from_str(&format!("\"{slug}\"")).unwrap();
+        assert_eq!(restored, mode);
+    }
+}
+
+#[test]
+fn routing_mode_accepts_legacy_pascal_case_aliases() {
+    use cortex_tensor::moe::RoutingMode;
+
+    for (name, mode) in [
+        ("StubUniform", RoutingMode::StubUniform),
+        ("DenseSim", RoutingMode::DenseSim),
+    ] {
+        let restored: RoutingMode = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+        assert_eq!(restored, mode);
+    }
+}
+
+#[test]
+fn routing_mode_rejects_unknown_strings() {
+    use cortex_tensor::moe::RoutingMode;
+
+    for name in [
+        "SpikingSim",
+        "spiking_sim",
+        "dense",
+        "uniform",
+        "Dense_Sim",
+        "Stub_Uniform",
+        "",
+    ] {
+        assert!(
+            serde_json::from_str::<RoutingMode>(&format!("\"{name}\"")).is_err(),
+            "accepted {name:?}"
+        );
+    }
+}

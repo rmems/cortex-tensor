@@ -24,6 +24,8 @@ cortex-tensor          ANN stage contracts + reference backend
 reference  candle    burn     + SNN backend contract
 ```
 
+The `candle` feature is `adapter::CandleExecutor` (RM-1828), a CPU `f32` `AnnExecutor` with its own hidden-state copy. That copy is not the `ExternalAdapter` contract. The `burn` feature is a policy stub on that contract and does not depend on the `burn` crate. Neither engine is a core dependency.
+
 Design boundaries:
 
 - **Reference backend, not the product surface.** `Tensor` is a contiguous row-major `Vec<f32>`. Public stage contracts (`AnnStage`, `AnnExecutor`) do not name it. New framework-generic numerical features are out of scope unless a conformance or reference test needs them.
@@ -148,15 +150,34 @@ an ordered graph of stages, then run it through a swappable backend.
 `ReferenceExecutor` is the reference backend: `f32`, CPU-only, and dense. It
 reuses the same kernels as `TransformerLM::try_forward`, so a topology built by
 `ReferenceExecutor::from_transformer` reproduces the model's output bit for bit.
-MoE router, MoE expert, and gated MLP stages are present in the stage vocabulary
-but are **rejected** by the reference backend with `CortexError::UnsupportedStage`.
-Optional adapters implement the same `ExternalAdapter` contract without changing
-core traits. `HiddenStateBuffer` is the import/export boundary; it is not a
-checkpoint format and not a universal tensor wire (RM-1827). `NegotiationDocument`
-is the cortex-owned fact list hybrid-fusion can translate once its
-`BackendCapabilities` type lands ([hybrid-fusion#41](https://github.com/rmems/hybrid-fusion/issues/41)).
-This crate does not select, rank, or place backends. Stage descriptors carry no
-serde and describe only identity, kind, and wiring.
+`AnnExecutor` is generic over the backend tensor and never names `Tensor` or
+`Vec<f32>`.
+
+MoE router, MoE expert, and gated MLP stages are in the vocabulary but are
+**rejected** by the reference backend with `CortexError::UnsupportedStage`.
+A device field and a concrete cross-backend tensor wire format are
+intentionally deferred (RM-1827); stage descriptors carry no serde and
+describe only identity, kind, and wiring.
+
+`ReferenceExecutor` implements `ExternalAdapter`. `HiddenStateBuffer` is that
+contract's import/export boundary. It is not a checkpoint format and not a
+universal tensor wire. `NegotiationDocument` is the cortex-owned fact list
+hybrid-fusion can translate once its `BackendCapabilities` type lands
+([hybrid-fusion#41](https://github.com/rmems/hybrid-fusion/issues/41)).
+This crate does not select, rank, or place backends.
+
+`CandleExecutor` (`features = ["candle"]`, module `adapter`) is an
+`AnnExecutor`, not an `ExternalAdapter`. Its tensor type is a Candle CPU
+tensor. Row-major `f32` values cross that executor through
+`import_hidden_state` / `export_hidden_state` (`HiddenState`), not through
+`HiddenStateBuffer`. Bound weights are converted once. Stage bodies call
+Candle's `Embedding`, `Linear`, `LayerNorm`, `RmsNorm`, tanh-approximate
+GELU, `swiglu`, and CPU flash-attention. This crate does not reimplement
+those kernels and does not enable Candle's CUDA, MKL, or Metal features.
+MoE router, MoE expert, and custom stages return `UnsupportedStage`.
+`BurnAdapter` (`features = ["burn"]`) is the policy stub on
+`ExternalAdapter`: it does not depend on the `burn` crate, and it refuses
+execution and hidden-state transfer.
 
 ### Migration notes
 
@@ -250,15 +271,17 @@ This crate **does not own**:
 
 **Allowed dependencies:** the current small set — `serde`, `serde_json`,
 `thiserror`, `rand`, `rayon`, `memmap2`, `half` — optional feature-gated
-SNN backend crates (`neuromod` today, evaluated individually) and,
-in future, the zero-dependency rmems parser crates.
+SNN backend crates (`neuromod` today, evaluated individually), the optional
+`candle` feature's `candle-core` and `candle-nn` (CPU only; CUDA, MKL, and
+Metal stay off), and, in future, the zero-dependency rmems parser crates.
 
 **Forbidden dependencies:** GPU backends (`cust`) as core dependencies,
-inference frameworks (`candle`, `burn`, `tch`, `ort`), domain/SNN orchestration
-crates (including `hybrid-fusion`), and any dependency on
-`rmems/corinth-canal`. Optional adapter slots must not leak native types into
-core. The `candle` and `burn` features are stubs and must not depend on their
-framework crates in v0.3. Extraction from corinth-canal is a
+making an inference framework (`candle`, `burn`, `tch`, `ort`) a required
+dependency, domain/SNN orchestration crates (including `hybrid-fusion`), and
+any dependency on `rmems/corinth-canal`. The `candle` feature may depend on
+`candle-core` and `candle-nn` with CUDA, MKL, and Metal disabled. The `burn`
+feature must not depend on the `burn` crate. Native engine types stay out of
+the `ExternalAdapter` contract. Extraction from corinth-canal is a
 **one-way copy**; that repo keeps an unmodified reference copy per its
 `PROMOTION_RULES.md`.
 
@@ -319,8 +342,8 @@ Features (all off by default):
 |---|---|
 | `neuromod` | Enables `snn::NeuromodNetwork` — `neuromod::SpikingNetwork` behind `snn::SnnBackend`. Pulls the optional `neuromod` crate dependency. |
 | `axon-encoder` | Enables `snn::AxonEncoder` — any `axon_encoder::Encoder` behind `snn::SnnEncoder` (streaming `encode_step` per forward tick). Pulls the optional `axon-encoder` crate dependency. |
-| `candle` | Enables `stage::CandleAdapter` as a structured policy stub. v0.3 does not depend on `candle-core`; hidden-state import/export returns `UnsupportedOperation` (category `policy`) and `execute` returns `UnsupportedStage`. |
-| `burn` | Enables `stage::BurnAdapter` as a structured policy stub. v0.3 does not depend on `burn`; hidden-state import/export returns `UnsupportedOperation` (category `policy`) and `execute` returns `UnsupportedStage`. `burn` 0.21's rustc 1.92 requirement is a minimum and is compatible with this crate's 1.98.1 pin. |
+| `candle` | Enables `adapter::CandleExecutor` — Candle CPU `f32` modules behind `AnnExecutor`. Values cross that executor at `import_hidden_state` / `export_hidden_state` (`HiddenState`), not through `ExternalAdapter` / `HiddenStateBuffer`. Does not enable Candle's CUDA, MKL, or Metal features. |
+| `burn` | Enables `stage::BurnAdapter` as a structured policy stub on `ExternalAdapter`. Does not depend on the `burn` crate. Hidden-state import/export returns `UnsupportedOperation` (category `policy`) and `execute` returns `UnsupportedStage`. `burn` 0.21's rustc 1.92 requirement is a minimum and is compatible with this crate's 1.99.0 pin. |
 
 ## Quick start
 
@@ -413,12 +436,12 @@ fn main() -> cortex_tensor::Result<()> {
 
 ## Status
 
-Rust edition 2024, MSRV 1.98.1. Public API is pre-1.0.
+Rust edition 2024, MSRV 1.99.0. Public API is pre-1.0.
 
 Linked work, not implemented by the boundary-reset docs:
 
 - Issue 57 — `AnnStage` / `AnnExecutor` (closed; on `main`).
-- Issue 58 — external Rust ML adapter and capability contracts (open).
+- Issue 58 — external Rust ML adapter and capability contracts. This branch adds the core contract (`ExternalAdapter`, capability facts, reference `HiddenStateBuffer` import/export). The Candle executor landed separately under RM-1828 and is not that contract's conversion. Burn stays a policy stub.
 - Issue 47 — consume published engram-parser 0.3.x and retire in-tree GGUF (open; blocked on that publish).
 - Issue 35 — do not merge hybrid-fusion (closed; still in force).
 
