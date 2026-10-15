@@ -707,6 +707,111 @@ fn topology_keeps_hidden_state_inside_candle() {
 }
 
 #[test]
+fn bind_rejects_incompatible_weights() {
+    let mut exec = CandleExecutor::new();
+    let eye = [1.0f32, 0.0, 0.0, 1.0];
+    let square = LinearWeights {
+        weight: &eye,
+        in_dim: 2,
+        out_dim: 2,
+        bias: None,
+    };
+    let wide = LinearWeights {
+        weight: &[1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0],
+        in_dim: 2,
+        out_dim: 3,
+        bias: None,
+    };
+    let dense = exec
+        .bind_dense_mlp(
+            stage_id("dense"),
+            MlpWeights {
+                up: wide,
+                down: square,
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(dense, CortexError::InvalidConfig(_)));
+
+    let gated = exec
+        .bind_gated_mlp(
+            stage_id("gated"),
+            GatedMlpWeights {
+                gate: square,
+                up: wide,
+                down: square,
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(gated, CortexError::InvalidConfig(_)));
+
+    let nonsquare = exec
+        .bind_attention(
+            stage_id("attn"),
+            AttentionWeights {
+                q: wide,
+                k: square,
+                v: square,
+                o: square,
+                num_heads: 1,
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(nonsquare, CortexError::InvalidConfig(_)));
+
+    let heads = exec
+        .bind_attention(
+            stage_id("attn"),
+            AttentionWeights {
+                q: square,
+                k: square,
+                v: square,
+                o: square,
+                num_heads: 3,
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(heads, CortexError::InvalidConfig(_)));
+
+    let layer = exec
+        .bind_layer_norm(
+            stage_id("ln"),
+            LayerNormWeights {
+                weight: &[1.0, 1.0],
+                bias: &[0.0],
+                eps: 1e-5,
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(layer, CortexError::ShapeMismatch { .. }));
+
+    let rms = exec
+        .bind_rms_norm(
+            stage_id("rms"),
+            RmsNormWeights {
+                weight: &[1.0],
+                eps: f32::NAN,
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(rms, CortexError::InvalidEpsilon { .. }));
+
+    let embed = exec
+        .bind_embedding(
+            stage_id("embed"),
+            EmbeddingWeights {
+                token_weight: &[1.0, 0.0],
+                vocab: 2,
+                dim: 2,
+                position_weight: &[1.0, 0.0, 0.0, 1.0],
+                max_seq_len: 2,
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(embed, CortexError::ShapeMismatch { .. }));
+}
+
+#[test]
 fn params_kind_mismatch_is_missing_params() {
     let mut exec = CandleExecutor::new();
     let weight = [1.0f32, 0.0, 0.0, 1.0];

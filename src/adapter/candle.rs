@@ -665,6 +665,21 @@ fn checked_numel(shape: &[usize]) -> Result<usize> {
         })
 }
 
+fn expect_matrix(data: &[f32], rows: usize, cols: usize) -> Result<()> {
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| CortexError::SizeOverflow {
+            shape: vec![rows, cols],
+        })?;
+    if data.len() != expected {
+        return Err(CortexError::ShapeMismatch {
+            expected: vec![rows, cols],
+            got: vec![data.len()],
+        });
+    }
+    Ok(())
+}
+
 fn f32_tensor(data: &[f32], shape: &[usize], device: &Device) -> Result<Tensor> {
     let numel = checked_numel(shape)?;
     if data.len() != numel {
@@ -758,6 +773,8 @@ fn prepare_embedding(device: &Device, weights: &EmbeddingWeights<'_>) -> Result<
             "candle embedding vocab, dim, and max_seq_len must be non-zero".to_string(),
         ));
     }
+    expect_matrix(weights.token_weight, weights.vocab, weights.dim)?;
+    expect_matrix(weights.position_weight, weights.max_seq_len, weights.dim)?;
     let tokens = Embedding::new(
         f32_tensor(weights.token_weight, &[weights.vocab, weights.dim], device)?,
         weights.dim,
@@ -857,10 +874,10 @@ fn run_embedding(
             u32::try_from(index).map_err(|_| {
                 stage_failed(
                     stage_id,
-                    CortexError::InputLengthMismatch {
-                        expected: u32::MAX as usize,
-                        got: seq_len,
-                    },
+                    CortexError::InvalidConfig(
+                        "sequence length exceeds u32::MAX, cannot generate position ids"
+                            .to_string(),
+                    ),
                 )
             })
         })
@@ -938,6 +955,8 @@ fn run_attention(
     // Candle CPU flash-attention. `ops::sdpa` is Metal-only, so it is not used.
     let context = flash_attn::<f32>(&q, &k, &v, scale, AttnMask::causal(), None, None)
         .map_err(|err| fail_candle(stage_id, err))?;
+    // flash_attn returns [batch, num_heads, seq, head_dim]. Transpose restores
+    // [batch, seq, num_heads, head_dim] before reshape to [batch, seq, dim].
     let merged = context
         .transpose(1, 2)
         .and_then(|tensor| tensor.contiguous())
