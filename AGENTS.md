@@ -26,7 +26,7 @@ are constraints: don't add GPU code or heavy ML frameworks.
 - Rust **1.98.1** (`rust-toolchain.toml`, `rust-version`), edition 2024. CI installs exactly 1.98.1
   with rustfmt and clippy.
 - `Cargo.lock` is gitignored (library crate), so don't pass `--locked` to build/test.
-- Features: `neuromod` (SNN backend adapter) and `axon-encoder` (SNN encoder adapter), both off by default.
+- Features: `neuromod` (SNN backend adapter), `axon-encoder` (SNN encoder adapter), and `candle` (CPU `f32` `AnnExecutor`), all off by default. The `candle` feature must not enable CUDA, MKL, or Metal.
 - No GPU or system packages needed.
 
 ## Commands (from `.github/workflows/rust.yml`)

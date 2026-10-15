@@ -22,7 +22,7 @@ cortex-tensor          ANN stage contracts + reference backend
 reference  candle    burn     + SNN backend contract
 ```
 
-Candle and Burn adapters are tracked separately (issue 58). They are not core dependencies. Neuron dynamics stay in focused SNN crates behind the `snn` contract.
+The Candle executor is an optional `candle` feature (RM-1828). Burn remains tracked under issue 58. Neither engine is a core dependency. Neuron dynamics stay in focused SNN crates behind the `snn` contract.
 
 Design boundaries:
 
@@ -153,10 +153,19 @@ over the backend tensor and never names `Tensor` or `Vec<f32>`.
 
 MoE router, MoE expert, and gated MLP stages are in the vocabulary but are
 **rejected** by the reference backend with `CortexError::UnsupportedStage`.
-Candle and Burn belong in optional adapters (issue 58), not in core. A device
-field and a concrete cross-backend tensor wire format are intentionally
-deferred (RM-1827); stage descriptors carry no serde and describe only
-identity, kind, and wiring.
+A device field and a concrete cross-backend tensor wire format are
+intentionally deferred (RM-1827); stage descriptors carry no serde and
+describe only identity, kind, and wiring.
+
+`CandleExecutor` (`features = ["candle"]`, module `adapter`) is the first
+external executor of the same `AnnExecutor` trait. Its tensor type is a
+Candle CPU tensor. Row-major `f32` hidden state crosses that boundary only
+through `import_hidden_state` / `export_hidden_state` (and the reference-tensor
+wrappers). Bound weights are converted once. Stage bodies call Candle's
+`Embedding`, `Linear`, `LayerNorm`, `RmsNorm`, tanh-approximate GELU, `swiglu`,
+and CPU flash-attention. This crate does not reimplement those kernels and does
+not enable Candle's CUDA, MKL, or Metal features. MoE router, MoE expert, and
+custom stages return `UnsupportedStage`. Burn is still an open adapter (issue 58).
 
 ### Migration notes
 
@@ -316,6 +325,7 @@ Features (all off by default):
 |---|---|
 | `neuromod` | Enables `snn::NeuromodNetwork` — `neuromod::SpikingNetwork` behind `snn::SnnBackend`. Pulls the optional `neuromod` crate dependency. |
 | `axon-encoder` | Enables `snn::AxonEncoder` — any `axon_encoder::Encoder` behind `snn::SnnEncoder` (streaming `encode_step` per forward tick). Pulls the optional `axon-encoder` crate dependency. |
+| `candle` | Enables `adapter::CandleExecutor` — Candle CPU `f32` modules behind `AnnExecutor`. Hidden state is converted only at `import_hidden_state` / `export_hidden_state`. Does not enable Candle's CUDA, MKL, or Metal features. |
 
 ## Quick start
 
@@ -413,7 +423,7 @@ Rust edition 2024, MSRV 1.98.1. Public API is pre-1.0.
 Linked work, not implemented by the boundary-reset docs:
 
 - Issue 57 — `AnnStage` / `AnnExecutor` (closed; on `main`).
-- Issue 58 — external Rust ML adapter and capability contracts (open).
+- Issue 58 — external Rust ML adapter and capability contracts (open). The Candle executor landed under RM-1828; Burn and the core negotiation contract are still open.
 - Issue 47 — consume published engram-parser 0.3.x and retire in-tree GGUF (open; blocked on that publish).
 - Issue 35 — do not merge hybrid-fusion (closed; still in force).
 
