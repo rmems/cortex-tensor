@@ -257,8 +257,9 @@ This crate **does not own**:
 
 **Allowed dependencies:** the current small set — `serde`, `serde_json`,
 `thiserror`, `rand`, `rayon`, `memmap2`, `half` — optional feature-gated
-SNN backend crates (`neuromod` today, evaluated individually) and,
-in future, the zero-dependency rmems parser crates.
+SNN backend crates (`neuromod` today, evaluated individually), the optional
+`candle` feature's `candle-core` and `candle-nn` (CPU only; CUDA, MKL, and
+Metal stay off), and, in future, the zero-dependency rmems parser crates.
 
 **Forbidden dependencies:** GPU backends (`cust`) as core dependencies,
 making an inference framework (`candle`, `burn`, `tch`, `ort`) a required

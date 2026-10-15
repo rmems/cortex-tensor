@@ -399,12 +399,7 @@ impl CandleExecutor {
     ///
     /// Returns [`CortexError::InvalidEpsilon`] or [`CortexError::ZeroWidth`].
     pub fn bind_rms_norm(&mut self, id: StageId, weights: RmsNormWeights<'_>) -> Result<()> {
-        let hidden = norm_width(
-            weights.weight,
-            weights.weight,
-            weights.eps,
-            "candle rms_norm",
-        )?;
+        let hidden = scale_width(weights.weight, weights.eps, "candle rms_norm")?;
         let scale = f32_tensor(weights.weight, &[hidden], &self.device)?;
         self.params.insert(
             id,
@@ -420,14 +415,14 @@ impl CandleExecutor {
     /// Returns a shape error from either projection, or
     /// [`CortexError::InvalidConfig`] when `down.in_dim != up.out_dim`.
     pub fn bind_dense_mlp(&mut self, id: StageId, weights: MlpWeights<'_>) -> Result<()> {
-        let up = linear_from(&self.device, &weights.up)?;
-        let down = linear_from(&self.device, &weights.down)?;
         if weights.up.out_dim != weights.down.in_dim {
             return Err(CortexError::InvalidConfig(format!(
                 "candle dense MLP down.in_dim ({}) must equal up.out_dim ({})",
                 weights.down.in_dim, weights.up.out_dim
             )));
         }
+        let up = linear_from(&self.device, &weights.up)?;
+        let down = linear_from(&self.device, &weights.down)?;
         self.params
             .insert(id, StageParams::DenseMlp(MlpParams { up, down }));
         Ok(())
@@ -582,7 +577,7 @@ impl AnnExecutor for CandleExecutor {
                     return Err(missing(stage_id));
                 };
                 let linear = linear.clone();
-                let in_dim = linear_in_dim(&linear);
+                let in_dim = linear_in_dim(&linear)?;
                 run_module(stage_id, inputs, in_dim, |x| linear.forward(x))
             }
             StageKind::Add => run_add(stage_id, inputs),
@@ -728,24 +723,33 @@ fn linear_from(device: &Device, weights: &LinearWeights<'_>) -> Result<Linear> {
     Ok(Linear::new(weight, bias))
 }
 
-fn linear_in_dim(linear: &Linear) -> usize {
-    linear.weight().dims().get(1).copied().unwrap_or(0)
+fn linear_in_dim(linear: &Linear) -> Result<usize> {
+    linear.weight().dims().get(1).copied().ok_or_else(|| {
+        CortexError::InvalidConfig(
+            "candle linear weight must be rank 2 [out_dim, in_dim]".to_string(),
+        )
+    })
 }
 
-fn norm_width(weight: &[f32], bias: &[f32], eps: f32, op: &'static str) -> Result<usize> {
+fn scale_width(weight: &[f32], eps: f32, op: &'static str) -> Result<usize> {
     if !(eps.is_finite() && eps > 0.0) {
         return Err(CortexError::InvalidEpsilon { eps });
     }
     if weight.is_empty() {
         return Err(CortexError::ZeroWidth { op, axis: 0 });
     }
+    Ok(weight.len())
+}
+
+fn norm_width(weight: &[f32], bias: &[f32], eps: f32, op: &'static str) -> Result<usize> {
+    let hidden = scale_width(weight, eps, op)?;
     if weight.len() != bias.len() {
         return Err(CortexError::ShapeMismatch {
             expected: vec![weight.len()],
             got: vec![bias.len()],
         });
     }
-    Ok(weight.len())
+    Ok(hidden)
 }
 
 fn prepare_embedding(device: &Device, weights: &EmbeddingWeights<'_>) -> Result<EmbeddingParams> {
@@ -1013,7 +1017,7 @@ fn run_dense_mlp(
     params: &MlpParams,
     inputs: &[StageInput<'_, CandleTensor>],
 ) -> Result<CandleTensor> {
-    let in_dim = linear_in_dim(&params.up);
+    let in_dim = linear_in_dim(&params.up)?;
     run_module(stage_id, inputs, in_dim, |x| {
         let hidden = params.up.forward(x)?;
         let hidden = Activation::NewGelu.forward(&hidden)?;
@@ -1026,7 +1030,7 @@ fn run_gated_mlp(
     params: &GatedParams,
     inputs: &[StageInput<'_, CandleTensor>],
 ) -> Result<CandleTensor> {
-    let in_dim = linear_in_dim(&params.gate);
+    let in_dim = linear_in_dim(&params.gate)?;
     run_module(stage_id, inputs, in_dim, |x| {
         let gate = params.gate.forward(x)?;
         let up = params.up.forward(x)?;
