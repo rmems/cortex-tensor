@@ -42,6 +42,11 @@ axon-encoder = ["dep:axon-encoder"]
 # GPU kernels. Default features of both crates are empty; disable them
 # explicitly so a future default cannot pull those backends in.
 candle = ["dep:candle-core", "dep:candle-nn"]
+# Burn adapter slot. Not in `default`. This stays a structured stub and does
+# not depend on the `burn` crate. burn 0.21's rust-version 1.92 is a minimum
+# and is compatible with this pin; omitting the dependency is policy, not a
+# toolchain conflict.
+burn = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
