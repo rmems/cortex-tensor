@@ -4,14 +4,31 @@ use crate::types::EMBEDDING_DIM;
 use std::io::Write;
 use std::path::PathBuf;
 
+/// GGUF wire constants used only to synthesize fixtures. Parsing is engram-parser's.
+pub(crate) const GGUF_MAGIC: [u8; 4] = *b"GGUF";
+pub(crate) const GGUF_VERSION: u32 = 3;
+pub(crate) const GGML_TYPE_F32: u32 = 0;
+pub(crate) const GGML_TYPE_F16: u32 = 1;
+pub(crate) const GGML_TYPE_IQ3_S: u32 = 21;
+const GGUF_VALUE_TYPE_UINT32: u32 = 4;
+const GGUF_VALUE_TYPE_STRING: u32 = 8;
+
 pub(crate) fn write_temp_file(bytes: &[u8], label: &str) -> PathBuf {
+    write_temp_file_with_extension(bytes, label, "gguf")
+}
+
+pub(crate) fn write_temp_file_with_extension(
+    bytes: &[u8],
+    label: &str,
+    extension: &str,
+) -> PathBuf {
     let mut path = std::env::current_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
         .join("target")
         .join("test-gguf");
     std::fs::create_dir_all(&path).ok();
     path.push(format!(
-        "corinth_canal_{label}_{}.gguf",
+        "corinth_canal_{label}_{}.{extension}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -42,86 +59,13 @@ pub(crate) fn push_kv_raw(out: &mut Vec<u8>, key: &str, value_type: u32, payload
 }
 
 pub(crate) fn push_kv_u32(out: &mut Vec<u8>, key: &str, value: u32) {
-    push_kv_raw(
-        out,
-        key,
-        super::GGUF_VALUE_TYPE_UINT32,
-        &value.to_le_bytes(),
-    );
+    push_kv_raw(out, key, GGUF_VALUE_TYPE_UINT32, &value.to_le_bytes());
 }
 
 pub(crate) fn push_kv_string(out: &mut Vec<u8>, key: &str, value: &str) {
     let mut payload = Vec::new();
     push_string(&mut payload, value);
-    push_kv_raw(out, key, super::GGUF_VALUE_TYPE_STRING, &payload);
-}
-
-pub(crate) fn push_kv_i8(out: &mut Vec<u8>, key: &str, value: i8) {
-    push_kv_raw(
-        out,
-        key,
-        super::GGUF_VALUE_TYPE_INT8,
-        &(value as u8).to_le_bytes(),
-    );
-}
-
-pub(crate) fn push_kv_i16(out: &mut Vec<u8>, key: &str, value: i16) {
-    push_kv_raw(
-        out,
-        key,
-        super::GGUF_VALUE_TYPE_INT16,
-        &(value as u16).to_le_bytes(),
-    );
-}
-
-pub(crate) fn push_kv_i32(out: &mut Vec<u8>, key: &str, value: i32) {
-    push_kv_raw(
-        out,
-        key,
-        super::GGUF_VALUE_TYPE_INT32,
-        &(value as u32).to_le_bytes(),
-    );
-}
-
-pub(crate) fn push_kv_i64(out: &mut Vec<u8>, key: &str, value: i64) {
-    push_kv_raw(
-        out,
-        key,
-        super::GGUF_VALUE_TYPE_INT64,
-        &(value as u64).to_le_bytes(),
-    );
-}
-
-pub(crate) fn push_kv_bool(out: &mut Vec<u8>, key: &str, value: bool) {
-    push_kv_raw(out, key, super::GGUF_VALUE_TYPE_BOOL, &[value as u8]);
-}
-
-pub(crate) fn push_kv_f32(out: &mut Vec<u8>, key: &str, value: f32) {
-    push_kv_raw(
-        out,
-        key,
-        super::GGUF_VALUE_TYPE_FLOAT32,
-        &value.to_le_bytes(),
-    );
-}
-
-pub(crate) fn push_kv_f64(out: &mut Vec<u8>, key: &str, value: f64) {
-    push_kv_raw(
-        out,
-        key,
-        super::GGUF_VALUE_TYPE_FLOAT64,
-        &value.to_le_bytes(),
-    );
-}
-
-pub(crate) fn push_kv_array_u32(out: &mut Vec<u8>, key: &str, values: &[u32]) {
-    let mut payload = Vec::new();
-    push_u32(&mut payload, super::GGUF_VALUE_TYPE_UINT32);
-    push_u64(&mut payload, values.len() as u64);
-    for value in values {
-        push_u32(&mut payload, *value);
-    }
-    push_kv_raw(out, key, super::GGUF_VALUE_TYPE_ARRAY, &payload);
+    push_kv_raw(out, key, GGUF_VALUE_TYPE_STRING, &payload);
 }
 
 pub(crate) fn build_test_gguf(
@@ -129,9 +73,18 @@ pub(crate) fn build_test_gguf(
     alignment: u32,
     hidden_size: usize,
 ) -> Vec<u8> {
+    build_test_gguf_with_expert_count(tensors, alignment, hidden_size, 64)
+}
+
+pub(crate) fn build_test_gguf_with_expert_count(
+    tensors: Vec<(&str, Vec<usize>, u32, Vec<u8>)>,
+    alignment: u32,
+    hidden_size: usize,
+    expert_count: u32,
+) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(&super::GGUF_MAGIC);
-    push_u32(&mut out, super::GGUF_VERSION);
+    out.extend_from_slice(&GGUF_MAGIC);
+    push_u32(&mut out, GGUF_VERSION);
     push_u64(&mut out, tensors.len() as u64);
     push_u64(&mut out, 7);
     push_kv_u32(&mut out, "general.alignment", alignment);
@@ -143,7 +96,7 @@ pub(crate) fn build_test_gguf(
         hidden_size as u32,
     );
     push_kv_u32(&mut out, "reference_moe.block_count", 16);
-    push_kv_u32(&mut out, "reference_moe.expert_count", 64);
+    push_kv_u32(&mut out, "reference_moe.expert_count", expert_count);
     push_kv_u32(&mut out, "reference_moe.expert_used_count", 8);
 
     let mut data_offset = 0usize;
@@ -177,19 +130,19 @@ pub(crate) fn build_real_size_checkpoint(gate_payload: Vec<u8>) -> Vec<u8> {
             (
                 "blk.0.ffn_gate_inp.weight",
                 vec![EMBEDDING_DIM, 64],
-                super::GGML_TYPE_F32,
+                GGML_TYPE_F32,
                 gate_payload,
             ),
             (
                 "blk.0.attn_q.weight",
                 vec![EMBEDDING_DIM, EMBEDDING_DIM],
-                super::GGML_TYPE_F16,
+                GGML_TYPE_F16,
                 attn_q_payload,
             ),
             (
                 "token_embd.weight",
                 vec![EMBEDDING_DIM, 32],
-                super::GGML_TYPE_F16,
+                GGML_TYPE_F16,
                 vec![0u8; EMBEDDING_DIM * 32 * 2],
             ),
         ],

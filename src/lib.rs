@@ -15,7 +15,7 @@
 //! | `adapter` | Optional Candle `AnnExecutor` (`candle` feature); absent from default builds |
 //! | [`tensor`] | Reference-backend `Tensor`, fallible construction, core ops |
 //! | [`transformer`] | Reference-backend transformer blocks |
-//! | [`moe`] | Reference-backend MoE routing; in-tree GGUF is transitional (issue 47) |
+//! | [`moe`] | Reference-backend MoE routing; checkpoints come from `engram-parser` 0.3.0 |
 //! | [`snn`] | SNN execution contract + optional crate-backed adapters |
 //! | [`types`] | Shared types used by `moe` |
 //! | [`error`] | `CortexError` unified error type |

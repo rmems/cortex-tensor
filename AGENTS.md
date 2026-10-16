@@ -6,7 +6,7 @@ Guidance for coding agents (Amp, Codex, Cursor, Claude Code, and others) working
 
 `cortex-tensor` is a pure-Rust library of tensor, transformer, and Mixture-of-Experts building blocks
 (see `README.md`). It has no CUDA, no Julia FFI and no framework dependency: the tensor type is a
-contiguous row-major `Vec<f32>` plus a shape. It includes a GGUF checkpoint bridge for MoE routing.
+contiguous row-major `Vec<f32>` plus a shape. Checkpoint bytes come from `engram-parser` 0.3.0; this crate binds them into MoE routing.
 The design goals in the README (zero GPU coupling, zero framework dependency, small dependency set)
 are constraints: don't add GPU code or heavy ML frameworks.
 
@@ -16,7 +16,7 @@ are constraints: don't add GPU code or heavy ML frameworks.
 |------|----------|
 | `src/tensor/` | Row-major `Tensor`, ops (matmul, softmax, norms), finite-value policy |
 | `src/transformer/` | Attention, transformer block, decoder-only LM |
-| `src/moe/` | MoE router, GGUF checkpoint parsing/dequant, adapters, routing |
+| `src/moe/` | MoE router, engram-parser checkpoint binding, adapters, routing |
 | `src/snn/` | Optional SNN backend/encoder adapters |
 | `src/stage.rs`, `src/reference_json.rs`, `src/types.rs`, `src/error.rs` | Stage execution, reference serde, shared types, errors |
 | `tests/` (+ `tests/fixtures/`) | Integration tests (public API compatibility, reference serde, stage execution) |

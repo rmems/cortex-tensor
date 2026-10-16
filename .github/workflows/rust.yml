@@ -43,6 +43,12 @@ jobs:
     - name: Run tests (all features)
       run: cargo test --verbose --all-features
 
+    - name: Test zip compatibility facade
+      run: |
+        cargo test --verbose --manifest-path compat/zip/Cargo.toml
+        cargo fmt --manifest-path compat/zip/Cargo.toml -- --check
+        cargo clippy --manifest-path compat/zip/Cargo.toml --all-targets -- -D warnings
+
     - name: Run tests (default features)
       run: cargo test --verbose
 
