@@ -1,4 +1,5 @@
 /target
+compat/zip/target
 
 # Cargo lockfile (for library projects)
 Cargo.lock

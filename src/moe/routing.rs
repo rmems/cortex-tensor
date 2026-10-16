@@ -1,32 +1,44 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Routing math and embedding resampling for the GGUF router bridge.
+//! Routing math and embedding resampling for checkpoint-backed gates.
 //!
 //! Top-k expert selection is a pure helper with a documented total order:
 //! finite scores descending, ascending expert ID on ties, typed NaN
 //! rejection, and explicit ±Inf ranking. See [`top_k_indices`].
 
-use super::checkpoint::{GgufTensorInfo, MappedGgufCheckpoint};
 use crate::error::{HybridError, Result};
 use crate::tensor::finite::{l2_normalize, softmax_vec};
 use crate::types::ExtractTokenOptions;
 use std::cmp::Ordering;
 
 pub(super) fn checkpoint_gate_scores(
-    checkpoint: &MappedGgufCheckpoint,
+    dims: &[usize],
+    weights: &[f32],
     model_path: &str,
     routing_tensor_name: &str,
     num_experts: usize,
     embedding: &[f32],
 ) -> Result<Vec<f32>> {
-    let info = checkpoint.tensor_info(routing_tensor_name, model_path)?;
-    let weights = checkpoint.f32_tensor(routing_tensor_name, model_path)?;
+    if dims.len() != 2 {
+        return Err(HybridError::UnsupportedFormat(format!(
+            "routing tensor '{routing_tensor_name}' must be rank-2 F32 in '{model_path}', got dims={dims:?}"
+        )));
+    }
     let mut gate_scores = Vec::with_capacity(num_experts);
     for expert_id in 0..num_experts {
         let mut score = 0.0f32;
         for (dim, &value) in embedding.iter().enumerate() {
-            let index = routing_weight_index(info, expert_id, dim, num_experts, embedding.len())?;
-            score += weights[index] * value;
+            let index = routing_weight_index(dims, expert_id, dim, num_experts, embedding.len())?;
+            let weight = weights
+                .get(index)
+                .copied()
+                .ok_or_else(|| HybridError::ModelLoad {
+                    path: model_path.to_owned(),
+                    reason: format!(
+                        "routing index {index} out of range for '{routing_tensor_name}'"
+                    ),
+                })?;
+            score += weight * value;
         }
         gate_scores.push(score);
     }
@@ -164,26 +176,32 @@ pub(super) fn apply_extract_token_options(input: &[f32], options: ExtractTokenOp
     out
 }
 
+/// Index one gate weight in outermost-first row-major order.
+///
+/// The last axis is the contiguous on-disk axis (GGUF `ne[0]` after
+/// engram-parser reverses the shape). A gate stored as `ne = [hidden, experts]`
+/// is `[experts, hidden]` here, so expert `e` occupies
+/// `weights[e * hidden + dim]`. A square matrix has no shape cue for which
+/// axis is hidden; expert rows still win because the contiguous axis is hidden.
 fn routing_weight_index(
-    tensor: &GgufTensorInfo,
+    dims: &[usize],
     expert_id: usize,
     dim: usize,
     num_experts: usize,
     hidden_size: usize,
 ) -> Result<usize> {
-    let d0 = tensor.dims[0];
-    let d1 = tensor.dims[1];
+    let d0 = dims[0];
+    let d1 = dims[1];
 
+    if d1 == hidden_size && d0 >= num_experts {
+        return Ok(expert_id * d1 + dim);
+    }
     if d0 == hidden_size && d1 >= num_experts {
         return Ok(dim * d1 + expert_id);
     }
-    if d0 >= num_experts && d1 == hidden_size {
-        return Ok(expert_id * d1 + dim);
-    }
 
     Err(HybridError::UnsupportedFormat(format!(
-        "unsupported routing tensor orientation {:?} for hidden_size={hidden_size}",
-        tensor.dims
+        "unsupported routing tensor orientation {dims:?} for hidden_size={hidden_size}"
     )))
 }
 

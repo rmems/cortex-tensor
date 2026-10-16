@@ -53,11 +53,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 rand = "0.10"
-rayon = "1.7"
-memmap2 = "0.9"
-half = "2"
 neuromod = { version = "0.7", optional = true }
 axon-encoder = { version = "0.5", optional = true }
+# Checkpoint substrate. Validated against engram-parser 0.3.0.
+# `safetensors` is required so GGUF and Safetensors share one open path.
+# `mmap` stays off: this crate does not own checkpoint mmap policy (RM-1265).
+engram-parser = { version = "0.3.0", default-features = false, features = ["safetensors"] }
 candle-core = { version = "0.11", optional = true, default-features = false }
 candle-nn = { version = "0.11", optional = true, default-features = false }
 
@@ -67,3 +68,10 @@ lto = "fat"
 
 [workspace]
 # Standalone: detach from any parent Cargo workspace.
+
+[patch.crates-io]
+# zip 8.6.0 was yanked on 2026-10-16. candle-core 0.11 still requires
+# zip ^8.6.0, and 9.0.3 is outside that range. compat/zip is 9.0.3 behind
+# the 8.6 method names candle calls. Patches apply only when this package
+# is the Cargo root (CI and local builds).
+zip = { path = "compat/zip" }

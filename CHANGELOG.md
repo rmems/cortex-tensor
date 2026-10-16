@@ -9,8 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking (checkpoint binding):** `MoeRouter` loads GGUF and Safetensors through published `engram-parser` 0.3.0 (`default-features = false`, `features = ["safetensors"]`; `mmap` is not enabled). Tensor shapes are that crate's outermost-first order, and gate weights are row-major on those shapes (GGUF `ne[0]` is the contiguous axis). Q8_0, Q5_K, and Q6_K rows are dequantized by engram-parser, including Q5_K's low-nibble-then-high-nibble group order. IQ3_S and IQ3_XXS stay explicit errors (engram-parser 0.3.0 does not decode those wire types). A checkpoint with no `general.file_type` reports quantization `unknown`. Validated against engram-parser 0.3.0 (RM-1265 / issue 47).
+- `MappedCheckpoint` is a temporary router binding shim. Remove it when callers take `engram_parser::Checkpoint` directly. Malformed input returns the engram-parser error; there is no in-tree parser fallback.
+- A loaded router decodes the F32 gate once and keeps the token-embedding payload, then releases the rest of the checkpoint. `mmap` stays off. A stored `expert_count` of 0 is rejected. Token lookup continues past an unsupported `token_embd.weight` and also accepts `embed_tokens.weight` names. Gate suffix search orders `layers.N`, `layer.N`, and `block(s).N` numerically, same as `blk.N` (RM-1265).
+
+### Removed
+
+- In-tree GGUF header/KV/tensor-directory parsing, copy-on-write mmap, `src/moe/gguf.rs`, and `src/moe/dequant.rs`. The `memmap2` and `half` dependencies are gone (RM-1265).
+
+### Changed
+
 - Crate identity is a backend-neutral ANN stage layer plus a deterministic `Vec<f32>` reference backend. README and Cargo description say so. Checkpoint parsing stays in engram-parser, orchestration stays in hybrid-fusion, and the closed decision not to merge hybrid-fusion (issue 35) stands. No new framework-generic numerical API (issue 56).
-- Parser-boundary docs no longer tell maintainers to wrap `parse_checkpoint_layout` around engram-parser 0.2.0. Issue 47's target is published engram-parser 0.3.x checkpoint/tensor APIs. This change does not consume that crate.
+- Parser-boundary docs point at the engram-parser 0.3.0 consume in this unreleased section (RM-1265). The older plan to wrap `parse_checkpoint_layout` around engram-parser 0.2.0 stays superseded.
 
 ### Added
 
@@ -34,9 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking:** `RoutingMode::SpikingSim` and the embedded SNN simulation in `MoeRouter` — `expert_membranes`, `hidden_membranes`, hard-coded `threshold`/`decay`, `reset_state()`, and `spiking_moe_routing` (RM-1824). Spiking routing lives in `snn::SpikingMoeRouter` over a crate-backed `SnnBackend`.
 - **Breaking:** SAAQ/GPU synapse-source policy — `RouterMetadata.preferred_gpu_synapse_tensor_name`, `RouterMetadata.synapse_source`, `MoeRouter::preferred_gpu_synapse_tensor_name()`, `real_gpu_synapse_tensor_name()`, `synapse_source()`, and the crate-internal `synapse_weights_f16` helper (RM-1824). That policy moves downstream to `corinth-canal` / `grok-ozempic`; `synapse_source` manifest labels should be emitted by those pipelines (consumers such as `Surrogate_Viz.jl` keep reading existing artifacts).
+- Unused `rayon` dependency: removed from `Cargo.toml` and from the README allowed-dependencies list. No kernel referenced it (kernels are sequential), so downstream builds no longer compile it; re-add only alongside a deterministic parallel kernel (RM-2099).
 
 ### Fixed
 
+- Optional `candle` builds after crates.io yanked `zip` 8.6.0 (2026-10-16). `candle-core` 0.11 requires `zip ^8.6.0`, which cannot select the unyanked 9.0.3 release. `[patch.crates-io]` points at `compat/zip`, a facade of zip 9.0.3 that restores `ZipFile::name() -> &str` and `file_names()` items candle 0.11 calls. The patch applies when this repository is the Cargo root.
 - Tensor constructors and JSON deserialization validate shape products and row-major stride arithmetic with checked multiplication, rejecting overflowing extents in release instead of wrapping to `numel == 0` (RM-1488). Documented rank-0 scalar vs zero-axis contracts and `mean()` returning `NaN` on empty tensors.
 - `MoeRouter::extract_token_embedding` returns checkpoint-native `hidden_size` without implicit resample to `EMBEDDING_DIM` or L2 normalization (RM-1519). Use `ExtractTokenOptions::for_projector_forward()` when feeding `MoeRouter::forward`.
 - MoE top-k routing now uses a total order: finite scores descending, ascending expert ID on ties, typed NaN rejection, and explicit ±Inf ranking (RM-1355). Selection ranks raw gate/membrane scores before softmax so non-finite logits cannot be masked into uniform weights.
@@ -48,7 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fallible `Tensor::try_softmax_last` / `ops::try_softmax` for rank validation on softmax.
 - Fallible, overflow-safe tensor construction (`Tensor::try_from_vec`) and checked ops (`try_matmul`, `try_batched_matmul`, `try_embedding`, `try_layer_norm`, `try_rms_norm`) that validate rank, shape, and size before allocating (RM-1353).
 - Structured `CortexError` variants for rank mismatch, axis dimension mismatch, out-of-vocabulary token ids, invalid epsilon, zero-width normalization, and `usize` size overflow.
-- CPU routing-tensor orientation check (one dim must equal `hidden_size`) and token-embedding shape/type validation for F32/F16/Q8_0/Q5_K. Does not add Q6_K/IQ3_* dequant.
+- CPU routing-tensor orientation check (one dim must equal `hidden_size`) and token-embedding shape/type validation for F32/F16/Q8_0/Q5_K/Q6_K. IQ3 wire types are not bound.
 
 ### Changed
 
