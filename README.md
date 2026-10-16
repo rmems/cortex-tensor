@@ -234,7 +234,7 @@ This crate **does not own**:
 - Specialized SNN/hybrid GPU kernels — `myelin-accelerator`.
 - Tokenization and automatic differentiation (see [Non-goals](#non-goals)).
 
-**Allowed dependencies:** `serde`, `serde_json`, `thiserror`, `rand`, `rayon`, and `engram-parser` 0.3.0 with the `safetensors` feature — plus optional feature-gated adapters (`neuromod`, `axon-encoder`, and the `candle` feature's `candle-core` and `candle-nn`, CPU only; CUDA, MKL, and Metal stay off), evaluated individually.
+**Allowed dependencies:** `serde`, `serde_json`, `thiserror`, `rand`, and `engram-parser` 0.3.0 with the `safetensors` feature — plus optional feature-gated adapters (`neuromod`, `axon-encoder`, and the `candle` feature's `candle-core` and `candle-nn`, CPU only; CUDA, MKL, and Metal stay off), evaluated individually.
 
 **Forbidden dependencies:** GPU backends (`cust`) as core dependencies,
 making an inference framework (`candle`, `burn`, `tch`, `ort`) a required

@@ -43,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking:** `RoutingMode::SpikingSim` and the embedded SNN simulation in `MoeRouter` — `expert_membranes`, `hidden_membranes`, hard-coded `threshold`/`decay`, `reset_state()`, and `spiking_moe_routing` (RM-1824). Spiking routing lives in `snn::SpikingMoeRouter` over a crate-backed `SnnBackend`.
 - **Breaking:** SAAQ/GPU synapse-source policy — `RouterMetadata.preferred_gpu_synapse_tensor_name`, `RouterMetadata.synapse_source`, `MoeRouter::preferred_gpu_synapse_tensor_name()`, `real_gpu_synapse_tensor_name()`, `synapse_source()`, and the crate-internal `synapse_weights_f16` helper (RM-1824). That policy moves downstream to `corinth-canal` / `grok-ozempic`; `synapse_source` manifest labels should be emitted by those pipelines (consumers such as `Surrogate_Viz.jl` keep reading existing artifacts).
+- Unused `rayon` dependency: removed from `Cargo.toml` and from the README allowed-dependencies list. No kernel referenced it (kernels are sequential), so downstream builds no longer compile it; re-add only alongside a deterministic parallel kernel (RM-2099).
 
 ### Fixed
 
