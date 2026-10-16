@@ -16,15 +16,17 @@
 //! [`MappedCheckpoint`] exists so [`super::MoeRouter`] can keep its load,
 //! token-extract, and gate API while weight selection still lives here.
 //! Remove the shim when callers take an [`engram_parser::Checkpoint`] and
-//! perform this binding outside the crate. Do not add format parsers,
-//! dtype coverage, or mmap policy here.
+//! perform this binding outside the crate. Do not add format parsers or
+//! mmap policy here. Token rows call engram's Q8_0, Q5_K, and Q6_K
+//! decoders. IQ3_S stays an explicit error; engram 0.3.0 does not decode
+//! the IQ3_S or IQ3_XXS wire types.
 //!
 //! `Checkpoint::tensor_bytes` does not promise `f32` alignment. Values are
 //! copied with [`f32::from_le_bytes`], so this module has no `unsafe`.
 
 use engram_parser::checkpoint::{Checkpoint, MetadataValue, TensorDType, TensorInfo};
 use engram_parser::gguf::{
-    DType, dequantize_q5_k, dequantize_q8_0, f16_bits_to_f32, packed_row_size,
+    DType, dequantize_q5_k, dequantize_q6_k, dequantize_q8_0, f16_bits_to_f32, packed_row_size,
 };
 use engram_parser::{ParserError, open_checkpoint};
 use std::borrow::Cow;
@@ -72,6 +74,7 @@ pub(super) enum TensorKind {
     F16,
     Q8Block,
     Q5KBlock,
+    Q6KBlock,
     Iq3S,
     Other(String),
 }
@@ -83,6 +86,7 @@ impl fmt::Display for TensorKind {
             Self::F16 => f.write_str("F16"),
             Self::Q8Block => f.write_str("Q8_0"),
             Self::Q5KBlock => f.write_str("Q5_K"),
+            Self::Q6KBlock => f.write_str("Q6_K"),
             Self::Iq3S => f.write_str("IQ3_S"),
             Self::Other(label) => f.write_str(label),
         }
@@ -227,6 +231,15 @@ impl MappedCheckpoint {
                 tensor_name,
                 dequantize_q5_k,
             ),
+            TensorKind::Q6KBlock => dequantize_row(
+                DType::Q6_K,
+                &bytes,
+                hidden,
+                token_id,
+                path,
+                tensor_name,
+                dequantize_q6_k,
+            ),
             TensorKind::Iq3S => Err(HybridError::UnsupportedFormat(format!(
                 "tensor '{tensor_name}' uses IQ3_S token embeddings; use llama.cpp prompt embeddings for this checkpoint"
             ))),
@@ -285,6 +298,7 @@ fn kind_of(info: &TensorInfo) -> TensorKind {
         TensorDType::GgufPacked { ggml_type } => match DType::from_ggml_type(*ggml_type) {
             DType::Q8_0 => TensorKind::Q8Block,
             DType::Q5_K => TensorKind::Q5KBlock,
+            DType::Q6_K => TensorKind::Q6KBlock,
             DType::IQ3_S => TensorKind::Iq3S,
             other => TensorKind::Other(other.label().to_owned()),
         },
@@ -724,6 +738,43 @@ mod tests {
         assert!(matches!(
             err,
             HybridError::InputLengthMismatch { expected, got } if expected == vocab && got == 5
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn q6_k_token_row_delegates_to_engram() {
+        const GGML_TYPE_Q6_K: u32 = 14;
+        const Q6_K_BYTES: usize = 210;
+        let mut row0 = [0u8; Q6_K_BYTES];
+        for byte in &mut row0[192..208] {
+            *byte = 1;
+        }
+        row0[208..210].copy_from_slice(&0x3C00u16.to_le_bytes());
+        let mut row1 = row0;
+        row1[0] = 1;
+        let mut payload = Vec::with_capacity(Q6_K_BYTES * 2);
+        payload.extend_from_slice(&row0);
+        payload.extend_from_slice(&row1);
+        let bytes = build_native_tensor("token_embd.weight", GGML_TYPE_Q6_K, 256, 2, payload);
+        let path = write_temp_file(&bytes, "token_q6k");
+        let checkpoint = open_mapped_checkpoint(path.to_str().unwrap()).unwrap();
+        let first = checkpoint
+            .extract_token_embedding("token_embd.weight", path.to_str().unwrap(), 0)
+            .unwrap();
+        let second = checkpoint
+            .extract_token_embedding("token_embd.weight", path.to_str().unwrap(), 1)
+            .unwrap();
+        assert_eq!(first.len(), 256);
+        assert!(first.iter().all(|value| *value == -32.0));
+        assert_eq!(second[0], -31.0);
+        assert_eq!(second[32], -32.0);
+        let err = checkpoint
+            .extract_token_embedding("token_embd.weight", path.to_str().unwrap(), 2)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            HybridError::InputLengthMismatch { expected, got } if expected == 2 && got == 2
         ));
         let _ = std::fs::remove_file(path);
     }

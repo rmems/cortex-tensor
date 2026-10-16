@@ -16,7 +16,9 @@
 //! 0.3.0). This crate binds those tensors into reference-backend `f32`
 //! routing. It does not know the container format in the scoring loop.
 //! `MappedCheckpoint` is a temporary shim; see that module for the removal
-//! condition. Do not add format parsers or Q6_K / IQ3_* dequant here.
+//! condition. Token rows call engram's Q8_0, Q5_K, and Q6_K decoders.
+//! IQ3_S / IQ3_XXS stay errors: engram 0.3.0 does not decode those wire
+//! types. Do not reimplement packed dequant here.
 
 mod adapter;
 mod checkpoint;

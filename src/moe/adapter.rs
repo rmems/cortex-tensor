@@ -74,7 +74,7 @@ fn is_token_embedding_supported(info: &TensorView, hidden_size: usize) -> bool {
         && match info.kind {
             TensorKind::F32 | TensorKind::F16 => true,
             TensorKind::Q8Block => hidden_size.is_multiple_of(32),
-            TensorKind::Q5KBlock => hidden_size.is_multiple_of(256),
+            TensorKind::Q5KBlock | TensorKind::Q6KBlock => hidden_size.is_multiple_of(256),
             TensorKind::Iq3S | TensorKind::Other(_) => false,
         }
 }
