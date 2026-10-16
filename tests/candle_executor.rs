@@ -839,3 +839,25 @@ fn params_kind_mismatch_is_missing_params() {
         .unwrap_err();
     assert!(matches!(err, CortexError::MissingStageParams { .. }));
 }
+
+#[test]
+fn npz_roundtrip_through_zip_facade() {
+    let tensor =
+        candle_core::Tensor::from_slice(&[1f32, 2.0, 3.0, 4.0], (2, 2), &candle_core::Device::Cpu)
+            .expect("tensor");
+    let path = std::env::temp_dir().join(format!("cortex-tensor-npz-{}.npz", std::process::id()));
+    candle_core::Tensor::write_npz(&[("w", &tensor)], &path).expect("write npz");
+    let loaded = candle_core::Tensor::read_npz(&path).expect("read npz");
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].0, "w");
+    let values = loaded[0]
+        .1
+        .flatten_all()
+        .expect("flat")
+        .to_vec1::<f32>()
+        .expect("vec");
+    assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0]);
+    let by_name = candle_core::Tensor::read_npz_by_name(&path, &["w"]).expect("by name");
+    assert_eq!(by_name.len(), 1);
+    let _ = std::fs::remove_file(&path);
+}

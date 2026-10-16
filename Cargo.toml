@@ -63,3 +63,10 @@ lto = "fat"
 
 [workspace]
 # Standalone: detach from any parent Cargo workspace.
+
+[patch.crates-io]
+# zip 8.6.0 was yanked on 2026-10-16. candle-core 0.11 still requires
+# zip ^8.6.0, and 9.0.3 is outside that range. compat/zip is 9.0.3 behind
+# the 8.6 method names candle calls. Patches apply only when this package
+# is the Cargo root (CI and local builds).
+zip = { path = "compat/zip" }
