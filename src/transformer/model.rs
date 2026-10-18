@@ -96,7 +96,11 @@ impl TransformerConfig {
 
         let tok_embed = mul(self.vocab_size, self.dim)?;
         let pos_embed = mul(self.max_seq_len, self.dim)?;
-        let per_block = {
+        // With no layers there are no block tensors, so a per-block product
+        // that would overflow on its own must not fail the estimate.
+        let blocks = if self.num_layers == 0 {
+            0
+        } else {
             // MultiHeadAttention: wq/wk/wv/wo [dim, dim] + four [1, dim] biases.
             let attn = add(mul(mul(4, self.dim)?, self.dim)?, mul(4, self.dim)?)?;
             // FeedForward: w1 [dim, ff_dim], b1 [1, ff_dim], w2 [ff_dim, dim], b2 [1, dim].
@@ -106,9 +110,8 @@ impl TransformerConfig {
             )?;
             // Two LayerNorms, each with weight and bias of [dim].
             let ln = mul(4, self.dim)?;
-            add(add(attn, ffn)?, ln)?
+            mul(self.num_layers, add(add(attn, ffn)?, ln)?)?
         };
-        let blocks = mul(self.num_layers, per_block)?;
         let final_ln = mul(2, self.dim)?;
         let lm_head = mul(self.dim, self.vocab_size)?;
         add(
@@ -302,21 +305,47 @@ impl TransformerLM {
         tok.try_add(&pos)
     }
 
-    /// Total number of stored parameters, summed from the allocated tensors.
-    /// Equals [`TransformerConfig::estimated_params`] for a model built from
-    /// its config.
+    /// Total number of stored parameters, summed from the `numel()` of every
+    /// tensor the model holds (blocks included), so it tracks edits to the
+    /// public weight fields. Equals [`TransformerConfig::estimated_params`]
+    /// for a model built from its config.
     pub fn param_count(&self) -> usize {
         self.tok_embed.numel()
             + self.pos_embed.numel()
-            + self
-                .blocks
-                .iter()
-                .map(TransformerBlock::param_count)
-                .sum::<usize>()
+            + self.blocks.iter().map(stored_block_params).sum::<usize>()
             + self.final_ln_w.numel()
             + self.final_ln_b.numel()
             + self.lm_head.numel()
     }
+}
+
+/// `numel()` of every tensor stored in one block. Unlike
+/// [`TransformerBlock::param_count`], which derives its count from `dim`,
+/// this observes the tensors as they are.
+fn stored_block_params(block: &TransformerBlock) -> usize {
+    let attn = &block.attn;
+    let ffn = &block.ffn;
+    [
+        &attn.wq,
+        &attn.wk,
+        &attn.wv,
+        &attn.wo,
+        &attn.wb_q,
+        &attn.wb_k,
+        &attn.wb_v,
+        &attn.wb_o,
+        &ffn.w1,
+        &ffn.b1,
+        &ffn.w2,
+        &ffn.b2,
+        &block.ln1_w,
+        &block.ln1_b,
+        &block.ln2_w,
+        &block.ln2_b,
+    ]
+    .iter()
+    .map(|t| t.numel())
+    .sum()
 }
 
 #[cfg(test)]
@@ -427,37 +456,42 @@ mod tests {
         // 1,841,920 because it omitted pos_embed (256 * 128 = 32,768).
         let cfg = TransformerConfig::tiny();
         let model = TransformerLM::try_new(cfg.clone()).unwrap();
-        let actual = model.tok_embed.numel()
-            + model.pos_embed.numel()
-            + model
-                .blocks
-                .iter()
-                .map(|b| {
-                    b.attn.wq.numel()
-                        + b.attn.wk.numel()
-                        + b.attn.wv.numel()
-                        + b.attn.wo.numel()
-                        + b.attn.wb_q.numel()
-                        + b.attn.wb_k.numel()
-                        + b.attn.wb_v.numel()
-                        + b.attn.wb_o.numel()
-                        + b.ffn.w1.numel()
-                        + b.ffn.b1.numel()
-                        + b.ffn.w2.numel()
-                        + b.ffn.b2.numel()
-                        + b.ln1_w.numel()
-                        + b.ln1_b.numel()
-                        + b.ln2_w.numel()
-                        + b.ln2_b.numel()
-                })
-                .sum::<usize>()
-            + model.final_ln_w.numel()
-            + model.final_ln_b.numel()
-            + model.lm_head.numel();
+        // Per-layer formula check against the layers' own accounting.
+        for block in &model.blocks {
+            assert_eq!(stored_block_params(block), block.param_count());
+        }
+        let actual = model.param_count();
         assert_eq!(actual, 1_874_688);
         assert_eq!(cfg.estimated_params(), actual);
         assert_eq!(cfg.try_estimated_params().unwrap(), actual);
-        assert_eq!(model.param_count(), actual);
+    }
+
+    #[test]
+    fn param_count_tracks_edited_block_tensors() {
+        let mut model = TransformerLM::try_new(TransformerConfig::tiny()).unwrap();
+        let before = model.param_count();
+        // Public field: shrink ln1_w from [128] to [1].
+        model.blocks[0].ln1_w = Tensor::try_ones(&[1]).unwrap();
+        assert_eq!(model.param_count(), before - 127);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn estimated_params_zero_layers_skips_block_term() {
+        // 4 * dim * dim overflows, but with no layers that tensor never
+        // exists; the remaining terms fit comfortably.
+        let dim = 1usize << 32;
+        let cfg = TransformerConfig {
+            vocab_size: 1,
+            dim,
+            num_heads: 1,
+            num_layers: 0,
+            ff_dim: 1,
+            max_seq_len: 1,
+        };
+        // tok_embed + pos_embed + final_ln (2*dim) + lm_head = 5 * dim.
+        assert_eq!(cfg.try_estimated_params().unwrap(), 5 * dim);
+        assert_eq!(cfg.estimated_params(), 5 * dim);
     }
 
     #[test]

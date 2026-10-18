@@ -419,21 +419,13 @@ impl Tensor {
             // numel 0 but would otherwise iterate the huge axis.
             return Self::try_from_vec(Vec::new(), &[cols, rows]);
         }
-        let out_len = checked_numel(&[rows, cols])?;
-        let mut out = vec![0.0f32; out_len];
-        for (r, row) in self.data.chunks_exact(cols).enumerate() {
-            // `c * rows` cannot overflow: c < cols and rows * cols == out_len
-            // was just checked, but keep the arithmetic checked anyway.
-            let base = |c: usize| {
-                c.checked_mul(rows)
-                    .and_then(|v| v.checked_add(r))
-                    .ok_or_else(|| CortexError::SizeOverflow {
-                        shape: vec![cols, rows],
-                    })
-            };
-            for (c, &v) in row.iter().enumerate() {
-                out[base(c)?] = v;
-            }
+        let out_len = checked_numel(&[cols, rows])?;
+        let mut out = Vec::with_capacity(out_len);
+        // Output row `c` is input column `c`: elements `c, c + cols, ...`.
+        // Striding the iterator avoids computing `c * rows + r` offsets, so
+        // no index arithmetic can overflow.
+        for c in 0..cols {
+            out.extend(self.data.iter().skip(c).step_by(cols));
         }
         Self::try_from_vec(out, &[cols, rows])
     }
