@@ -24,21 +24,30 @@ pub(super) fn checkpoint_gate_scores(
             "routing tensor '{routing_tensor_name}' must be rank-2 F32 in '{model_path}', got dims={dims:?}"
         )));
     }
+    let hidden_size = embedding.len();
+    // Orientation is a property of the tensor, not of one element: resolve it
+    // once instead of O(E·H) times inside the dot-product loop.
+    let layout = resolve_gate_layout(dims, num_experts, hidden_size)?;
+    let required = dims[0]
+        .checked_mul(dims[1])
+        .filter(|&required| required <= weights.len())
+        .ok_or_else(|| HybridError::ModelLoad {
+            path: model_path.to_owned(),
+            reason: format!(
+                "routing tensor '{routing_tensor_name}' with dims {dims:?} needs {} weights, payload holds {}",
+                dims[0].saturating_mul(dims[1]),
+                weights.len()
+            ),
+        })?;
+    let weights = &weights[..required];
+
     let mut gate_scores = Vec::with_capacity(num_experts);
     for expert_id in 0..num_experts {
         let mut score = 0.0f32;
         for (dim, &value) in embedding.iter().enumerate() {
-            let index = routing_weight_index(dims, expert_id, dim, num_experts, embedding.len())?;
-            let weight = weights
-                .get(index)
-                .copied()
-                .ok_or_else(|| HybridError::ModelLoad {
-                    path: model_path.to_owned(),
-                    reason: format!(
-                        "routing index {index} out of range for '{routing_tensor_name}'"
-                    ),
-                })?;
-            score += weight * value;
+            // Every index is in range: `expert_id < num_experts <= expert axis`
+            // and `dim < hidden_size == hidden axis` were checked by `layout`.
+            score += weights[layout.index(expert_id, dim)] * value;
         }
         gate_scores.push(score);
     }
@@ -176,28 +185,49 @@ pub(super) fn apply_extract_token_options(input: &[f32], options: ExtractTokenOp
     out
 }
 
-/// Index one gate weight in outermost-first row-major order.
+/// Which axis of a rank-2 gate tensor is the expert axis.
 ///
-/// The last axis is the contiguous on-disk axis (GGUF `ne[0]` after
-/// engram-parser reverses the shape). A gate stored as `ne = [hidden, experts]`
-/// is `[experts, hidden]` here, so expert `e` occupies
-/// `weights[e * hidden + dim]`. A square matrix has no shape cue for which
-/// axis is hidden; expert rows still win because the contiguous axis is hidden.
-fn routing_weight_index(
+/// `dims` is engram-parser's outermost-first shape, so `dims[1]` is the
+/// contiguous on-disk axis (GGUF `ne[0]`), and `weights[r * dims[1] + c]` is
+/// row `r`, column `c`. llama.cpp creates `ffn_gate_inp` as
+/// `ne = [n_embd, n_expert]`, which arrives here as `[experts, hidden]`: expert
+/// `e` is the contiguous row `weights[e * hidden + dim]`. The transposed
+/// storage `[hidden, experts]` is also accepted; there expert `e` is the
+/// strided column `weights[dim * experts + e]`. A square matrix has no shape
+/// cue for which axis is which; expert rows win because that is llama.cpp's
+/// layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateLayout {
+    /// `[experts, hidden]`: expert rows, `hidden` contiguous.
+    ExpertRows { hidden: usize },
+    /// `[hidden, experts]`: expert columns, `experts` contiguous.
+    ExpertColumns { experts: usize },
+}
+
+impl GateLayout {
+    #[inline]
+    fn index(self, expert_id: usize, dim: usize) -> usize {
+        match self {
+            GateLayout::ExpertRows { hidden } => expert_id * hidden + dim,
+            GateLayout::ExpertColumns { experts } => dim * experts + expert_id,
+        }
+    }
+}
+
+/// Resolve the gate orientation from the outermost-first shape once per call.
+fn resolve_gate_layout(
     dims: &[usize],
-    expert_id: usize,
-    dim: usize,
     num_experts: usize,
     hidden_size: usize,
-) -> Result<usize> {
+) -> Result<GateLayout> {
     let d0 = dims[0];
     let d1 = dims[1];
 
     if d1 == hidden_size && d0 >= num_experts {
-        return Ok(expert_id * d1 + dim);
+        return Ok(GateLayout::ExpertRows { hidden: d1 });
     }
     if d0 == hidden_size && d1 >= num_experts {
-        return Ok(dim * d1 + expert_id);
+        return Ok(GateLayout::ExpertColumns { experts: d1 });
     }
 
     Err(HybridError::UnsupportedFormat(format!(
@@ -218,6 +248,151 @@ mod tests {
         assert_eq!(out.len(), 8);
         assert!((out[0] - 0.0).abs() < 1e-6);
         assert!((out[7] + 1.0).abs() < 1e-6);
+    }
+
+    /// Gate value `100 * expert + dim` so every cell is distinguishable, laid
+    /// out as `weights[expert * hidden + dim]` — the row-major view of a GGUF
+    /// `ffn_gate_inp` with `ne = [hidden, experts]` (outermost-first
+    /// `[experts, hidden]`), which is what engram-parser hands this crate.
+    fn marker_gate(experts: usize, hidden: usize) -> Vec<f32> {
+        let mut weights = vec![0.0f32; experts * hidden];
+        for expert in 0..experts {
+            for dim in 0..hidden {
+                weights[expert * hidden + dim] = (100 * expert + dim) as f32;
+            }
+        }
+        weights
+    }
+
+    fn one_hot(len: usize, hot: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; len];
+        out[hot] = 1.0;
+        out
+    }
+
+    #[test]
+    fn gate_index_follows_llama_cpp_expert_rows() {
+        // GGUF ne = [n_embd=32, n_expert=8]  →  outermost-first dims [8, 32].
+        let (experts, hidden) = (8usize, 32usize);
+        let dims = [experts, hidden];
+        let weights = marker_gate(experts, hidden);
+        let layout = resolve_gate_layout(&dims, experts, hidden).unwrap();
+        assert_eq!(layout, GateLayout::ExpertRows { hidden });
+        for expert in 0..experts {
+            for dim in 0..hidden {
+                let index = layout.index(expert, dim);
+                assert_eq!(
+                    weights[index],
+                    (100 * expert + dim) as f32,
+                    "expert {expert} dim {dim} resolved to index {index}"
+                );
+            }
+        }
+        // The issue's repro: input e_7 must see expert 5's cell, not a
+        // transposed read of row 7's cell.
+        assert_eq!(weights[layout.index(5, 7)], 507.0);
+    }
+
+    #[test]
+    fn gate_index_accepts_transposed_expert_columns() {
+        // Transposed storage: ne = [n_expert=8, n_embd=32] → dims [32, 8], so
+        // expert `e` is a strided column `weights[dim * experts + e]`.
+        let (experts, hidden) = (8usize, 32usize);
+        let dims = [hidden, experts];
+        let mut weights = vec![0.0f32; experts * hidden];
+        for dim in 0..hidden {
+            for expert in 0..experts {
+                weights[dim * experts + expert] = (100 * expert + dim) as f32;
+            }
+        }
+        let layout = resolve_gate_layout(&dims, experts, hidden).unwrap();
+        assert_eq!(layout, GateLayout::ExpertColumns { experts });
+        for expert in 0..experts {
+            for dim in 0..hidden {
+                assert_eq!(
+                    weights[layout.index(expert, dim)],
+                    (100 * expert + dim) as f32
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gate_scores_pick_marked_cell_for_one_hot_input() {
+        let (experts, hidden) = (8usize, 32usize);
+        let dims = [experts, hidden];
+        let weights = marker_gate(experts, hidden);
+        for dim in [0usize, 7, 31] {
+            let scores = checkpoint_gate_scores(
+                &dims,
+                &weights,
+                "marker",
+                "gate",
+                experts,
+                &one_hot(hidden, dim),
+            )
+            .unwrap();
+            let expected: Vec<f32> = (0..experts).map(|e| (100 * e + dim) as f32).collect();
+            assert_eq!(scores, expected, "input e_{dim}");
+        }
+    }
+
+    #[test]
+    fn gate_scores_select_the_expert_whose_row_matches() {
+        // Issue #89 repro: H=32, E=8, expert-5 row all ones, input e_0.
+        // llama.cpp semantics: logit_e = Σ_d W[e*H + d]·x[d] → expert 5 wins.
+        // A transposed read yields all-zero scores and selects expert 0.
+        let (experts, hidden) = (8usize, 32usize);
+        let dims = [experts, hidden];
+        let mut weights = vec![0.0f32; experts * hidden];
+        weights[5 * hidden..6 * hidden].fill(1.0);
+        let scores = checkpoint_gate_scores(
+            &dims,
+            &weights,
+            "repro",
+            "gate",
+            experts,
+            &one_hot(hidden, 0),
+        )
+        .unwrap();
+        let (_, selected) = route_top_k(&scores, 1).unwrap();
+        assert_eq!(selected, vec![5]);
+        assert_eq!(scores[5], 1.0);
+        assert!(scores.iter().enumerate().all(|(e, s)| e == 5 || *s == 0.0));
+    }
+
+    #[test]
+    fn gate_scores_with_more_rows_than_experts_still_use_expert_rows() {
+        // Shape cue only requires `d0 >= num_experts`: a 64-row gate routed
+        // over 8 experts reads rows 0..8.
+        let (rows, experts, hidden) = (64usize, 8usize, 32usize);
+        let dims = [rows, hidden];
+        let weights = marker_gate(rows, hidden);
+        let scores = checkpoint_gate_scores(
+            &dims,
+            &weights,
+            "wide",
+            "gate",
+            experts,
+            &one_hot(hidden, 3),
+        )
+        .unwrap();
+        assert_eq!(scores.len(), experts);
+        assert_eq!(scores[7], 703.0);
+    }
+
+    #[test]
+    fn gate_scores_reject_short_payload_and_unknown_orientation() {
+        let dims = [8usize, 32usize];
+        let short = vec![0.0f32; 8 * 32 - 1];
+        let err =
+            checkpoint_gate_scores(&dims, &short, "short", "gate", 8, &one_hot(32, 0)).unwrap_err();
+        assert!(matches!(err, HybridError::ModelLoad { .. }), "{err}");
+
+        let err = resolve_gate_layout(&[8, 16], 8, 32).unwrap_err();
+        assert!(matches!(err, HybridError::UnsupportedFormat(_)), "{err}");
+        let err = resolve_gate_layout(&[4, 32], 8, 32).unwrap_err();
+        assert!(matches!(err, HybridError::UnsupportedFormat(_)), "{err}");
     }
 
     #[test]
