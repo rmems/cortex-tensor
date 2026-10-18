@@ -349,18 +349,25 @@ pub struct AnnStage {
 ///
 /// Construct with [`AnnTopology::new`], which enforces that the graph is a
 /// well-formed DAG in topological order (every [`StageSource::Stage`] refers to
-/// an *earlier* stage). Carries no serde derives.
+/// an *earlier* stage), or with [`AnnTopology::with_external_stage_deps`] /
+/// [`SubSpan::to_topology`] to additionally admit references to stage outputs
+/// computed outside the topology and supplied at run time through
+/// [`ExternalBindings::with_stage_output`]. Carries no serde derives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnTopology {
     stages: Vec<AnnStage>,
+    external_stage_deps: Vec<StageId>,
 }
 
 /// A contiguous sub-span of a topology plus the inputs it depends on from
 /// outside the span.
 ///
-/// Returned by [`AnnTopology::sub_span`]. `external_deps` lists, in first-seen
-/// order, the stage ids produced *before* the span that the span references,
-/// followed by the [`StageSource::External`] ingress names it references.
+/// Returned by [`AnnTopology::sub_span`]. `external_stage_deps` lists, in
+/// first-seen order, the stage ids produced *before* the span that the span
+/// references; `external_inputs` lists the [`StageSource::External`] ingress
+/// names it references. [`SubSpan::to_topology`] turns the span into a
+/// runnable [`AnnTopology`] whose `external_stage_deps` must be satisfied with
+/// [`ExternalBindings::with_stage_output`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubSpan<'a> {
     /// The contiguous slice of stages, order preserved.
@@ -369,6 +376,28 @@ pub struct SubSpan<'a> {
     pub external_stage_deps: Vec<StageId>,
     /// Named external ingress the span consumes.
     pub external_inputs: Vec<String>,
+}
+
+impl SubSpan<'_> {
+    /// Build a runnable topology from this span.
+    ///
+    /// The stages are kept exactly as they are (same ids, kinds, and wiring);
+    /// the span's `external_stage_deps` become the topology's declared
+    /// external stage dependencies, so [`run_topology`] resolves each of them
+    /// from [`ExternalBindings::with_stage_output`] instead of from an earlier
+    /// stage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CortexError::InvalidTopology`] under the same conditions as
+    /// [`AnnTopology::with_external_stage_deps`]; not expected for a span taken
+    /// from a validated topology.
+    pub fn to_topology(&self) -> Result<AnnTopology> {
+        AnnTopology::with_external_stage_deps(
+            self.stages.to_vec(),
+            self.external_stage_deps.clone(),
+        )
+    }
 }
 
 impl AnnTopology {
@@ -381,27 +410,69 @@ impl AnnTopology {
     /// stage that is not strictly earlier in the list (a forward or self
     /// reference). [`StageSource::External`] inputs are always allowed.
     pub fn new(stages: Vec<AnnStage>) -> Result<Self> {
+        Self::with_external_stage_deps(stages, Vec::new())
+    }
+
+    /// Validate and construct a topology whose stages may also reference the
+    /// stage outputs listed in `external_stage_deps`, which are computed
+    /// outside this topology and bound at run time with
+    /// [`ExternalBindings::with_stage_output`].
+    ///
+    /// This is how a [`SubSpan`] becomes runnable (see
+    /// [`SubSpan::to_topology`]). With an empty `external_stage_deps` it is
+    /// exactly [`AnnTopology::new`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CortexError::InvalidTopology`] when the list is empty, when
+    /// two stages share an id, when any [`StageSource::Stage`] references a
+    /// stage that is neither strictly earlier in the list nor declared in
+    /// `external_stage_deps`, when a declared dependency is listed twice, is
+    /// also produced by a stage in the list, or is not referenced by any stage.
+    pub fn with_external_stage_deps(
+        stages: Vec<AnnStage>,
+        external_stage_deps: Vec<StageId>,
+    ) -> Result<Self> {
         if stages.is_empty() {
             return Err(CortexError::InvalidTopology {
                 reason: "topology must contain at least one stage".to_string(),
             });
         }
+        let mut declared: BTreeSet<&StageId> = BTreeSet::new();
+        for dep in &external_stage_deps {
+            if !declared.insert(dep) {
+                return Err(CortexError::InvalidTopology {
+                    reason: format!("external stage dependency '{dep}' is declared twice"),
+                });
+            }
+        }
+        let mut referenced: BTreeSet<&StageId> = BTreeSet::new();
         let mut seen: BTreeSet<&StageId> = BTreeSet::new();
         for stage in &stages {
             // Validate inputs against *earlier* stages before admitting this
             // stage's own id, so a self-reference is rejected like any other
             // forward reference.
             for source in &stage.inputs {
-                if let StageSource::Stage(dep) = source
-                    && !seen.contains(dep)
-                {
-                    return Err(CortexError::InvalidTopology {
-                        reason: format!(
-                            "stage '{}' references stage '{dep}', which is not an earlier stage",
-                            stage.id
-                        ),
-                    });
+                if let StageSource::Stage(dep) = source {
+                    if declared.contains(dep) {
+                        referenced.insert(dep);
+                    } else if !seen.contains(dep) {
+                        return Err(CortexError::InvalidTopology {
+                            reason: format!(
+                                "stage '{}' references stage '{dep}', which is not an earlier stage",
+                                stage.id
+                            ),
+                        });
+                    }
                 }
+            }
+            if declared.contains(&stage.id) {
+                return Err(CortexError::InvalidTopology {
+                    reason: format!(
+                        "external stage dependency '{}' is also produced by the topology",
+                        stage.id
+                    ),
+                });
             }
             if !seen.insert(&stage.id) {
                 return Err(CortexError::InvalidTopology {
@@ -409,12 +480,33 @@ impl AnnTopology {
                 });
             }
         }
-        Ok(Self { stages })
+        if let Some(unused) = external_stage_deps
+            .iter()
+            .find(|dep| !referenced.contains(dep))
+        {
+            return Err(CortexError::InvalidTopology {
+                reason: format!(
+                    "external stage dependency '{unused}' is not referenced by any stage"
+                ),
+            });
+        }
+        Ok(Self {
+            stages,
+            external_stage_deps,
+        })
     }
 
     /// The stages in topological order.
     pub fn stages(&self) -> &[AnnStage] {
         &self.stages
+    }
+
+    /// Stage outputs this topology consumes but does not produce, in
+    /// declaration order. Empty for a topology built with [`AnnTopology::new`];
+    /// each entry must be bound with [`ExternalBindings::with_stage_output`]
+    /// before [`run_topology`] can run it.
+    pub fn external_stage_deps(&self) -> &[StageId] {
+        &self.external_stage_deps
     }
 
     /// Index of the stage with `id`, if present.
@@ -569,8 +661,14 @@ enum Binding<'a, T> {
 /// tokens and a tensor or as two tensors, is rejected with
 /// [`CortexError::ConflictingStageBinding`] at bind time rather than letting
 /// one binding silently shadow the other.
+///
+/// Separately, [`ExternalBindings::with_stage_output`] supplies the output of
+/// a stage computed *outside* the topology being run, keyed by [`StageId`], for
+/// the [`StageSource::Stage`] references a [`SubSpan::to_topology`] topology
+/// declares in [`AnnTopology::external_stage_deps`].
 pub struct ExternalBindings<'a, T> {
     externals: BTreeMap<String, Binding<'a, T>>,
+    stage_outputs: BTreeMap<StageId, &'a T>,
 }
 
 impl<'a, T> Default for ExternalBindings<'a, T> {
@@ -587,6 +685,9 @@ impl<T> fmt::Debug for ExternalBindings<'_, T> {
         for (name, binding) in &self.externals {
             map.entry(name, &binding_kind(binding));
         }
+        for id in self.stage_outputs.keys() {
+            map.entry(id, &"stage output");
+        }
         map.finish()
     }
 }
@@ -596,6 +697,7 @@ impl<'a, T> ExternalBindings<'a, T> {
     pub fn new() -> Self {
         Self {
             externals: BTreeMap::new(),
+            stage_outputs: BTreeMap::new(),
         }
     }
 
@@ -617,6 +719,35 @@ impl<'a, T> ExternalBindings<'a, T> {
     /// bound (as tokens or as a tensor).
     pub fn with_tensor(self, name: impl Into<String>, tensor: &'a T) -> Result<Self> {
         self.insert_external(name.into(), Binding::Tensor(tensor))
+    }
+
+    /// Bind the externally computed output of stage `id` to a tensor, for a
+    /// topology that declares `id` in [`AnnTopology::external_stage_deps`].
+    /// Returns `self` for chaining.
+    ///
+    /// Stage outputs are keyed by [`StageId`] and are independent of the
+    /// [`StageSource::External`] names bound with
+    /// [`ExternalBindings::with_tensor`]. [`run_topology`] rejects a bound
+    /// stage output whose id the topology itself produces.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CortexError::ConflictingStageBinding`] when `id` already has
+    /// a bound output.
+    pub fn with_stage_output(mut self, id: StageId, tensor: &'a T) -> Result<Self> {
+        if self.stage_outputs.contains_key(&id) {
+            return Err(CortexError::ConflictingStageBinding {
+                name: id.to_string(),
+                reason: "stage output is already bound".to_string(),
+            });
+        }
+        self.stage_outputs.insert(id, tensor);
+        Ok(self)
+    }
+
+    /// The bound output of stage `id`, if any.
+    fn stage_output(&self, id: &StageId) -> Option<&'a T> {
+        self.stage_outputs.get(id).copied()
     }
 
     fn insert_external(mut self, name: String, binding: Binding<'a, T>) -> Result<Self> {
@@ -653,15 +784,21 @@ fn binding_kind<T>(binding: &Binding<'_, T>) -> &'static str {
 ///
 /// Stages run in topological order. For each stage, every [`StageSource`] is
 /// resolved — [`StageSource::External`] from `bindings`, [`StageSource::Stage`]
-/// from the outputs produced so far — and passed to [`AnnExecutor::execute`].
-/// Each produced output's [`DType`] is checked against the executor's
-/// [`AnnCapabilities::supported_dtypes`] and the output is stored under its
-/// stage id. The first error encountered stops the run.
+/// from the outputs produced so far or, for an id in
+/// [`AnnTopology::external_stage_deps`], from
+/// [`ExternalBindings::with_stage_output`] — and passed to
+/// [`AnnExecutor::execute`]. Each produced output's [`DType`] is checked
+/// against the executor's [`AnnCapabilities::supported_dtypes`] and the output
+/// is stored under its stage id. Bound stage outputs are inputs, not outputs,
+/// and do not appear in the returned map. The first error encountered stops
+/// the run; binding problems are detected before any stage executes.
 ///
 /// # Errors
 ///
-/// * [`CortexError::MissingStageBinding`] when a referenced external ingress
-///   has no binding.
+/// * [`CortexError::MissingStageBinding`] when a referenced external ingress,
+///   or a declared external stage dependency, has no binding.
+/// * [`CortexError::ConflictingStageBinding`] when a bound stage output names
+///   a stage the topology itself produces (it would shadow that stage).
 /// * [`CortexError::InvalidTopology`] when a stage input references an output
 ///   that is unexpectedly absent (should not occur for a validated topology).
 /// * [`CortexError::StageDTypeMismatch`] when an output dtype is unsupported.
@@ -671,6 +808,26 @@ pub fn run_topology<E: AnnExecutor>(
     topology: &AnnTopology,
     bindings: &ExternalBindings<E::Tensor>,
 ) -> Result<BTreeMap<StageId, E::Tensor>> {
+    // Fail closed on stage-output bindings before running anything: every
+    // declared external stage dependency needs a binding, and no binding may
+    // shadow a stage this topology produces.
+    for dep in topology.external_stage_deps() {
+        if bindings.stage_output(dep).is_none() {
+            return Err(CortexError::MissingStageBinding {
+                name: dep.to_string(),
+            });
+        }
+    }
+    for stage in topology.stages() {
+        if bindings.stage_output(&stage.id).is_some() {
+            return Err(CortexError::ConflictingStageBinding {
+                name: stage.id.to_string(),
+                reason: "a stage output is bound for a stage the topology itself produces"
+                    .to_string(),
+            });
+        }
+    }
+
     let supported_dtypes = executor.capabilities().supported_dtypes;
     let mut outputs: BTreeMap<StageId, E::Tensor> = BTreeMap::new();
 
@@ -685,15 +842,22 @@ pub fn run_topology<E: AnnExecutor>(
                     inputs.push(resolved);
                 }
                 StageSource::Stage(dep) => {
-                    let tensor =
-                        outputs
-                            .get(dep)
-                            .ok_or_else(|| CortexError::InvalidTopology {
+                    let tensor = match outputs.get(dep) {
+                        Some(tensor) => tensor,
+                        None if topology.external_stage_deps().contains(dep) => bindings
+                            .stage_output(dep)
+                            .ok_or_else(|| CortexError::MissingStageBinding {
+                                name: dep.to_string(),
+                            })?,
+                        None => {
+                            return Err(CortexError::InvalidTopology {
                                 reason: format!(
                                     "stage '{}' references output of '{dep}', which has not been produced",
                                     stage.id
                                 ),
-                            })?;
+                            });
+                        }
+                    };
                     inputs.push(StageInput::Tensor(tensor));
                 }
             }
@@ -1545,6 +1709,116 @@ mod tests {
     }
 
     #[test]
+    fn sub_span_to_topology_keeps_external_stage_deps() {
+        let stages = vec![
+            stage(
+                "embed",
+                StageKind::Embedding,
+                vec![StageSource::External("tokens".to_string())],
+            ),
+            stage(
+                "norm",
+                StageKind::Normalization {
+                    kind: NormKind::Layer,
+                },
+                vec![StageSource::Stage(StageId::new("embed").unwrap())],
+            ),
+            stage(
+                "add",
+                StageKind::Add,
+                vec![
+                    StageSource::Stage(StageId::new("norm").unwrap()),
+                    StageSource::Stage(StageId::new("embed").unwrap()),
+                ],
+            ),
+        ];
+        let topo = AnnTopology::new(stages).expect("valid topology");
+        assert!(topo.external_stage_deps().is_empty());
+
+        let span = topo
+            .sub_span(&StageId::new("add").unwrap(), &StageId::new("add").unwrap())
+            .expect("valid span");
+        // As a plain topology the span is invalid: it references earlier stages.
+        assert!(matches!(
+            AnnTopology::new(span.stages.to_vec()),
+            Err(CortexError::InvalidTopology { .. })
+        ));
+        // As a span topology those references are declared external deps.
+        let span_topo = span.to_topology().expect("span topology");
+        assert_eq!(span_topo.stages(), span.stages);
+        assert_eq!(
+            span_topo.external_stage_deps(),
+            &[
+                StageId::new("norm").unwrap(),
+                StageId::new("embed").unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn topology_with_external_stage_deps_validates_declarations() {
+        let add = |deps: &[&str]| {
+            stage(
+                "add",
+                StageKind::Add,
+                deps.iter()
+                    .map(|d| StageSource::Stage(StageId::new(*d).unwrap()))
+                    .collect(),
+            )
+        };
+        let id = |s: &str| StageId::new(s).unwrap();
+
+        // Declared dep that no stage references.
+        let err = AnnTopology::with_external_stage_deps(vec![add(&["x"])], vec![id("x"), id("y")])
+            .unwrap_err();
+        assert!(
+            matches!(err, CortexError::InvalidTopology { ref reason } if reason.contains("'y'"))
+        );
+
+        // Declared dep that is also produced by the topology.
+        let err = AnnTopology::with_external_stage_deps(
+            vec![stage("x", StageKind::Embedding, vec![]), add(&["x"])],
+            vec![id("x")],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, CortexError::InvalidTopology { ref reason } if reason.contains("'x'"))
+        );
+
+        // Duplicate declaration.
+        let err = AnnTopology::with_external_stage_deps(vec![add(&["x"])], vec![id("x"), id("x")])
+            .unwrap_err();
+        assert!(matches!(err, CortexError::InvalidTopology { .. }));
+
+        // Reference that is neither earlier nor declared is still rejected.
+        let err = AnnTopology::with_external_stage_deps(vec![add(&["x", "z"])], vec![id("x")])
+            .unwrap_err();
+        assert!(
+            matches!(err, CortexError::InvalidTopology { ref reason } if reason.contains("'z'"))
+        );
+
+        // Well-formed.
+        let topo =
+            AnnTopology::with_external_stage_deps(vec![add(&["x"])], vec![id("x")]).expect("valid");
+        assert_eq!(topo.external_stage_deps(), &[id("x")]);
+    }
+
+    #[test]
+    fn stage_output_bindings_reject_duplicates() {
+        let hidden = Tensor::try_from_vec(vec![0.0; 8], &[1, 8]).unwrap();
+        let id = StageId::new("blocks.0.residual2").unwrap();
+        let err = ExternalBindings::new()
+            .with_stage_output(id.clone(), &hidden)
+            .unwrap()
+            .with_stage_output(id, &hidden)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CortexError::ConflictingStageBinding { ref name, .. } if name == "blocks.0.residual2"
+        ));
+    }
+
+    #[test]
     fn sub_span_rejects_reversed_or_missing_bounds() {
         let stages = vec![
             stage("a", StageKind::Embedding, vec![]),
@@ -1903,6 +2177,43 @@ mod tests {
             Some(StageInput::Tensor(_))
         ));
         assert!(bindings.resolve("absent").is_none());
+    }
+
+    #[test]
+    fn run_topology_requires_and_guards_stage_output_bindings() {
+        let model = micro_model();
+        let (mut exec, topo) = ReferenceExecutor::from_transformer(&model).unwrap();
+        let span = topo
+            .sub_span(
+                &StageId::new("final_norm").unwrap(),
+                &StageId::new("readout").unwrap(),
+            )
+            .unwrap()
+            .to_topology()
+            .unwrap();
+        let dep = StageId::new("blocks.1.residual2").unwrap();
+        assert_eq!(span.external_stage_deps(), std::slice::from_ref(&dep));
+
+        // Nothing bound for the declared dep: MissingStageBinding names it.
+        let err = run_topology(&mut exec, &span, &ExternalBindings::new()).unwrap_err();
+        assert!(
+            matches!(err, CortexError::MissingStageBinding { ref name } if name == "blocks.1.residual2"),
+            "got {err:?}"
+        );
+
+        // A stage output bound under an id the span itself produces would
+        // shadow that stage; it is rejected before anything runs.
+        let hidden = Tensor::randn(&[2, model.config.dim], 0.0, 0.1);
+        let bindings = ExternalBindings::new()
+            .with_stage_output(dep, &hidden)
+            .unwrap()
+            .with_stage_output(StageId::new("final_norm").unwrap(), &hidden)
+            .unwrap();
+        let err = run_topology(&mut exec, &span, &bindings).unwrap_err();
+        assert!(
+            matches!(err, CortexError::ConflictingStageBinding { ref name, .. } if name == "final_norm"),
+            "got {err:?}"
+        );
     }
 
     #[test]

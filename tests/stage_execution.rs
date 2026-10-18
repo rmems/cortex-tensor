@@ -259,48 +259,12 @@ impl<E: AnnExecutor> AnnExecutor for RecordingExecutor<'_, E> {
     }
 }
 
-/// Build a topology for the sub-span `start..=end`, re-wiring the span's
-/// earlier-stage dependencies to a single external ingress named `ingress`.
-///
-/// `SubSpan` reports those dependencies via `external_stage_deps`; a span with
-/// exactly one such dependency can be driven by binding one tensor.
-fn span_topology(topo: &AnnTopology, start: &StageId, end: &StageId, ingress: &str) -> AnnTopology {
-    let span = topo.sub_span(start, end).expect("valid span");
-    assert_eq!(
-        span.external_stage_deps.len(),
-        1,
-        "this helper expects exactly one external stage dependency"
-    );
-    let dep = span.external_stage_deps[0].clone();
-
-    let rewired: Vec<AnnStage> = span
-        .stages
-        .iter()
-        .map(|stage| {
-            let inputs = stage
-                .inputs
-                .iter()
-                .map(|source| match source {
-                    StageSource::Stage(s) if *s == dep => {
-                        StageSource::External(ingress.to_string())
-                    }
-                    other => other.clone(),
-                })
-                .collect();
-            AnnStage {
-                id: stage.id.clone(),
-                kind: stage.kind.clone(),
-                inputs,
-            }
-        })
-        .collect();
-    AnnTopology::new(rewired).expect("valid span topology")
-}
-
-/// Extract `blocks.0.residual2` from the first span, inject it as the ingress of
-/// the second span (`blocks.1.norm1..=readout`), and assert the second span's
-/// readout equals the full-composition readout bit for bit — while the
-/// recording executor confirms the second run never executes `embedding`.
+/// Extract `blocks.0.residual2` from the first span, inject it as the bound
+/// stage output the second span (`blocks.1.norm1..=readout`) depends on, and
+/// assert the second span's readout equals the full-composition readout bit
+/// for bit — while the recording executor confirms the second run never
+/// executes `embedding`. The span is executed as returned by
+/// `SubSpan::to_topology`, with no hand re-wiring.
 #[test]
 fn sub_span_injection_skips_embedding_and_matches_full_run() {
     let model = micro_model();
@@ -334,14 +298,26 @@ fn sub_span_injection_skips_embedding_and_matches_full_run() {
         out[&id("blocks.0.residual2")].clone()
     };
 
-    // Span B: blocks.1.norm1..=readout, injecting the extracted residual2 as the
-    // external ingress for the span's single cross-span dependency.
-    let span_b_topo = span_topology(&topo, &id("blocks.1.norm1"), &id("readout"), "hidden_in");
+    // Span B: blocks.1.norm1..=readout. Its only cross-span dependency is
+    // blocks.0.residual2, satisfied by binding the extracted tensor under that
+    // stage id.
+    let span_b = topo
+        .sub_span(&id("blocks.1.norm1"), &id("readout"))
+        .expect("span b");
+    assert_eq!(span_b.external_stage_deps, vec![id("blocks.0.residual2")]);
+    assert!(span_b.external_inputs.is_empty());
+    let span_b_topo = span_b.to_topology().expect("span b topology");
+    assert_eq!(
+        span_b_topo.external_stage_deps(),
+        span_b.external_stage_deps.as_slice()
+    );
     let mut rec = RecordingExecutor::new(&mut exec);
     let bindings = ExternalBindings::new()
-        .with_tensor("hidden_in", &residual2)
-        .expect("bind hidden_in");
+        .with_stage_output(id("blocks.0.residual2"), &residual2)
+        .expect("bind residual2");
     let span_b_outputs = run_topology(&mut rec, &span_b_topo, &bindings).expect("span b run");
+    // The injected dependency is an input, not a produced output.
+    assert!(!span_b_outputs.contains_key(&id("blocks.0.residual2")));
 
     // The injected run must NOT re-run embedding (or any block-0 stage).
     assert!(
@@ -363,6 +339,75 @@ fn sub_span_injection_skips_embedding_and_matches_full_run() {
         span_b_readout.data(),
         full_readout.data(),
         "sub-span injection readout equals full-composition readout"
+    );
+}
+
+/// A span with two cross-span dependencies (`blocks.0.attention..=blocks.0.residual1`
+/// needs `blocks.0.norm1` and `embedding`) runs from stage-output bindings alone
+/// and reproduces the full run bit for bit, and a span that also keeps a named
+/// external ingress (`embedding..=blocks.0.norm1`) still resolves it.
+#[test]
+fn sub_span_with_two_external_stage_deps_runs_from_bound_outputs() {
+    let model = micro_model();
+    let toks = tokens();
+    let (mut exec, topo) = ReferenceExecutor::from_transformer(&model).expect("executor");
+    let full = {
+        let bindings = ExternalBindings::new()
+            .with_tokens("tokens", &toks)
+            .expect("bind tokens");
+        run_topology(&mut exec, &topo, &bindings).expect("full run")
+    };
+
+    let span = topo
+        .sub_span(&id("blocks.0.attention"), &id("blocks.0.residual1"))
+        .expect("span");
+    assert_eq!(
+        span.external_stage_deps,
+        vec![id("blocks.0.norm1"), id("embedding")]
+    );
+    let span_topo = span.to_topology().expect("span topology");
+
+    // Binding only one of the two deps fails closed, naming the missing one.
+    let partial = ExternalBindings::new()
+        .with_stage_output(id("blocks.0.norm1"), &full[&id("blocks.0.norm1")])
+        .expect("bind norm1");
+    let err = run_topology(&mut exec, &span_topo, &partial).unwrap_err();
+    assert!(
+        matches!(err, CortexError::MissingStageBinding { ref name } if name == "embedding"),
+        "got {err:?}"
+    );
+
+    let bindings = ExternalBindings::new()
+        .with_stage_output(id("blocks.0.norm1"), &full[&id("blocks.0.norm1")])
+        .expect("bind norm1")
+        .with_stage_output(id("embedding"), &full[&id("embedding")])
+        .expect("bind embedding");
+    let mut rec = RecordingExecutor::new(&mut exec);
+    let out = run_topology(&mut rec, &span_topo, &bindings).expect("span run");
+    assert_eq!(
+        rec.executed,
+        vec![id("blocks.0.attention"), id("blocks.0.residual1")]
+    );
+    assert_eq!(
+        out[&id("blocks.0.residual1")].data(),
+        full[&id("blocks.0.residual1")].data(),
+        "span residual1 equals full-run residual1"
+    );
+
+    // A span that keeps the token ingress mixes both binding kinds.
+    let head = topo
+        .sub_span(&id("embedding"), &id("blocks.0.norm1"))
+        .expect("head span");
+    assert!(head.external_stage_deps.is_empty());
+    assert_eq!(head.external_inputs, vec!["tokens".to_string()]);
+    let head_topo = head.to_topology().expect("head topology");
+    let bindings = ExternalBindings::new()
+        .with_tokens("tokens", &toks)
+        .expect("bind tokens");
+    let out = run_topology(&mut exec, &head_topo, &bindings).expect("head run");
+    assert_eq!(
+        out[&id("blocks.0.norm1")].data(),
+        full[&id("blocks.0.norm1")].data()
     );
 }
 
