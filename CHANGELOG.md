@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking (checkpoint binding):** `MoeRouter` loads GGUF and Safetensors through published `engram-parser` 0.3.0 (`default-features = false`, `features = ["safetensors"]`; `mmap` is not enabled). Tensor shapes are that crate's outermost-first order, and gate weights are row-major on those shapes (GGUF `ne[0]` is the contiguous axis). Q8_0, Q5_K, and Q6_K rows are dequantized by engram-parser, including Q5_K's low-nibble-then-high-nibble group order. IQ3_S and IQ3_XXS stay explicit errors (engram-parser 0.3.0 does not decode those wire types). A checkpoint with no `general.file_type` reports quantization `unknown`. Validated against engram-parser 0.3.0 (RM-1265 / issue 47).
 - `MappedCheckpoint` is a temporary router binding shim. Remove it when callers take `engram_parser::Checkpoint` directly. Malformed input returns the engram-parser error; there is no in-tree parser fallback.
 - A loaded router decodes the F32 gate once and keeps the token-embedding payload, then releases the rest of the checkpoint. `mmap` stays off. A stored `expert_count` of 0 is rejected. Token lookup continues past an unsupported `token_embd.weight` and also accepts `embed_tokens.weight` names. Gate suffix search orders `layers.N`, `layer.N`, and `block(s).N` numerically, same as `blk.N` (RM-1265).
+- Packaging: `Cargo.toml` adds `documentation`, `keywords`, `categories`, and `publish = false` until a release is intended. An `include` allow list (`src/**`, `LICENSE-*`, `README.md`, `CHANGELOG.md`) replaces the `exclude` list, so the package no longer ships `tests/` or its fixtures. `[profile.release]` (`opt-level = 3`, `lto = "fat"`) is removed: Cargo ignores it for dependents, there are no benches, and the release-mode golden run must not depend on LTO (#116).
 
 ### Removed
 
@@ -48,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `tests/reference_serde.rs` carries the SPDX license header AGENTS.md requires on every Rust source file (#116).
 - Optional `candle` builds after crates.io yanked `zip` 8.6.0 (2026-10-16). `candle-core` 0.11 requires `zip ^8.6.0`, which cannot select the unyanked 9.0.3 release. `[patch.crates-io]` points at `compat/zip`, a facade of zip 9.0.3 that restores `ZipFile::name() -> &str` and `file_names()` items candle 0.11 calls. The patch applies when this repository is the Cargo root.
 - Tensor constructors and JSON deserialization validate shape products and row-major stride arithmetic with checked multiplication, rejecting overflowing extents in release instead of wrapping to `numel == 0` (RM-1488). Documented rank-0 scalar vs zero-axis contracts and `mean()` returning `NaN` on empty tensors.
 - `MoeRouter::extract_token_embedding` returns checkpoint-native `hidden_size` without implicit resample to `EMBEDDING_DIM` or L2 normalization (RM-1519). Use `ExtractTokenOptions::for_projector_forward()` when feeding `MoeRouter::forward`.
