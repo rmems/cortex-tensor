@@ -882,6 +882,7 @@ mod tests {
             expected0.extend(std::iter::repeat_n(4.5f32, 32));
             expected0.extend(std::iter::repeat_n(2.5f32, 32));
         }
+        assert_eq!(expected0.len(), row0.len());
         for (idx, (got, want)) in row0.iter().zip(&expected0).enumerate() {
             assert!(
                 (got - want).abs() <= 1e-4,
