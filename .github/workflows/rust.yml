@@ -61,13 +61,20 @@ jobs:
         tool: cargo-llvm-cov
     - name: Generate coverage report
       run: cargo llvm-cov --lib --no-default-features --locked --lcov --output-path lcov.info
+    # Codecov upload (#38). With CODECOV_TOKEN the upload is strict (a failed
+    # upload fails the job). Without it (fork PRs, or the secret not yet added)
+    # the upload is attempted tokenless where Codecov allows it and can never
+    # fail CI; a visible warning replaces the old silent skip.
+    - name: Warn when CODECOV_TOKEN is missing
+      if: ${{ env.CODECOV_TOKEN == '' }}
+      run: |
+        echo "::warning title=Codecov::CODECOV_TOKEN is not set; coverage upload is best-effort and will not fail CI. Add the CODECOV_TOKEN repo secret for strict reporting."
     - name: Upload coverage to Codecov
-      if: ${{ env.CODECOV_TOKEN != '' }}
       uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5
       with:
         token: ${{ env.CODECOV_TOKEN }}
         files: lcov.info
-        fail_ci_if_error: true
+        fail_ci_if_error: ${{ env.CODECOV_TOKEN != '' }}
         verbose: true
 
     - name: Format check
