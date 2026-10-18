@@ -76,6 +76,12 @@ jobs:
     - name: Clippy
       run: cargo clippy --all-targets --all-features -- -D warnings
 
+    # Rustdoc gate: broken/private/redundant intra-doc links fail the build (#113).
+    - name: Rustdoc (-D warnings)
+      env:
+        RUSTDOCFLAGS: -D warnings
+      run: cargo doc --no-deps --all-features
+
     # reviewdog for inline PR comments from clippy (addresses chore reviewdog integration)
     - name: Setup reviewdog
       uses: reviewdog/action-setup@18c694f622bf52d60f95ecf838462ed7971c0add
