@@ -382,12 +382,34 @@ fn neuromod_adapter_rejects_blank_lif_neurons() {
     let err = NeuromodNetwork::from_network(nan).err().expect("rejected");
     assert!(err.to_string().contains("neuron 3"), "{err}");
 
+    // The engine skips channels past a short weight vector, so a sparse
+    // checkpoint is accepted when one present weight can drive the neuron...
     let mut short = neuromod::SpikingNetwork::with_dimensions(8, 0, 8);
     for (i, neuron) in short.neurons.iter_mut().enumerate() {
         neuron.weights[i] = 1.0;
     }
     short.neurons[3].weights.truncate(4);
-    let err = NeuromodNetwork::from_network(short)
+    let mut short = NeuromodNetwork::from_network(short).expect("sparse but drivable");
+    let mut one_hot = [0.0; 8];
+    one_hot[3] = 1.0;
+    assert!(neuromod_spike_counts(&mut short, &one_hot, 50)[3] > 0);
+
+    // ...and rejected when none of the present weights is positive.
+    let mut short_blank = neuromod::SpikingNetwork::with_dimensions(8, 0, 8);
+    for (i, neuron) in short_blank.neurons.iter_mut().enumerate() {
+        neuron.weights[i] = 1.0;
+    }
+    short_blank.neurons[3].weights = vec![0.0; 2];
+    let err = NeuromodNetwork::from_network(short_blank)
+        .err()
+        .expect("rejected");
+    assert!(err.to_string().contains("neuron 3"), "{err}");
+    let mut empty = neuromod::SpikingNetwork::with_dimensions(8, 0, 8);
+    for (i, neuron) in empty.neurons.iter_mut().enumerate() {
+        neuron.weights[i] = 1.0;
+    }
+    empty.neurons[3].weights.clear();
+    let err = NeuromodNetwork::from_network(empty)
         .err()
         .expect("rejected");
     assert!(err.to_string().contains("neuron 3"), "{err}");
@@ -453,16 +475,35 @@ fn neuromod_adapter_step_frozen_preserves_learning_state() {
     assert_ne!(neuromod_learning_state(&net), before);
 }
 
+/// `SpikingNetwork` is not `Clone`; its serde checkpoint is the supported copy.
+#[cfg(feature = "neuromod")]
+fn neuromod_clone(net: &NeuromodNetwork) -> NeuromodNetwork {
+    let json = serde_json::to_string(net.network()).unwrap();
+    let mut copy = NeuromodNetwork::from_network(serde_json::from_str(&json).unwrap()).unwrap();
+    copy.modulators = net.modulators;
+    copy.set_seed(net.seed());
+    copy
+}
+
+#[cfg(feature = "neuromod")]
+fn neuromod_weights(net: &NeuromodNetwork) -> Vec<Vec<f32>> {
+    net.network()
+        .neurons
+        .iter()
+        .map(|n| n.weights.clone())
+        .collect()
+}
+
 #[cfg(feature = "neuromod")]
 #[test]
 fn neuromod_adapter_seeded_rng_replays_bit_for_bit() {
     // Bernoulli input encoding draws from the thread-local RNG unless the
     // adapter routes a caller seed through `step_with_rng` (#92).
-    fn run(net: &mut NeuromodNetwork) -> (Vec<Vec<usize>>, Vec<i64>, String) {
+    fn run(net: &mut NeuromodNetwork, frozen_only: bool) -> (Vec<Vec<usize>>, Vec<i64>, String) {
         let mut spikes = Vec::new();
         for i in 0..40 {
             let stimulus = if i % 2 == 0 { [0.5; 8] } else { [0.3; 8] };
-            spikes.push(if i % 5 == 0 {
+            spikes.push(if frozen_only || i % 5 == 0 {
                 net.step_frozen(&stimulus).unwrap().spikes
             } else {
                 net.step(&stimulus).unwrap().spikes
@@ -483,16 +524,12 @@ fn neuromod_adapter_seeded_rng_replays_bit_for_bit() {
         .with_seed(0xC0FF_EE01);
     assert!(a.capabilities().caller_rng);
     assert_eq!(a.seed(), Some(0xC0FF_EE01));
-    let first = run(&mut a);
+    let first = run(&mut a, false);
     assert_eq!(
         first,
-        run(&mut b),
+        run(&mut b, false),
         "same seed, same inputs, different trajectory"
     );
-
-    // `reset` starts a new epoch and reseeds, so an epoch replays from reset.
-    a.reset();
-    assert_eq!(run(&mut a), first, "replay after reset diverged");
 
     // Dropping the seed falls back to the thread-local RNG and says so.
     a.set_seed(None);
@@ -505,7 +542,57 @@ fn neuromod_adapter_seeded_rng_replays_bit_for_bit() {
     assert!(!c.capabilities().caller_rng);
     c.set_seed(Some(0xC0FF_EE01));
     assert!(c.capabilities().caller_rng);
-    assert_eq!(run(&mut c), first);
+    assert_eq!(run(&mut c, false), first);
+
+    // `reset` rewinds the RNG to the seed. neuromod's `reset` keeps learned
+    // weights, so a post-reset epoch replays the previous one only when the
+    // learned state at both resets is the same: a frozen-only epoch...
+    let mut frozen = NeuromodNetwork::new(8, 0, 8)
+        .unwrap()
+        .with_seed(0xC0FF_EE01);
+    let frozen_first = run(&mut frozen, true);
+    frozen.reset();
+    assert_eq!(
+        run(&mut frozen, true),
+        frozen_first,
+        "frozen-only epoch did not replay after reset"
+    );
+
+    // ...or a clone taken at the previous reset, even with learning on and
+    // dopamine converting traces into weight changes.
+    let mut learner = NeuromodNetwork::new(8, 0, 8)
+        .unwrap()
+        .with_seed(0xC0FF_EE01);
+    learner.modulators.dopamine = 0.9;
+    for (i, neuron) in learner.network_mut().neurons.iter_mut().enumerate() {
+        // Off-diagonal room for STDP to move weight within the L1 budget.
+        neuron.weights[i] = 1.0;
+        neuron.weights[(i + 1) % 8] = 1.0;
+    }
+    let weights_at_reset = neuromod_weights(&learner);
+    let mut twin = neuromod_clone(&learner);
+    let learned = run(&mut learner, false);
+    assert_ne!(
+        neuromod_weights(&learner),
+        weights_at_reset,
+        "learning epoch must change weights for this case to mean anything"
+    );
+    twin.reset();
+    assert_eq!(
+        run(&mut twin, false),
+        learned,
+        "clone-at-reset replay diverged"
+    );
+
+    // The documented limit: once weights have moved, reset alone does not
+    // rewind them, so the same stream from the learned state diverges.
+    learner.reset();
+    assert_eq!(neuromod_weights(&learner), neuromod_weights(&twin));
+    assert_ne!(
+        run(&mut learner, false),
+        learned,
+        "reset is not expected to rewind learned weights"
+    );
 }
 
 #[cfg(feature = "neuromod")]

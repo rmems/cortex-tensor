@@ -18,16 +18,20 @@
 //! thresholds/decay, and the stored modulators bit-for-bit unchanged. With a
 //! seed installed ([`NeuromodNetwork::with_seed`] / [`NeuromodNetwork::set_seed`])
 //! both paths draw their Bernoulli input encoding from one caller-owned
-//! `StdRng` via `step_with_rng` / `step_frozen_with_rng`, so a run replays
-//! bit-for-bit; without a seed they use neuromod's thread-local RNG and
-//! `capabilities().caller_rng` is `false`.
+//! `StdRng` via `step_with_rng` / `step_frozen_with_rng`, so two networks with
+//! identical state, stimulus sequence and seed replay bit-for-bit; without a
+//! seed they use neuromod's thread-local RNG and `capabilities().caller_rng` is
+//! `false`. [`SnnBackend::reset`] rewinds that generator to its seed but, like
+//! `SpikingNetwork::reset`, leaves learned weights and thresholds in place, so
+//! a post-reset epoch replays only if nothing was learned since the last reset
+//! (frozen-only stepping, or a clone of the network at that point).
 
 use super::{SnnBackend, SnnCapabilities, SnnStepOutput};
 use crate::error::{CortexError, Result};
 use neuromod::{NeuroModulators, SeedableRng, SpikingNetwork, StdRng};
 
 /// Caller-owned RNG for deterministic replay: the seed is kept so
-/// [`SnnBackend::reset`] can restart the stream for a new epoch.
+/// [`SnnBackend::reset`] can rewind the stream to it.
 struct SeededRng {
     seed: u64,
     rng: StdRng,
@@ -86,13 +90,14 @@ impl NeuromodNetwork {
     /// Wrap an already-configured `SpikingNetwork` (e.g. a restored checkpoint).
     ///
     /// Same one-LIF-per-channel requirement as [`Self::new`]. Every LIF neuron
-    /// must also carry a weight vector of at least `num_channels` finite
-    /// entries with at least one strictly positive weight in
-    /// `weights[..num_channels]`. The engine integrates only that range, takes
-    /// `|stimulus|` (so a negative-only neuron receives non-positive current),
-    /// skips channels past a short vector, and (because the renormalization
-    /// pass skips a blank neuron) cannot bootstrap such a neuron through STDP:
-    /// in each case the channel would be permanently silent.
+    /// must also have finite weights on the channels the engine integrates,
+    /// `weights[..weights.len().min(num_channels)]`, with at least one of them
+    /// strictly positive. The engine skips channels past a short vector (so a
+    /// sparse checkpoint is fine as long as a present weight can drive the
+    /// neuron), takes `|stimulus|` (so a negative-only neuron receives
+    /// non-positive current), and (because the renormalization pass skips a
+    /// blank neuron) cannot bootstrap a neuron with no positive weight through
+    /// STDP: such a channel would be permanently silent.
     pub fn from_network(network: SpikingNetwork) -> Result<Self> {
         Self::checked(network)
     }
@@ -108,15 +113,9 @@ impl NeuromodNetwork {
         }
         let channels = network.num_channels;
         for (idx, neuron) in network.neurons.iter().enumerate() {
-            // Only `weights[..num_channels]` is ever integrated; a longer
-            // vector is tolerated, a shorter one leaves channels the engine
-            // silently skips.
-            let Some(in_range) = neuron.weights.get(..channels) else {
-                return Err(CortexError::InvalidConfig(format!(
-                    "neuromod SpikingNetwork LIF neuron {idx} has {} weights but the network has {channels} channels; the engine integrates one weight per channel",
-                    neuron.weights.len()
-                )));
-            };
+            // Only `weights[..num_channels]` is ever integrated; weights past
+            // it are ignored and channels past a short vector are skipped.
+            let in_range = &neuron.weights[..neuron.weights.len().min(channels)];
             if let Some(ch) = in_range.iter().position(|w| !w.is_finite()) {
                 return Err(CortexError::InvalidConfig(format!(
                     "neuromod SpikingNetwork LIF neuron {idx} has a non-finite weight on channel {ch}; it would poison the membrane potential"
@@ -126,7 +125,8 @@ impl NeuromodNetwork {
             // positive weight can ever drive the membrane toward threshold.
             if !in_range.iter().any(|w| *w > 0.0) {
                 return Err(CortexError::InvalidConfig(format!(
-                    "neuromod SpikingNetwork LIF neuron {idx} has no positive weight on channels 0..{channels}, so channel {idx} can never spike; seed its weights (e.g. via network_mut()) before wrapping it"
+                    "neuromod SpikingNetwork LIF neuron {idx} has no positive weight on channels 0..{} (of {channels}), so channel {idx} can never spike; seed its weights (e.g. via network_mut()) before wrapping it",
+                    in_range.len()
                 )));
             }
         }
@@ -139,9 +139,12 @@ impl NeuromodNetwork {
 
     /// Drive the Bernoulli input encoding from a `StdRng` seeded with `seed`
     /// instead of neuromod's thread-local generator, so an identical network,
-    /// stimulus sequence, and seed replays bit-for-bit. The generator is
-    /// reseeded on [`SnnBackend::reset`] (each epoch replays from its reset)
-    /// and is not part of the wrapped network's serde checkpoint.
+    /// stimulus sequence, and seed replays bit-for-bit. [`SnnBackend::reset`]
+    /// rewinds the generator to the seed; because neuromod's `reset` keeps
+    /// learned weights and thresholds, the epoch after a reset replays the one
+    /// before it only when no learning step changed them in between (for
+    /// example frozen-only stepping, or a clone taken at the previous reset).
+    /// The seed is not part of the wrapped network's serde checkpoint.
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.set_seed(Some(seed));
         self
