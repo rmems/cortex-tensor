@@ -4,7 +4,7 @@ use super::expect_shape;
 use crate::error::{CortexError, Result, unwrap_compat};
 use crate::tensor::Tensor;
 use crate::tensor::finite::softmax_row;
-use crate::tensor::ops::{try_batched_matmul, try_causal_mask, try_matmul};
+use crate::tensor::ops::{try_batched_matmul, try_matmul};
 
 /// Multi-head self-attention (replaces candle-nn attention layers).
 ///
@@ -158,12 +158,9 @@ impl MultiHeadAttention {
         let scale = 1.0 / (hd as f32).sqrt();
         let scores = try_batched_matmul(&q, &kt)?.scale(scale);
 
-        // Apply causal mask
-        let mask = try_causal_mask(seq_len)?;
-        let scores = apply_mask_batched(&scores, &mask, nh);
-
-        // Softmax per row
-        let attn = batched_softmax(&scores, nh, seq_len);
+        // Causal softmax per row: only the visible prefix 0..=r is normalized;
+        // future slots are exactly zero (no additive mask needed).
+        let attn = causal_batched_softmax(&scores, nh, seq_len);
 
         // attn × V → [nh, seq_len, hd]
         let ctx = try_batched_matmul(&attn, &v)?;
@@ -254,34 +251,15 @@ fn transpose_last_two(t: &Tensor) -> Tensor {
     Tensor::from_vec(out, &[b, n, m])
 }
 
-/// Apply 2-D causal mask to each head in [nh, seq, seq] scores
-fn apply_mask_batched(scores: &Tensor, mask: &Tensor, nh: usize) -> Tensor {
-    let seq = mask.shape()[0];
-    let sd = scores.data();
-    let md = mask.data();
-    let mut out = sd.to_vec();
-    for h in 0..nh {
-        let off = h * seq * seq;
-        for i in 0..seq * seq {
-            out[off + i] += md[i];
-        }
-    }
-    Tensor::from_vec(out, scores.shape())
-}
-
-/// Row-wise softmax on each [seq, seq] slice of a [nh, seq, seq] tensor.
+/// Causal row-wise softmax on each [seq, seq] slice of a [nh, seq, seq] tensor.
 ///
-/// Uses [`crate::tensor::finite::softmax_row`] (RM-1354): NaN logits poison the
-/// row; a single `+Inf` is one-hot; several `+Inf` values split evenly; an
-/// all-`-Inf` row is uniform `1/seq` over the **entire** row vector.
-///
-/// Causal masking is applied before this step. Typical rows keep at least one
-/// finite logit on indices `0..=query`, so masked future keys stay at zero
-/// probability after softmax. If every logit in the row is `-Inf`, the shared
-/// row policy still assigns `1/seq` to each index—including future masked
-/// slots—by design. Do not rely on softmax alone to zero those positions in
-/// that edge case.
-fn batched_softmax(t: &Tensor, nh: usize, seq: usize) -> Tensor {
+/// For query row `r`, softmax is taken over the visible prefix `0..=r` only
+/// (via [`crate::tensor::finite::softmax_row`], RM-1354 policy: NaN poisons the
+/// prefix; `+Inf` is one-hot / split evenly; an all-`-Inf` prefix is uniform
+/// `1/(r+1)`). Future slots `r+1..seq` are written as exactly `0.0` and their
+/// scores are never read, so no score value (including `-Inf` overflow of the
+/// whole prefix) can move probability mass onto a future token (issue #94).
+fn causal_batched_softmax(t: &Tensor, nh: usize, seq: usize) -> Tensor {
     let d = t.data();
     let mut out = vec![0.0f32; t.numel()];
     if seq == 0 {
@@ -290,7 +268,7 @@ fn batched_softmax(t: &Tensor, nh: usize, seq: usize) -> Tensor {
     for h in 0..nh {
         for r in 0..seq {
             let off = h * seq * seq + r * seq;
-            softmax_row(&d[off..off + seq], &mut out[off..off + seq]);
+            softmax_row(&d[off..off + r + 1], &mut out[off..off + r + 1]);
         }
     }
     Tensor::from_vec(out, t.shape())
@@ -300,11 +278,94 @@ fn batched_softmax(t: &Tensor, nh: usize, seq: usize) -> Tensor {
 mod tests {
     use super::*;
 
+    fn identity(dim: usize, sign: f32) -> Tensor {
+        let mut d = vec![0.0f32; dim * dim];
+        for i in 0..dim {
+            d[i * dim + i] = sign;
+        }
+        Tensor::from_vec(d, &[dim, dim])
+    }
+
+    /// `dim=2, heads=1`, `wq=-I`, `wk=wv=wo=I`, zero biases (issue #94).
+    fn overflow_attention() -> MultiHeadAttention {
+        let mut attn = MultiHeadAttention::new(2, 1);
+        attn.wq = identity(2, -1.0);
+        attn.wk = identity(2, 1.0);
+        attn.wv = identity(2, 1.0);
+        attn.wo = identity(2, 1.0);
+        attn
+    }
+
     #[test]
     fn test_attention_shapes() {
         let attn = MultiHeadAttention::new(64, 4);
         let x = Tensor::randn(&[8, 64], 0.0, 0.1);
         let out = attn.forward(&x);
         assert_eq!(out.shape(), &[8, 64]);
+    }
+
+    #[test]
+    fn all_neg_inf_visible_prefix_does_not_leak_future_tokens() {
+        // Token 0's self-score is -1e40, which overflows to -Inf, so its whole
+        // visible prefix is -Inf. Its output must not depend on token 1.
+        let attn = overflow_attention();
+        let a = attn.forward(&Tensor::from_vec(vec![1e20, 0.0, 0.0, 7.0], &[2, 2]));
+        let b = attn.forward(&Tensor::from_vec(vec![1e20, 0.0, 0.0, -7.0], &[2, 2]));
+        assert_eq!(&a.data()[..2], &b.data()[..2]);
+        // Uniform over the single visible slot: row 0 attends to itself only.
+        assert_eq!(&a.data()[..2], &[1e20, 0.0]);
+    }
+
+    #[test]
+    fn batched_softmax_all_neg_inf_row_zeroes_future_slots() {
+        let ninf = f32::NEG_INFINITY;
+        let scores = Tensor::from_vec(
+            vec![ninf, ninf, ninf, ninf, ninf, ninf, ninf, ninf, ninf],
+            &[1, 3, 3],
+        );
+        let p = causal_batched_softmax(&scores, 1, 3);
+        let d = p.data();
+        assert!(d.iter().all(|w| !w.is_nan()));
+        // Row 0: all weight on itself; future slots exactly zero.
+        assert_eq!(&d[0..3], &[1.0, 0.0, 0.0]);
+        // Row 1: uniform over the visible prefix only.
+        assert_eq!(&d[3..6], &[0.5, 0.5, 0.0]);
+        // Row 2: uniform over the full (visible) row.
+        for w in &d[6..9] {
+            assert!((w - 1.0 / 3.0).abs() < 1e-7);
+        }
+    }
+
+    #[test]
+    fn batched_softmax_partial_mask_matches_row_softmax() {
+        let ninf = f32::NEG_INFINITY;
+        // Future slots are -Inf as an additive causal mask would leave them;
+        // row 1 also has a -Inf inside its visible prefix; row 2 is plain finite.
+        let scores = Tensor::from_vec(
+            vec![0.5, ninf, ninf, ninf, 1.0, ninf, 0.1, 0.2, 0.3],
+            &[1, 3, 3],
+        );
+        let p = causal_batched_softmax(&scores, 1, 3);
+        let d = p.data();
+        assert_eq!(&d[0..3], &[1.0, 0.0, 0.0]);
+        assert_eq!(&d[3..6], &[0.0, 1.0, 0.0]);
+        let mut expect = [0.0f32; 3];
+        softmax_row(&[0.1, 0.2, 0.3], &mut expect);
+        assert_eq!(&d[6..9], &expect);
+        assert!((d[6..9].iter().sum::<f32>() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn causal_attention_output_independent_of_future_tokens() {
+        let attn = MultiHeadAttention::new(8, 2);
+        let base = Tensor::randn(&[4, 8], 0.0, 0.5);
+        let mut changed = base.data().to_vec();
+        for v in &mut changed[2 * 8..] {
+            *v += 3.0; // perturb tokens 2 and 3
+        }
+        let changed = Tensor::from_vec(changed, &[4, 8]);
+        let a = attn.forward(&base);
+        let b = attn.forward(&changed);
+        assert_eq!(&a.data()[..2 * 8], &b.data()[..2 * 8]);
     }
 }

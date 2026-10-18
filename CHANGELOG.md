@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `MultiHeadAttention` no longer leaks future tokens when every visible score is `-Inf` (e.g. `-1e40` overflow). Softmax now runs over the causal prefix `0..=r` only and future slots are exact zeros; the additive causal mask is no longer materialised. Outputs for rows with at least one finite visible score are unchanged (issue 94).
+
 ### Changed
 
 - **Breaking (checkpoint binding):** `MoeRouter` loads GGUF and Safetensors through published `engram-parser` 0.3.0 (`default-features = false`, `features = ["safetensors"]`; `mmap` is not enabled). Tensor shapes are that crate's outermost-first order, and gate weights are row-major on those shapes (GGUF `ne[0]` is the contiguous axis). Q8_0, Q5_K, and Q6_K rows are dequantized by engram-parser, including Q5_K's low-nibble-then-high-nibble group order. IQ3_S and IQ3_XXS stay explicit errors (engram-parser 0.3.0 does not decode those wire types). A checkpoint with no `general.file_type` reports quantization `unknown`. Validated against engram-parser 0.3.0 (RM-1265 / issue 47).
