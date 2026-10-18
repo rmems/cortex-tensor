@@ -28,17 +28,23 @@ pub(super) fn checkpoint_gate_scores(
     // Orientation is a property of the tensor, not of one element: resolve it
     // once instead of O(E·H) times inside the dot-product loop.
     let layout = resolve_gate_layout(dims, num_experts, hidden_size)?;
+    // `element_count` already rejected an overflowing shape at bind time; this
+    // is the local guard that lets the loop index without per-element checks.
     let required = dims[0]
         .checked_mul(dims[1])
-        .filter(|&required| required <= weights.len())
         .ok_or_else(|| HybridError::ModelLoad {
             path: model_path.to_owned(),
+            reason: format!("routing tensor '{routing_tensor_name}' dims {dims:?} overflow usize"),
+        })?;
+    if required > weights.len() {
+        return Err(HybridError::ModelLoad {
+            path: model_path.to_owned(),
             reason: format!(
-                "routing tensor '{routing_tensor_name}' with dims {dims:?} needs {} weights, payload holds {}",
-                dims[0].saturating_mul(dims[1]),
+                "routing tensor '{routing_tensor_name}' with dims {dims:?} needs {required} weights, payload holds {}",
                 weights.len()
             ),
-        })?;
+        });
+    }
     let weights = &weights[..required];
 
     let mut gate_scores = Vec::with_capacity(num_experts);
