@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- F16 token rows are decoded from the requested row's byte range only (`token_id * hidden * 2`, checked arithmetic), through a `decode_f16` helper that rejects any slice wider than the row. The retired `u16_tensor_values` converted the whole `token_embd` tensor and then sliced one row, about 622 MB per lookup on a 151936 x 2048 embedding; the engram-parser 0.3.0 migration removed it, and a regression test on a 4096 x 2048 synthetic F16 embedding now pins the row-only read, the out-of-range error, and the bound-router copy. Pre-bind reads also borrow the GGUF payload instead of copying the whole tensor per call (#100, part of #85).
-
 ### Changed
 
 - **Breaking (checkpoint binding):** `MoeRouter` loads GGUF and Safetensors through published `engram-parser` 0.3.0 (`default-features = false`, `features = ["safetensors"]`; `mmap` is not enabled). Tensor shapes are that crate's outermost-first order, and gate weights are row-major on those shapes (GGUF `ne[0]` is the contiguous axis). Q8_0, Q5_K, and Q6_K rows are dequantized by engram-parser, including Q5_K's low-nibble-then-high-nibble group order. IQ3_S and IQ3_XXS stay explicit errors (engram-parser 0.3.0 does not decode those wire types). A checkpoint with no `general.file_type` reports quantization `unknown`. Validated against engram-parser 0.3.0 (RM-1265 / issue 47).
@@ -52,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- F16 token rows are decoded from the requested row's byte range only (`token_id * hidden * 2`, checked arithmetic), through a `decode_f16` helper that rejects any slice wider than the row. The retired `u16_tensor_values` converted the whole `token_embd` tensor and then sliced one row, about 622 MB per lookup on a 151936 x 2048 embedding; the engram-parser 0.3.0 migration removed it, and a regression test on a 4096 x 2048 synthetic F16 embedding now pins the row-only read, the out-of-range error, and the bound-router copy. Pre-bind reads also borrow the GGUF payload instead of copying the whole tensor per call (#100, part of #85).
 - Optional `candle` builds after crates.io yanked `zip` 8.6.0 (2026-10-16). `candle-core` 0.11 requires `zip ^8.6.0`, which cannot select the unyanked 9.0.3 release. `[patch.crates-io]` points at `compat/zip`, a facade of zip 9.0.3 that restores `ZipFile::name() -> &str` and `file_names()` items candle 0.11 calls. The patch applies when this repository is the Cargo root.
 - Tensor constructors and JSON deserialization validate shape products and row-major stride arithmetic with checked multiplication, rejecting overflowing extents in release instead of wrapping to `numel == 0` (RM-1488). Documented rank-0 scalar vs zero-axis contracts and `mean()` returning `NaN` on empty tensors.
 - `MoeRouter::extract_token_embedding` returns checkpoint-native `hidden_size` without implicit resample to `EMBEDDING_DIM` or L2 normalization (RM-1519). Use `ExtractTokenOptions::for_projector_forward()` when feeding `MoeRouter::forward`.

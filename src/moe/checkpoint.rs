@@ -765,10 +765,20 @@ mod tests {
         let vocab = 4096usize;
         let hidden = EMBEDDING_DIM;
         let row_size = hidden * 2;
+        // Row bits 0..12 land in the mantissa and the two low exponent bits;
+        // the lane varies exponent bits 2..3 and the sign. Exponent bit 4 is
+        // never set, so every lane is a finite f16, and for a fixed lane the
+        // pattern is injective in `row` over 0..4096: no two rows share bytes.
         let bits_at = |row: usize, lane: usize| -> u16 {
-            // Keep the exponent below 0x1F so every lane is a finite f16.
-            (((row as u16) << 4) ^ (lane as u16)) & 0x7BFF
+            let lane = lane as u16;
+            (row as u16) | ((lane & 0b11) << 12) | (((lane >> 2) & 1) << 15)
         };
+        let distinct: std::collections::HashSet<u16> =
+            (0..vocab).map(|row| bits_at(row, 0)).collect();
+        assert_eq!(distinct.len(), vocab, "row encoding must be injective");
+        for &(a, b) in &[(0usize, 64usize), (2047, 4095), (7, 71), (0, 2048)] {
+            assert_ne!(bits_at(a, 0), bits_at(b, 0), "rows {a} and {b} must differ");
+        }
         let mut payload = vec![0u8; vocab * row_size];
         for row in 0..vocab {
             for lane in 0..hidden {
