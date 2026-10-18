@@ -201,17 +201,18 @@ impl MappedCheckpoint {
         let bytes = self.payload(tensor_name, path)?;
         match view.kind {
             TensorKind::F32 => {
-                let row = row_bytes(&bytes, hidden * 4, token_id, path, tensor_name)?;
+                let row_size = hidden
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| row_overflow(path, tensor_name))?;
+                let row = row_bytes(&bytes, row_size, token_id, path, tensor_name)?;
                 decode_f32(row, hidden, path, tensor_name)
             }
             TensorKind::F16 => {
-                let row = row_bytes(&bytes, hidden * 2, token_id, path, tensor_name)?;
-                let (chunks, remainder) = row.as_chunks::<2>();
-                debug_assert!(remainder.is_empty());
-                Ok(chunks
-                    .iter()
-                    .map(|chunk| f16_bits_to_f32(u16::from_le_bytes(*chunk)))
-                    .collect())
+                let row_size = hidden
+                    .checked_mul(std::mem::size_of::<u16>())
+                    .ok_or_else(|| row_overflow(path, tensor_name))?;
+                let row = row_bytes(&bytes, row_size, token_id, path, tensor_name)?;
+                decode_f16(row, hidden, path, tensor_name)
             }
             TensorKind::Q8Block => dequantize_row(
                 DType::Q8_0,
@@ -259,11 +260,19 @@ impl MappedCheckpoint {
             })
     }
 
+    /// Whole-tensor bytes, borrowed whenever the source already holds them.
+    ///
+    /// A bound payload and an in-memory GGUF checkpoint are borrowed, so a
+    /// token-row read copies only the row it decodes. Safetensors backends
+    /// hand back an owned read of the tensor; that copy is engram-parser's.
     fn payload<'a>(&'a self, name: &str, path: &str) -> Result<Cow<'a, [u8]>> {
         if let Some(bytes) = self.payloads.get(name) {
             return Ok(Cow::Borrowed(bytes));
         }
-        self.read_payload(name, path).map(Cow::Owned)
+        let Some(inner) = self.inner.as_ref() else {
+            return Err(unbound_tensor(name, path));
+        };
+        inner.tensor_bytes(name).map_err(map_parser_error)
     }
 
     fn read_payload(&self, name: &str, path: &str) -> Result<Vec<u8>> {
@@ -271,13 +280,17 @@ impl MappedCheckpoint {
             return Ok(bytes.clone());
         }
         let Some(inner) = self.inner.as_ref() else {
-            return Err(HybridError::ModelLoad {
-                path: path.to_owned(),
-                reason: format!("tensor '{name}' is not bound"),
-            });
+            return Err(unbound_tensor(name, path));
         };
         let bytes = inner.tensor_bytes(name).map_err(map_parser_error)?;
         Ok(bytes.into_owned())
+    }
+}
+
+fn unbound_tensor(name: &str, path: &str) -> HybridError {
+    HybridError::ModelLoad {
+        path: path.to_owned(),
+        reason: format!("tensor '{name}' is not bound"),
     }
 }
 
@@ -371,6 +384,32 @@ fn decode_f32(bytes: &[u8], elements: usize, path: &str, name: &str) -> Result<V
     Ok(chunks
         .iter()
         .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect())
+}
+
+/// Decode exactly `elements` little-endian F16 values from `bytes`.
+///
+/// `bytes` must be the row (or tensor) being decoded and nothing more: the
+/// length is checked against `elements`, so a caller cannot hand this the
+/// whole `token_embd` payload and have it convert every row (GH#100).
+fn decode_f16(bytes: &[u8], elements: usize, path: &str, name: &str) -> Result<Vec<f32>> {
+    let expected = elements
+        .checked_mul(std::mem::size_of::<u16>())
+        .ok_or_else(|| row_overflow(path, name))?;
+    if bytes.len() != expected {
+        return Err(HybridError::ModelLoad {
+            path: path.to_owned(),
+            reason: format!(
+                "tensor '{name}' F16 payload is {} bytes, expected {expected}",
+                bytes.len()
+            ),
+        });
+    }
+    let (chunks, remainder) = bytes.as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
+    Ok(chunks
+        .iter()
+        .map(|chunk| f16_bits_to_f32(u16::from_le_bytes(*chunk)))
         .collect())
 }
 
@@ -713,6 +752,122 @@ mod tests {
         assert_eq!(embedding.len(), EMBEDDING_DIM);
         assert!(embedding.iter().all(|&value| value == 0.0));
         let _ = std::fs::remove_file(path);
+    }
+
+    /// Pins GH#100: an F16 token lookup must decode the requested row and
+    /// nothing else. The retired `u16_tensor_values` converted all
+    /// `vocab * hidden` values and then sliced one row out, so every lookup
+    /// on a 151936 x 2048 `token_embd` allocated about 622 MB. Rows here carry
+    /// distinct bit patterns, so a row-offset slip or a whole-tensor decode
+    /// that returns the wrong window shows up as a value mismatch.
+    #[test]
+    fn f16_token_row_decodes_exactly_the_requested_row() {
+        let vocab = 4096usize;
+        let hidden = EMBEDDING_DIM;
+        let row_size = hidden * 2;
+        let bits_at = |row: usize, lane: usize| -> u16 {
+            // Keep the exponent below 0x1F so every lane is a finite f16.
+            (((row as u16) << 4) ^ (lane as u16)) & 0x7BFF
+        };
+        let mut payload = vec![0u8; vocab * row_size];
+        for row in 0..vocab {
+            for lane in 0..hidden {
+                let at = row * row_size + lane * 2;
+                payload[at..at + 2].copy_from_slice(&bits_at(row, lane).to_le_bytes());
+            }
+        }
+        let bytes = build_token_file(GGML_TYPE_F16, vocab, payload);
+        let path = write_temp_file(&bytes, "token_f16_gh100");
+        let path_str = path.to_str().unwrap();
+        let mut checkpoint = open_mapped_checkpoint(path_str).unwrap();
+
+        let expected_row = |row: usize| -> Vec<u32> {
+            (0..hidden)
+                .map(|lane| f16_bits_to_f32(bits_at(row, lane)).to_bits())
+                .collect()
+        };
+        for &token in &[0usize, 1, 2047, vocab - 1] {
+            let row = checkpoint
+                .extract_token_embedding("token_embd.weight", path_str, token)
+                .unwrap();
+            assert_eq!(row.len(), hidden, "token {token} width");
+            let got: Vec<u32> = row.iter().map(|value| value.to_bits()).collect();
+            assert_eq!(
+                got,
+                expected_row(token),
+                "token {token} must read row {token}"
+            );
+            assert!(row.iter().all(|value| value.is_finite()));
+        }
+        assert_ne!(
+            checkpoint
+                .extract_token_embedding("token_embd.weight", path_str, 7)
+                .unwrap(),
+            checkpoint
+                .extract_token_embedding("token_embd.weight", path_str, 8)
+                .unwrap()
+        );
+
+        // One past the end is rejected before any byte is read.
+        let err = checkpoint
+            .extract_token_embedding("token_embd.weight", path_str, vocab)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            HybridError::InputLengthMismatch { expected, got } if expected == vocab && got == vocab
+        ));
+
+        // The bound-router copy serves the same rows from the retained payload.
+        let before = checkpoint
+            .extract_token_embedding("token_embd.weight", path_str, 2047)
+            .unwrap();
+        checkpoint.payloads.insert(
+            "token_embd.weight".to_owned(),
+            checkpoint
+                .read_payload("token_embd.weight", path_str)
+                .unwrap(),
+        );
+        checkpoint.inner = None;
+        let after = checkpoint
+            .extract_token_embedding("token_embd.weight", path_str, 2047)
+            .unwrap();
+        assert_eq!(after, before);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The F16 decoder is bounded by the slice it is given: handing it more
+    /// than one row's bytes is an error, so the whole-tensor conversion GH#100
+    /// describes cannot come back through this helper.
+    #[test]
+    fn decode_f16_rejects_a_payload_wider_than_the_row() {
+        let hidden = 8usize;
+        let mut two_rows = Vec::with_capacity(hidden * 2 * 2);
+        for lane in 0..hidden * 2 {
+            // 1.0 (0x3C00) in the first row, 2.0 (0x4000) in the second.
+            let bits = if lane < hidden { 0x3C00u16 } else { 0x4000u16 };
+            two_rows.extend_from_slice(&bits.to_le_bytes());
+        }
+        let err = decode_f16(&two_rows, hidden, "p", "t").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("F16 payload is 32 bytes, expected 16"),
+            "{err}"
+        );
+        let err = decode_f16(&two_rows[..hidden * 2 - 1], hidden, "p", "t").unwrap_err();
+        assert!(err.to_string().contains("expected 16"), "{err}");
+
+        let row0 = row_bytes(&two_rows, hidden * 2, 0, "p", "t").unwrap();
+        assert_eq!(
+            decode_f16(row0, hidden, "p", "t").unwrap(),
+            vec![1.0f32; hidden]
+        );
+        let row1 = row_bytes(&two_rows, hidden * 2, 1, "p", "t").unwrap();
+        assert_eq!(
+            decode_f16(row1, hidden, "p", "t").unwrap(),
+            vec![2.0f32; hidden]
+        );
+        assert!(row_bytes(&two_rows, hidden * 2, 2, "p", "t").is_err());
+        assert!(row_bytes(&two_rows, hidden * 2, usize::MAX, "p", "t").is_err());
     }
 
     #[test]
