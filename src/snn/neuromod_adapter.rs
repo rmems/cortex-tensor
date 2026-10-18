@@ -12,16 +12,42 @@
 //! step; callers that need reward-modulated dynamics should set
 //! [`NeuromodNetwork::modulators`] or step the wrapped network directly via
 //! [`NeuromodNetwork::network_mut`].
+//!
+//! `step_frozen` maps onto neuromod 0.7's `SpikingNetwork::step_frozen`, which
+//! runs the full runtime pipeline but leaves weights, eligibility traces, LIF
+//! thresholds/decay, and the stored modulators bit-for-bit unchanged. With a
+//! seed installed ([`NeuromodNetwork::with_seed`] / [`NeuromodNetwork::set_seed`])
+//! both paths draw their Bernoulli input encoding from one caller-owned
+//! `StdRng` via `step_with_rng` / `step_frozen_with_rng`, so a run replays
+//! bit-for-bit; without a seed they use neuromod's thread-local RNG and
+//! `capabilities().caller_rng` is `false`.
 
 use super::{SnnBackend, SnnCapabilities, SnnStepOutput};
 use crate::error::{CortexError, Result};
-use neuromod::{NeuroModulators, SpikingNetwork};
+use neuromod::{NeuroModulators, SeedableRng, SpikingNetwork, StdRng};
+
+/// Caller-owned RNG for deterministic replay: the seed is kept so
+/// [`SnnBackend::reset`] can restart the stream for a new epoch.
+struct SeededRng {
+    seed: u64,
+    rng: StdRng,
+}
+
+impl SeededRng {
+    fn new(seed: u64) -> Self {
+        Self {
+            seed,
+            rng: StdRng::seed_from_u64(seed),
+        }
+    }
+}
 
 /// [`SnnBackend`] over `neuromod::SpikingNetwork` (LIF + Izhikevich banks).
 pub struct NeuromodNetwork {
     network: SpikingNetwork,
     /// Modulator frame applied to every `step`/`step_frozen` call.
     pub modulators: NeuroModulators,
+    rng: Option<SeededRng>,
 }
 
 impl NeuromodNetwork {
@@ -43,6 +69,9 @@ impl NeuromodNetwork {
     /// mapping). Callers wanting a different initialisation adjust the weights
     /// through [`Self::network_mut`] or build the network and use
     /// [`Self::from_network`].
+    ///
+    /// The backend starts on neuromod's thread-local RNG; see
+    /// [`Self::with_seed`] for deterministic replay.
     pub fn new(num_lif: usize, num_izh: usize, num_channels: usize) -> Result<Self> {
         let mut network = SpikingNetwork::with_dimensions(num_lif, num_izh, num_channels);
         let (_, w_max) = network.stdp_config.weight_bounds();
@@ -86,7 +115,29 @@ impl NeuromodNetwork {
         Ok(Self {
             network,
             modulators: NeuroModulators::default(),
+            rng: None,
         })
+    }
+
+    /// Drive the Bernoulli input encoding from a `StdRng` seeded with `seed`
+    /// instead of neuromod's thread-local generator, so an identical network,
+    /// stimulus sequence, and seed replays bit-for-bit. The generator is
+    /// reseeded on [`SnnBackend::reset`] (each epoch replays from its reset)
+    /// and is not part of the wrapped network's serde checkpoint.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.set_seed(Some(seed));
+        self
+    }
+
+    /// Install (`Some`) or remove (`None`) the replay seed; see
+    /// [`Self::with_seed`]. Installing a seed restarts the stream from it.
+    pub fn set_seed(&mut self, seed: Option<u64>) {
+        self.rng = seed.map(SeededRng::new);
+    }
+
+    /// The replay seed in effect, or `None` when stepping on the thread-local RNG.
+    pub fn seed(&self) -> Option<u64> {
+        self.rng.as_ref().map(|r| r.seed)
     }
 
     pub fn network(&self) -> &SpikingNetwork {
@@ -96,6 +147,14 @@ impl NeuromodNetwork {
     pub fn network_mut(&mut self) -> &mut SpikingNetwork {
         &mut self.network
     }
+
+    fn into_output(
+        result: std::result::Result<Vec<usize>, neuromod::StepError>,
+    ) -> Result<SnnStepOutput> {
+        result
+            .map(|spikes| SnnStepOutput { spikes })
+            .map_err(|err| CortexError::SnnBackend(err.to_string()))
+    }
 }
 
 impl SnnBackend for NeuromodNetwork {
@@ -104,31 +163,39 @@ impl SnnBackend for NeuromodNetwork {
     }
 
     fn step(&mut self, stimulus: &[f32]) -> Result<SnnStepOutput> {
-        let spikes = self
-            .network
-            .step(stimulus, &self.modulators)
-            .map_err(|err| CortexError::SnnBackend(err.to_string()))?;
-        Ok(SnnStepOutput { spikes })
+        let result = match self.rng.as_mut() {
+            Some(seeded) => self
+                .network
+                .step_with_rng(stimulus, &self.modulators, &mut seeded.rng),
+            None => self.network.step(stimulus, &self.modulators),
+        };
+        Self::into_output(result)
     }
 
     fn step_frozen(&mut self, stimulus: &[f32]) -> Result<SnnStepOutput> {
-        // neuromod 0.6.0 (latest published) has no `step_frozen`; the frozen
-        // evaluation path lands in a later release. Until then frozen forwards
-        // delegate to `step`, and `capabilities().frozen_evaluation` is false
-        // so orchestrators know plasticity state can advance on this path.
-        self.step(stimulus)
+        let result = match self.rng.as_mut() {
+            Some(seeded) => {
+                self.network
+                    .step_frozen_with_rng(stimulus, &self.modulators, &mut seeded.rng)
+            }
+            None => self.network.step_frozen(stimulus, &self.modulators),
+        };
+        Self::into_output(result)
     }
 
     fn reset(&mut self) {
         self.network.reset();
+        if let Some(seeded) = self.rng.as_mut() {
+            *seeded = SeededRng::new(seeded.seed);
+        }
     }
 
     fn capabilities(&self) -> SnnCapabilities {
         SnnCapabilities {
             backend_name: "neuromod::SpikingNetwork",
-            frozen_evaluation: false,
+            frozen_evaluation: true,
             plasticity: true,
-            caller_rng: true,
+            caller_rng: self.rng.is_some(),
             neuromodulation: true,
         }
     }

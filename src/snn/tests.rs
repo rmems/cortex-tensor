@@ -241,7 +241,10 @@ fn neuromod_adapter_steps_and_reports_capabilities() {
     assert_eq!(net.channels(), 8);
     let caps = net.capabilities();
     assert_eq!(caps.backend_name, "neuromod::SpikingNetwork");
-    assert!(caps.plasticity && caps.neuromodulation);
+    // neuromod 0.7 ships `step_frozen`; the thread-local RNG path is the
+    // default, so replay is only advertised once a seed is installed (#92).
+    assert!(caps.frozen_evaluation && caps.plasticity && caps.neuromodulation);
+    assert!(!caps.caller_rng);
 
     let out = net.step(&[0.5; 8]).unwrap();
     assert!(out.spikes.iter().all(|&i| i < 8));
@@ -348,6 +351,115 @@ fn neuromod_adapter_rejects_blank_lif_neurons() {
     let json = serde_json::to_string(wired.network()).unwrap();
     let restored: neuromod::SpikingNetwork = serde_json::from_str(&json).unwrap();
     assert!(NeuromodNetwork::from_network(restored).is_ok());
+}
+
+/// Learning state of every LIF neuron (weights, eligibility traces, threshold
+/// and decay parameters) plus the stored modulators and R-STDP config — what
+/// `step_frozen` must leave bit-for-bit intact. Runtime state (membranes,
+/// spike timestamps, `global_step`) is allowed to advance and is excluded.
+#[cfg(feature = "neuromod")]
+fn neuromod_learning_state(net: &NeuromodNetwork) -> String {
+    let network = net.network();
+    let lif: Vec<_> = network
+        .neurons
+        .iter()
+        .map(|n| {
+            (
+                n.weights.clone(),
+                n.eligibility.clone(),
+                n.threshold.to_bits(),
+                n.base_threshold.to_bits(),
+                n.decay_rate.to_bits(),
+            )
+        })
+        .collect();
+    serde_json::to_string(&(lif, network.modulators, network.stdp_config)).unwrap()
+}
+
+#[cfg(feature = "neuromod")]
+#[test]
+fn neuromod_adapter_step_frozen_preserves_learning_state() {
+    // Before neuromod 0.7 the adapter delegated `step_frozen` to `step`, so a
+    // held-out `forward_frozen` kept advancing eligibility traces (#92).
+    let mut net = NeuromodNetwork::new(8, 0, 8).unwrap().with_seed(7);
+    // Warm up so traces are non-trivial, then snapshot.
+    for _ in 0..5 {
+        net.step(&[1.0; 8]).unwrap();
+    }
+    let before = neuromod_learning_state(&net);
+    let step_before = net.network().global_step;
+
+    let out = net.step_frozen(&[1.0; 8]).unwrap();
+    assert!(!out.spikes.is_empty(), "frozen path still produces spikes");
+    assert_eq!(
+        net.network().global_step,
+        step_before + 1,
+        "runtime state advances"
+    );
+    assert_eq!(
+        neuromod_learning_state(&net),
+        before,
+        "frozen step mutated learning state"
+    );
+
+    // Control: a learning-enabled step with the same input does move traces.
+    net.step(&[1.0; 8]).unwrap();
+    assert_ne!(neuromod_learning_state(&net), before);
+}
+
+#[cfg(feature = "neuromod")]
+#[test]
+fn neuromod_adapter_seeded_rng_replays_bit_for_bit() {
+    // Bernoulli input encoding draws from the thread-local RNG unless the
+    // adapter routes a caller seed through `step_with_rng` (#92).
+    fn run(net: &mut NeuromodNetwork) -> (Vec<Vec<usize>>, Vec<i64>, String) {
+        let mut spikes = Vec::new();
+        for i in 0..40 {
+            let stimulus = if i % 2 == 0 { [0.5; 8] } else { [0.3; 8] };
+            spikes.push(if i % 5 == 0 {
+                net.step_frozen(&stimulus).unwrap().spikes
+            } else {
+                net.step(&stimulus).unwrap().spikes
+            });
+        }
+        (
+            spikes,
+            net.network().input_spike_times.clone(),
+            serde_json::to_string(net.network()).unwrap(),
+        )
+    }
+
+    let mut a = NeuromodNetwork::new(8, 0, 8)
+        .unwrap()
+        .with_seed(0xC0FF_EE01);
+    let mut b = NeuromodNetwork::new(8, 0, 8)
+        .unwrap()
+        .with_seed(0xC0FF_EE01);
+    assert!(a.capabilities().caller_rng);
+    assert_eq!(a.seed(), Some(0xC0FF_EE01));
+    let first = run(&mut a);
+    assert_eq!(
+        first,
+        run(&mut b),
+        "same seed, same inputs, different trajectory"
+    );
+
+    // `reset` starts a new epoch and reseeds, so an epoch replays from reset.
+    a.reset();
+    assert_eq!(run(&mut a), first, "replay after reset diverged");
+
+    // Dropping the seed falls back to the thread-local RNG and says so.
+    a.set_seed(None);
+    assert!(!a.capabilities().caller_rng);
+    assert_eq!(a.seed(), None);
+    a.step(&[0.5; 8]).unwrap();
+
+    // The seed can also be installed on a wrapped checkpoint after the fact.
+    let mut c = NeuromodNetwork::new(8, 0, 8).unwrap();
+    assert!(!c.capabilities().caller_rng);
+    c.set_seed(Some(0xC0FF_EE01));
+    assert!(c.capabilities().caller_rng);
+    assert_eq!(run(&mut c), first);
 }
 
 #[cfg(feature = "neuromod")]
