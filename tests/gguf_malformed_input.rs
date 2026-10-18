@@ -10,6 +10,7 @@
 //! bytes so the shapes under test (wrapping sizes, misaligned offsets, deep
 //! nesting) are exactly what the GGUF spec forbids or leaves unguarded.
 
+use cortex_tensor::CortexError;
 use cortex_tensor::moe::{MoeRouter, RoutingMode};
 use std::path::PathBuf;
 
@@ -418,9 +419,20 @@ fn nested_array_kv(depth: usize) -> Kv {
 
 /// 200k nesting levels (2.4 MB) used to recurse `skip_value` <-> `skip_array`
 /// once per level and abort the process with "thread has overflowed its
-/// stack" (exit 134), a DoS from the public `probe_model`. The parse must now
-/// complete without recursion, so the probe is run on a thread with a small
-/// stack: an `Ok` or an `Err` is fine, a stack overflow is not.
+/// stack" (exit 134), a DoS from the public `probe_model`.
+///
+/// Detection mechanism: a Rust stack overflow is a SIGABRT of the whole test
+/// process, not a `panic!`, so `join()` cannot observe it. The 256 KiB thread
+/// is an abort-by-process-exit detector: a recursive regression kills the
+/// test binary (CI goes red through the non-zero exit), and the assertions
+/// after `join()` only run when the parse completed within that stack.
+///
+/// Expected outcome: engram-parser walks every level with its explicit
+/// stack, then this crate's adapter refuses the tensor-less file with
+/// `MissingTensor { token_embd.weight }`. Pinning that exact variant proves
+/// the metadata section was consumed in full rather than rejected early for
+/// an unrelated reason. `moderately_nested_metadata_arrays_are_skipped_and_the_router_loads`
+/// shows the same fixture builder is otherwise valid.
 #[test]
 fn deeply_nested_metadata_arrays_do_not_overflow_the_stack() {
     const DEPTH: usize = 200_000;
@@ -432,17 +444,18 @@ fn deeply_nested_metadata_arrays_do_not_overflow_the_stack() {
     let probe = std::thread::Builder::new()
         .name("nested-array-probe".into())
         .stack_size(256 * 1024)
-        .spawn(move || MoeRouter::probe_model(&path).map(|_| ()))
+        .spawn(move || MoeRouter::probe_model(&path))
         .unwrap()
         .join()
-        .expect("probe thread must not panic");
+        .expect("probe thread must return (a stack overflow aborts the process before this)");
 
-    // The file has no tensors, so the adapter refuses it after the metadata
-    // section has been walked in full. A recursive skipper never gets here.
-    let err = probe.unwrap_err();
+    let err = match probe {
+        Ok(metadata) => panic!("tensor-less file must not probe successfully: {metadata:?}"),
+        Err(err) => err,
+    };
     assert!(
-        !err.to_string().contains("overflow"),
-        "metadata walk must not report a stack or arithmetic overflow: {err}"
+        matches!(&err, CortexError::MissingTensor { name, .. } if name == "token_embd.weight"),
+        "expected the adapter's MissingTensor after the metadata walk, got {err:?}"
     );
 }
 
