@@ -241,6 +241,7 @@ impl SnnDecoder for FixedReadoutDecoder {
 /// expert *e*'s gate is the sum of embedding chunk *e*, so one non-zero
 /// element per chunk pins the logit.
 fn embedding_with_gate_logits(logits: &[f32]) -> Vec<f32> {
+    assert!(!logits.is_empty(), "need at least one gate logit");
     let chunk = (EMBEDDING_DIM / logits.len()).max(1);
     let mut embedding = vec![0.0f32; EMBEDDING_DIM];
     for (expert, &logit) in logits.iter().enumerate() {
@@ -461,6 +462,66 @@ fn forward_rejects_negative_or_non_finite_decoder_readout() {
             stage: "decoder readout"
         }
     ));
+}
+
+/// A decoder readout of the wrong length is a structural violation, not a
+/// NaN: it gets its own variant carrying the expected and actual lengths.
+#[test]
+fn forward_rejects_wrong_length_decoder_readout() {
+    let embedding = embedding_with_gate_logits(&NEGATIVE_LOGITS);
+    for got in [0usize, 7, 9] {
+        let mut model = scripted_router(Vec::new(), FixedReadoutDecoder(vec![0.0; got]));
+        assert!(matches!(
+            model.forward(&embedding).unwrap_err(),
+            CortexError::SnnReadoutLength {
+                expected: 8,
+                got: g
+            } if g == got
+        ));
+    }
+}
+
+/// `spike_boost * activity` saturates instead of overflowing: a finite gate
+/// stays finite and a `-Inf` gate stays `-Inf` rather than becoming NaN
+/// after the backend tick has been consumed.
+#[test]
+fn spike_boost_saturates_instead_of_overflowing() {
+    // Expert 0 gated at -Inf, expert 1 at 0.0; both spike with activity 1e30.
+    let mut logits = [0.0f32; 8];
+    logits[0] = f32::NEG_INFINITY;
+    let embedding = embedding_with_gate_logits(&logits);
+    let mut model = scripted_router(vec![0, 1], ScaledCountDecoder(1e30))
+        .with_spike_boost(1e30)
+        .unwrap();
+    let out = model.forward(&embedding).unwrap();
+    assert_eq!(out.selected_experts[0], 1);
+    assert!(!out.selected_experts.contains(&0));
+    assert!(out.expert_weights.iter().all(|w| !w.is_nan()));
+    assert_eq!(out.expert_weights[0], 0.0);
+    assert!(out.hidden.iter().all(|h| !h.is_nan()));
+}
+
+/// Spikes only on unselected experts must not zero the hidden state: the
+/// gain falls back to the dense selected mass exactly as on a silent tick.
+#[test]
+fn hidden_keeps_dense_mass_when_only_unselected_experts_spike() {
+    let embedding = embedding_with_gate_logits(&NEGATIVE_LOGITS);
+    // Expert 7 spikes but -2.75 + 1.0 still loses to -1.0 / -1.25.
+    let mut model = scripted_router(vec![7], SpikeCountDecoder);
+    let out = model.forward(&embedding).unwrap();
+    assert_eq!(out.selected_experts, vec![0, 1]);
+    let dense_mass: f32 = out
+        .selected_experts
+        .iter()
+        .map(|&e| out.expert_weights[e])
+        .sum();
+    assert!(dense_mass > 0.0);
+    assert!(
+        out.hidden
+            .iter()
+            .zip(&embedding)
+            .all(|(h, e)| *h == e * dense_mass)
+    );
 }
 
 #[cfg(feature = "axon-encoder")]

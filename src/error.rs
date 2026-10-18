@@ -91,6 +91,11 @@ pub enum CortexError {
     #[error("SNN backend reported channel {channel} more than once in one tick")]
     SnnDuplicateSpike { channel: usize },
 
+    /// A decoder returned a readout whose length differs from the backend
+    /// channel count.
+    #[error("SNN decoder returned {got} readout values for {expected} channels")]
+    SnnReadoutLength { expected: usize, got: usize },
+
     /// A decoder readout was negative or infinite; spike activity must be a
     /// finite, non-negative quantity (NaN is reported as `SnnNan`).
     #[error("SNN decoder readout at channel {channel} is {value}; expected finite and >= 0")]
