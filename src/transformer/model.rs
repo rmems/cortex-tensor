@@ -67,17 +67,54 @@ impl TransformerConfig {
         }
     }
 
+    /// Parameter count implied by this config, saturating at `usize::MAX`
+    /// when the arithmetic overflows.
+    ///
+    /// Counts every tensor [`TransformerLM::try_new`] allocates: token and
+    /// positional embeddings, each block's attention (`4·dim² + 4·dim`,
+    /// matching [`MultiHeadAttention::param_count`]), feed-forward
+    /// (`2·dim·ff_dim + dim + ff_dim`), and two LayerNorms (`4·dim`), plus
+    /// the final LayerNorm (`2·dim`) and the LM head (`dim·vocab_size`).
+    /// For a constructed model this equals [`TransformerLM::param_count`].
+    /// Prefer [`Self::try_estimated_params`] when an overflow must be
+    /// reported instead of saturated.
+    ///
+    /// [`MultiHeadAttention::param_count`]: super::MultiHeadAttention::param_count
     pub fn estimated_params(&self) -> usize {
-        let embed = self.vocab_size * self.dim;
+        self.try_estimated_params().unwrap_or(usize::MAX)
+    }
+
+    /// Checked variant of [`Self::estimated_params`]: returns
+    /// [`CortexError::InvalidConfig`] when the parameter count does not fit in
+    /// `usize`. The config fields are public, so no field combination is
+    /// assumed to be representable.
+    pub fn try_estimated_params(&self) -> Result<usize> {
+        let overflow =
+            || CortexError::InvalidConfig("transformer parameter count overflows usize".into());
+        let mul = |a: usize, b: usize| a.checked_mul(b).ok_or_else(overflow);
+        let add = |a: usize, b: usize| a.checked_add(b).ok_or_else(overflow);
+
+        let tok_embed = mul(self.vocab_size, self.dim)?;
+        let pos_embed = mul(self.max_seq_len, self.dim)?;
         let per_block = {
-            let attn = 4 * self.dim * self.dim + 4 * self.dim;
-            let ffn = 2 * self.dim * self.ff_dim + self.dim + self.ff_dim;
-            let ln = 4 * self.dim;
-            attn + ffn + ln
+            // MultiHeadAttention: wq/wk/wv/wo [dim, dim] + four [1, dim] biases.
+            let attn = add(mul(mul(4, self.dim)?, self.dim)?, mul(4, self.dim)?)?;
+            // FeedForward: w1 [dim, ff_dim], b1 [1, ff_dim], w2 [ff_dim, dim], b2 [1, dim].
+            let ffn = add(
+                add(mul(mul(2, self.dim)?, self.ff_dim)?, self.dim)?,
+                self.ff_dim,
+            )?;
+            // Two LayerNorms, each with weight and bias of [dim].
+            let ln = mul(4, self.dim)?;
+            add(add(attn, ffn)?, ln)?
         };
-        let final_ln = 2 * self.dim;
-        let lm_head = self.dim * self.vocab_size;
-        embed + self.num_layers * per_block + final_ln + lm_head
+        let blocks = mul(self.num_layers, per_block)?;
+        let final_ln = mul(2, self.dim)?;
+        let lm_head = mul(self.dim, self.vocab_size)?;
+        add(
+            add(add(add(tok_embed, pos_embed)?, blocks)?, final_ln)?,
+            lm_head,
+        )
     }
 }
 
@@ -265,8 +302,20 @@ impl TransformerLM {
         tok.try_add(&pos)
     }
 
+    /// Total number of stored parameters, summed from the allocated tensors.
+    /// Equals [`TransformerConfig::estimated_params`] for a model built from
+    /// its config.
     pub fn param_count(&self) -> usize {
-        self.config.estimated_params()
+        self.tok_embed.numel()
+            + self.pos_embed.numel()
+            + self
+                .blocks
+                .iter()
+                .map(TransformerBlock::param_count)
+                .sum::<usize>()
+            + self.final_ln_w.numel()
+            + self.final_ln_b.numel()
+            + self.lm_head.numel()
     }
 }
 
@@ -370,6 +419,70 @@ mod tests {
             TransformerLM::try_new(cfg),
             Err(CortexError::InvalidConfig(_))
         ));
+    }
+
+    #[test]
+    fn estimated_params_matches_allocated_tensors() {
+        // tiny() allocates 1,874,688 f32 values; the old estimate returned
+        // 1,841,920 because it omitted pos_embed (256 * 128 = 32,768).
+        let cfg = TransformerConfig::tiny();
+        let model = TransformerLM::try_new(cfg.clone()).unwrap();
+        let actual = model.tok_embed.numel()
+            + model.pos_embed.numel()
+            + model
+                .blocks
+                .iter()
+                .map(|b| {
+                    b.attn.wq.numel()
+                        + b.attn.wk.numel()
+                        + b.attn.wv.numel()
+                        + b.attn.wo.numel()
+                        + b.attn.wb_q.numel()
+                        + b.attn.wb_k.numel()
+                        + b.attn.wb_v.numel()
+                        + b.attn.wb_o.numel()
+                        + b.ffn.w1.numel()
+                        + b.ffn.b1.numel()
+                        + b.ffn.w2.numel()
+                        + b.ffn.b2.numel()
+                        + b.ln1_w.numel()
+                        + b.ln1_b.numel()
+                        + b.ln2_w.numel()
+                        + b.ln2_b.numel()
+                })
+                .sum::<usize>()
+            + model.final_ln_w.numel()
+            + model.final_ln_b.numel()
+            + model.lm_head.numel();
+        assert_eq!(actual, 1_874_688);
+        assert_eq!(cfg.estimated_params(), actual);
+        assert_eq!(cfg.try_estimated_params().unwrap(), actual);
+        assert_eq!(model.param_count(), actual);
+    }
+
+    #[test]
+    fn estimated_params_uses_checked_arithmetic() {
+        // vocab_size * dim overflows usize. The unchecked formula panicked
+        // in debug builds and wrapped to 136 in release.
+        let mut cfg = micro_cfg();
+        cfg.vocab_size = usize::MAX / 2;
+        assert!(matches!(
+            cfg.try_estimated_params(),
+            Err(CortexError::InvalidConfig(_))
+        ));
+        assert_eq!(cfg.estimated_params(), usize::MAX);
+
+        // Products fit but the final sum does not.
+        let cfg = TransformerConfig {
+            vocab_size: usize::MAX / 2,
+            dim: 1,
+            num_heads: 1,
+            num_layers: 0,
+            ff_dim: 1,
+            max_seq_len: usize::MAX / 2,
+        };
+        assert!(cfg.try_estimated_params().is_err());
+        assert_eq!(cfg.estimated_params(), usize::MAX);
     }
 
     #[test]
