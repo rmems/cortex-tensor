@@ -70,10 +70,17 @@ fn load_routes_through_checkpoint_gate_weights_not_stub() {
     let mut embedding = vec![0.0f32; EMBEDDING_DIM];
     embedding[0] = 1.0;
     let out = model.forward(&embedding).unwrap();
-    let stub_out = stub().forward(&embedding).unwrap();
+    // Same `num_experts` / `top_k` as the loaded router so the comparison is
+    // about routing content, not output length.
+    let stub_out = MoeRouter::load_with_mode("", 8, 2, RoutingMode::StubUniform)
+        .expect("stub load should succeed")
+        .forward(&embedding)
+        .unwrap();
+    assert_eq!(stub_out.selected_experts, vec![0, 1]);
 
     assert_eq!(out.selected_experts[0], 3);
     assert_ne!(out.selected_experts, stub_out.selected_experts);
+    assert_ne!(out.expert_weights, stub_out.expert_weights);
     assert!(
         out.expert_weights[3] > 0.99,
         "gate-driven weights should concentrate on expert 3, got {:?}",
