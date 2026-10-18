@@ -49,6 +49,52 @@ fn test_dense_sim_uses_real_gate_weights() {
 }
 
 #[test]
+fn load_routes_through_checkpoint_gate_weights_not_stub() {
+    // A gate that favours expert 3 for a unit vector on dimension 0. `load`
+    // must select the checkpoint-backed default mode, so the result differs
+    // from the uniform stub output (`selected=[0]`, zero hidden state).
+    // Expert rows are contiguous (`[expert][hidden]`); column 0 of each row
+    // scores embedding dimension 0.
+    let mut gate = vec![0.0f32; EMBEDDING_DIM * 64];
+    for expert in 0..64 {
+        gate[expert * EMBEDDING_DIM] = if expert == 3 { 8.0 } else { -8.0 };
+    }
+    let gate_bytes: Vec<u8> = gate.iter().flat_map(|value| value.to_le_bytes()).collect();
+    let path = write_temp_file(&build_real_size_checkpoint(gate_bytes), "load-default-mode");
+
+    let mut model = MoeRouter::load(path.to_str().unwrap(), 8, 2).unwrap();
+    assert!(model.is_loaded());
+    assert_eq!(model.routing_mode(), RoutingMode::default());
+    assert_eq!(model.routing_mode(), RoutingMode::DenseSim);
+
+    let mut embedding = vec![0.0f32; EMBEDDING_DIM];
+    embedding[0] = 1.0;
+    let out = model.forward(&embedding).unwrap();
+    let stub_out = stub().forward(&embedding).unwrap();
+
+    assert_eq!(out.selected_experts[0], 3);
+    assert_ne!(out.selected_experts, stub_out.selected_experts);
+    assert!(
+        out.expert_weights[3] > 0.99,
+        "gate-driven weights should concentrate on expert 3, got {:?}",
+        out.expert_weights
+    );
+    assert!(
+        out.hidden.iter().any(|value| *value != 0.0),
+        "loaded routing should produce a non-zero routed hidden state"
+    );
+
+    let _ = remove_file(path);
+}
+
+#[test]
+fn load_with_empty_path_still_defaults_to_dense_sim_stub_router() {
+    let model = MoeRouter::load("", 8, 2).unwrap();
+    assert!(!model.is_loaded());
+    assert_eq!(model.routing_mode(), RoutingMode::DenseSim);
+}
+
+#[test]
 fn dense_sim_ranks_raw_gate_scores_before_softmax() {
     let mut model =
         MoeRouter::load_with_mode("", 8, 2, RoutingMode::DenseSim).expect("stub dense load");
