@@ -235,12 +235,13 @@ fn axon_encoder_adapter_drives_spiking_router() {
 #[cfg(feature = "neuromod")]
 #[test]
 fn neuromod_adapter_steps_and_reports_capabilities() {
-    let mut net = NeuromodNetwork::new(7, 1, 8).unwrap();
+    // One LIF neuron per channel; the Izhikevich bank is auxiliary and does
+    // not count toward the output width (#91).
+    let mut net = NeuromodNetwork::new(8, 1, 8).unwrap();
     assert_eq!(net.channels(), 8);
     let caps = net.capabilities();
     assert_eq!(caps.backend_name, "neuromod::SpikingNetwork");
-    // Frozen eval delegates to `step` until a neuromod release ships step_frozen.
-    assert!(!caps.frozen_evaluation && caps.plasticity && caps.caller_rng && caps.neuromodulation);
+    assert!(caps.plasticity && caps.neuromodulation);
 
     let out = net.step(&[0.5; 8]).unwrap();
     assert!(out.spikes.iter().all(|&i| i < 8));
@@ -252,9 +253,119 @@ fn neuromod_adapter_steps_and_reports_capabilities() {
     assert!(net.step(&[0.5; 4]).is_err());
     assert_eq!(net.network().global_step, 0);
 
-    // Neuron count must equal channel count for the 1:1 output contract.
+    // LIF count must equal channel count for the 1:1 output contract.
     assert!(matches!(
         NeuromodNetwork::new(4, 1, 8),
         Err(CortexError::InvalidConfig(_))
     ));
+}
+
+/// Spike counts per channel after driving `net` with `stimulus` for `steps`
+/// learning-enabled ticks.
+#[cfg(feature = "neuromod")]
+fn neuromod_spike_counts(net: &mut NeuromodNetwork, stimulus: &[f32], steps: usize) -> Vec<usize> {
+    let mut counts = vec![0usize; net.channels()];
+    for _ in 0..steps {
+        for idx in net.step(stimulus).unwrap().spikes {
+            counts[idx] += 1;
+        }
+    }
+    counts
+}
+
+#[cfg(feature = "neuromod")]
+#[test]
+fn neuromod_adapter_rejects_izhikevich_neurons_as_output_channels() {
+    // neuromod's `step` returns LIF indices only, so an Izhikevich neuron
+    // counted toward `num_channels` is a channel that can never spike (#91).
+    for (lif, izh) in [(7, 1), (0, 8), (4, 4)] {
+        let err = NeuromodNetwork::new(lif, izh, 8).err().expect("rejected");
+        assert!(
+            matches!(err, CortexError::InvalidConfig(_)),
+            "{lif}/{izh}: {err}"
+        );
+        assert!(err.to_string().contains("Izhikevich"), "{err}");
+    }
+    // Izhikevich neurons are allowed as an auxiliary bank on top of the
+    // one-LIF-per-channel requirement.
+    assert!(NeuromodNetwork::new(8, 3, 8).is_ok());
+}
+
+#[cfg(feature = "neuromod")]
+#[test]
+fn neuromod_adapter_new_wires_every_channel_to_a_spiking_neuron() {
+    // `SpikingNetwork::with_dimensions` zero-initialises LIF weights and the
+    // L1 renormalization keeps a blank neuron blank, so a backend built that
+    // way never spikes (#91). `new` must seed weights so every channel can.
+    let mut net = NeuromodNetwork::new(8, 0, 8).unwrap();
+    let counts = neuromod_spike_counts(&mut net, &[1.0; 8], 200);
+    assert!(
+        counts.iter().all(|&c| c > 0),
+        "every channel must spike under strong stimulus: {counts:?}"
+    );
+
+    // Identity wiring: driving channel `i` alone spikes neuron `i` alone, so
+    // `SpikingMoeRouter`'s expert-to-channel mapping holds.
+    for ch in 0..8 {
+        let mut net = NeuromodNetwork::new(8, 0, 8).unwrap();
+        let mut stimulus = [0.0; 8];
+        stimulus[ch] = 1.0;
+        let counts = neuromod_spike_counts(&mut net, &stimulus, 50);
+        assert!(counts[ch] > 0, "channel {ch} silent: {counts:?}");
+        assert!(
+            counts.iter().enumerate().all(|(i, &c)| i == ch || c == 0),
+            "channel {ch} leaked: {counts:?}"
+        );
+    }
+}
+
+#[cfg(feature = "neuromod")]
+#[test]
+fn neuromod_adapter_rejects_blank_lif_neurons() {
+    // A restored or hand-built network with an all-zero LIF neuron carries a
+    // channel that provably cannot spike; fail at construction, not after
+    // thousands of silent ticks (#91).
+    let blank = neuromod::SpikingNetwork::with_dimensions(8, 0, 8);
+    let err = NeuromodNetwork::from_network(blank)
+        .err()
+        .expect("rejected");
+    assert!(matches!(err, CortexError::InvalidConfig(_)), "{err}");
+    assert!(err.to_string().contains("network_mut"), "{err}");
+
+    let mut one_blank = neuromod::SpikingNetwork::with_dimensions(8, 0, 8);
+    for (i, neuron) in one_blank.neurons.iter_mut().enumerate() {
+        if i != 3 {
+            neuron.weights[i] = 1.0;
+        }
+    }
+    let err = NeuromodNetwork::from_network(one_blank)
+        .err()
+        .expect("rejected");
+    assert!(err.to_string().contains("neuron 3"), "{err}");
+
+    // A fully wired network round-trips through `from_network`.
+    let wired = NeuromodNetwork::new(8, 0, 8).unwrap();
+    let json = serde_json::to_string(wired.network()).unwrap();
+    let restored: neuromod::SpikingNetwork = serde_json::from_str(&json).unwrap();
+    assert!(NeuromodNetwork::from_network(restored).is_ok());
+}
+
+#[cfg(feature = "neuromod")]
+#[test]
+fn neuromod_adapter_drives_spiking_router_on_every_expert() {
+    // End to end: the router's `hidden` is `embedding * spiking_mass`, so a
+    // backend that never spikes degrades to DenseSim with `hidden == 0` (#91).
+    let router = MoeRouter::load_with_mode("", 8, 8, crate::moe::RoutingMode::DenseSim).unwrap();
+    let backend = NeuromodNetwork::new(8, 0, 8).unwrap();
+    let mut model =
+        SpikingMoeRouter::new(router, backend, RateEncoder::default(), SpikeCountDecoder).unwrap();
+    // With `top_k == num_experts`, `spiking_mass` is the number of expert
+    // channels that fired this tick; a uniform gate drives all eight, so the
+    // hidden state must reach `embedding * 8.0` on some tick.
+    let mut max_mass = 0.0f32;
+    for _ in 0..200 {
+        let out = model.forward(&[1.0; EMBEDDING_DIM]).unwrap();
+        max_mass = max_mass.max(out.hidden[0]);
+    }
+    assert_eq!(max_mass, 8.0, "not every expert channel spiked");
 }

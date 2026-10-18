@@ -29,29 +29,58 @@ impl NeuromodNetwork {
     /// `num_channels` stimulus channels.
     ///
     /// The `SnnBackend` contract uses `channels()` as both the stimulus width
-    /// and the spike-output width, so the neuron count must equal the channel
-    /// count — spike indices would otherwise silently drop or leave channels
-    /// unread.
+    /// and the spike-output width. `neuromod`'s `step` reports **LIF** spikes
+    /// only (Izhikevich spikes are not listed in its return value), so
+    /// `num_lif` must equal `num_channels`; the Izhikevich bank is auxiliary
+    /// and may be any size. A channel backed by an Izhikevich neuron would
+    /// never spike and its expert would silently stay ANN-only.
+    ///
+    /// `SpikingNetwork::with_dimensions` zero-initialises every LIF weight and
+    /// the engine's L1 renormalization leaves a blank neuron blank, so an
+    /// unseeded network can never spike or learn. `new` therefore wires LIF
+    /// neuron *i* to channel *i* at the configured maximum weight (identity
+    /// wiring, matching [`super::SpikingMoeRouter`]'s expert-*i*-at-channel-*i*
+    /// mapping). Callers wanting a different initialisation adjust the weights
+    /// through [`Self::network_mut`] or build the network and use
+    /// [`Self::from_network`].
     pub fn new(num_lif: usize, num_izh: usize, num_channels: usize) -> Result<Self> {
-        Self::checked(SpikingNetwork::with_dimensions(
-            num_lif,
-            num_izh,
-            num_channels,
-        ))
+        let mut network = SpikingNetwork::with_dimensions(num_lif, num_izh, num_channels);
+        let (_, w_max) = network.stdp_config.weight_bounds();
+        for (idx, neuron) in network.neurons.iter_mut().enumerate() {
+            if let Some(weight) = neuron.weights.get_mut(idx) {
+                *weight = w_max;
+            }
+        }
+        Self::checked(network)
     }
 
     /// Wrap an already-configured `SpikingNetwork` (e.g. a restored checkpoint).
-    /// Same 1:1 neuron-to-channel requirement as [`Self::new`].
+    ///
+    /// Same one-LIF-per-channel requirement as [`Self::new`]. Every LIF neuron
+    /// must also carry at least one non-zero finite weight: a blank neuron
+    /// receives no input current, never reaches threshold, and (because the
+    /// renormalization pass skips it) cannot be bootstrapped by STDP, so its
+    /// channel would be permanently silent.
     pub fn from_network(network: SpikingNetwork) -> Result<Self> {
         Self::checked(network)
     }
 
     fn checked(network: SpikingNetwork) -> Result<Self> {
-        let neurons = network.neurons.len() + network.iz_neurons.len();
-        if neurons != network.num_channels {
+        let lif = network.neurons.len();
+        if lif != network.num_channels {
             return Err(CortexError::InvalidConfig(format!(
-                "neuromod SpikingNetwork has {neurons} neurons but {} channels; the SnnBackend contract requires equal widths",
-                network.num_channels
+                "neuromod SpikingNetwork has {lif} LIF neurons but {} channels; the SnnBackend contract requires one LIF neuron per channel (the {} Izhikevich neurons do not count: neuromod reports LIF spikes only)",
+                network.num_channels,
+                network.iz_neurons.len()
+            )));
+        }
+        if let Some(idx) = network
+            .neurons
+            .iter()
+            .position(|neuron| !neuron.weights.iter().any(|w| w.is_finite() && *w != 0.0))
+        {
+            return Err(CortexError::InvalidConfig(format!(
+                "neuromod SpikingNetwork LIF neuron {idx} has no non-zero finite weight, so channel {idx} can never spike; seed its weights (e.g. via network_mut()) before wrapping it"
             )));
         }
         Ok(Self {
