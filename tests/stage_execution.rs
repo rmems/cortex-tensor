@@ -76,7 +76,9 @@ fn block_stages_match_kernels_bitwise() {
     let dim = model.config.dim;
 
     // Produce every stage output through the driver with token ingress.
-    let bindings = ExternalBindings::new().with_tokens("tokens", &toks);
+    let bindings = ExternalBindings::new()
+        .with_tokens("tokens", &toks)
+        .expect("bind tokens");
     let outputs = run_topology(&mut exec, &topo, &bindings).expect("run topology");
 
     // The block operates on the embedding output.
@@ -192,7 +194,9 @@ fn full_composition_matches_model_zero_layer() {
 
 fn assert_composition_matches_model(model: &TransformerLM, toks: &[u32]) {
     let (mut exec, topo) = ReferenceExecutor::from_transformer(model).expect("executor");
-    let bindings = ExternalBindings::new().with_tokens("tokens", toks);
+    let bindings = ExternalBindings::new()
+        .with_tokens("tokens", toks)
+        .expect("bind tokens");
     let outputs = run_topology(&mut exec, &topo, &bindings).expect("run topology");
 
     let expected_logits = model.try_forward(toks).unwrap();
@@ -306,7 +310,9 @@ fn sub_span_injection_skips_embedding_and_matches_full_run() {
 
     // Baseline: full composition readout.
     let full_outputs = {
-        let bindings = ExternalBindings::new().with_tokens("tokens", &toks);
+        let bindings = ExternalBindings::new()
+            .with_tokens("tokens", &toks)
+            .expect("bind tokens");
         run_topology(&mut exec, &topo, &bindings).expect("full run")
     };
     let full_readout = full_outputs[&id("readout")].clone();
@@ -320,7 +326,9 @@ fn sub_span_injection_skips_embedding_and_matches_full_run() {
     let span_a_topo = AnnTopology::new(span_a).expect("span a topology");
     let residual2 = {
         let mut rec = RecordingExecutor::new(&mut exec);
-        let bindings = ExternalBindings::new().with_tokens("tokens", &toks);
+        let bindings = ExternalBindings::new()
+            .with_tokens("tokens", &toks)
+            .expect("bind tokens");
         let out = run_topology(&mut rec, &span_a_topo, &bindings).expect("span a run");
         // Span A does execute embedding.
         assert!(rec.executed.contains(&id("embedding")));
@@ -331,7 +339,9 @@ fn sub_span_injection_skips_embedding_and_matches_full_run() {
     // external ingress for the span's single cross-span dependency.
     let span_b_topo = span_topology(&topo, &id("blocks.1.norm1"), &id("readout"), "hidden_in");
     let mut rec = RecordingExecutor::new(&mut exec);
-    let bindings = ExternalBindings::new().with_tensor("hidden_in", &residual2);
+    let bindings = ExternalBindings::new()
+        .with_tensor("hidden_in", &residual2)
+        .expect("bind hidden_in");
     let span_b_outputs = run_topology(&mut rec, &span_b_topo, &bindings).expect("span b run");
 
     // The injected run must NOT re-run embedding (or any block-0 stage).
@@ -431,7 +441,9 @@ fn moe_stages_are_rejected_and_rejection_is_atomic() {
     ];
     let moe_topo = AnnTopology::new(stages).expect("valid topology");
     let hidden = Tensor::try_from_vec(vec![0.5; model.config.dim], &[1, model.config.dim]).unwrap();
-    let bindings = ExternalBindings::new().with_tensor("hidden", &hidden);
+    let bindings = ExternalBindings::new()
+        .with_tensor("hidden", &hidden)
+        .expect("bind hidden");
     let err = run_topology(&mut composed, &moe_topo, &bindings).unwrap_err();
     assert!(
         matches!(err, CortexError::UnsupportedStage { ref stage_id, .. } if stage_id == "expert"),
@@ -539,7 +551,9 @@ fn output_map_is_keyed_by_stage_id() {
     let model = micro_model();
     let (mut exec, topo) = ReferenceExecutor::from_transformer(&model).expect("executor");
     let toks = tokens();
-    let bindings = ExternalBindings::new().with_tokens("tokens", &toks);
+    let bindings = ExternalBindings::new()
+        .with_tokens("tokens", &toks)
+        .expect("bind tokens");
     let outputs: BTreeMap<StageId, Tensor> =
         run_topology(&mut exec, &topo, &bindings).expect("run topology");
     assert!(outputs.contains_key(&id("embedding")));

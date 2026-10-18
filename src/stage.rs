@@ -549,14 +549,28 @@ pub trait AnnExecutor {
     ) -> Result<Self::Tensor>;
 }
 
+/// One external ingress value: token ids or a tensor.
+///
+/// Tokens and tensors share a single namespace so a name can only ever resolve
+/// to one of them; see [`ExternalBindings::with_tokens`].
+#[derive(Debug)]
+enum Binding<'a, T> {
+    Tokens(&'a [u32]),
+    Tensor(&'a T),
+}
+
 /// Supplies external ingress for [`run_topology`].
 ///
 /// Keys are [`StageSource::External`] names. Each binding is either token ids
 /// (for an embedding ingress) or a tensor (for a hidden-state ingress), and is
 /// resolved into the matching [`StageInput`] when a stage references it.
+///
+/// Names live in **one** namespace: binding the same name twice, whether as
+/// tokens and a tensor or as two tensors, is rejected with
+/// [`CortexError::ConflictingStageBinding`] at bind time rather than letting
+/// one binding silently shadow the other.
 pub struct ExternalBindings<'a, T> {
-    tokens: BTreeMap<String, &'a [u32]>,
-    tensors: BTreeMap<String, &'a T>,
+    externals: BTreeMap<String, Binding<'a, T>>,
 }
 
 impl<'a, T> Default for ExternalBindings<'a, T> {
@@ -565,36 +579,73 @@ impl<'a, T> Default for ExternalBindings<'a, T> {
     }
 }
 
+/// Reports bound names and their kinds (`tokens` / `tensor`), never values, so
+/// `T` need not implement `Debug`.
+impl<T> fmt::Debug for ExternalBindings<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut map = f.debug_map();
+        for (name, binding) in &self.externals {
+            map.entry(name, &binding_kind(binding));
+        }
+        map.finish()
+    }
+}
+
 impl<'a, T> ExternalBindings<'a, T> {
     /// An empty binding set.
     pub fn new() -> Self {
         Self {
-            tokens: BTreeMap::new(),
-            tensors: BTreeMap::new(),
+            externals: BTreeMap::new(),
         }
     }
 
     /// Bind `name` to token ids. Returns `self` for chaining.
-    pub fn with_tokens(mut self, name: impl Into<String>, tokens: &'a [u32]) -> Self {
-        self.tokens.insert(name.into(), tokens);
-        self
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CortexError::ConflictingStageBinding`] when `name` is already
+    /// bound (as tokens or as a tensor).
+    pub fn with_tokens(self, name: impl Into<String>, tokens: &'a [u32]) -> Result<Self> {
+        self.insert_external(name.into(), Binding::Tokens(tokens))
     }
 
     /// Bind `name` to a tensor. Returns `self` for chaining.
-    pub fn with_tensor(mut self, name: impl Into<String>, tensor: &'a T) -> Self {
-        self.tensors.insert(name.into(), tensor);
-        self
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CortexError::ConflictingStageBinding`] when `name` is already
+    /// bound (as tokens or as a tensor).
+    pub fn with_tensor(self, name: impl Into<String>, tensor: &'a T) -> Result<Self> {
+        self.insert_external(name.into(), Binding::Tensor(tensor))
     }
 
-    /// Resolve `name` into a [`StageInput`], preferring a token binding.
-    fn resolve(&self, name: &str) -> Option<StageInput<'a, T>> {
-        if let Some(tokens) = self.tokens.get(name) {
-            Some(StageInput::Tokens(tokens))
-        } else {
-            self.tensors
-                .get(name)
-                .map(|&tensor| StageInput::Tensor(tensor))
+    fn insert_external(mut self, name: String, binding: Binding<'a, T>) -> Result<Self> {
+        if let Some(existing) = self.externals.get(&name) {
+            let (existing_kind, new_kind) = (binding_kind(existing), binding_kind(&binding));
+            return Err(CortexError::ConflictingStageBinding {
+                name,
+                reason: format!(
+                    "already bound as {existing_kind}; cannot also bind it as {new_kind}"
+                ),
+            });
         }
+        self.externals.insert(name, binding);
+        Ok(self)
+    }
+
+    /// Resolve `name` into a [`StageInput`], if bound.
+    fn resolve(&self, name: &str) -> Option<StageInput<'a, T>> {
+        self.externals.get(name).map(|binding| match *binding {
+            Binding::Tokens(tokens) => StageInput::Tokens(tokens),
+            Binding::Tensor(tensor) => StageInput::Tensor(tensor),
+        })
+    }
+}
+
+fn binding_kind<T>(binding: &Binding<'_, T>) -> &'static str {
+    match binding {
+        Binding::Tokens(_) => "tokens",
+        Binding::Tensor(_) => "tensor",
     }
 }
 
@@ -1656,6 +1707,55 @@ mod tests {
     }
 
     #[test]
+    fn bindings_reject_same_name_bound_as_tokens_and_tensor() {
+        let hidden = Tensor::try_from_vec(vec![0.0; 8], &[1, 8]).unwrap();
+        let ids = [0u32, 1];
+
+        // tensor first, then tokens
+        let err = ExternalBindings::new()
+            .with_tensor("x", &hidden)
+            .unwrap()
+            .with_tokens("x", &ids)
+            .unwrap_err();
+        assert!(
+            matches!(err, CortexError::ConflictingStageBinding { ref name, .. } if name == "x"),
+            "expected ConflictingStageBinding, got {err:?}"
+        );
+
+        // tokens first, then tensor
+        let err = ExternalBindings::new()
+            .with_tokens("x", &ids)
+            .unwrap()
+            .with_tensor("x", &hidden)
+            .unwrap_err();
+        assert!(matches!(err, CortexError::ConflictingStageBinding { .. }));
+
+        // same kind twice is a collision too
+        let err = ExternalBindings::<Tensor>::new()
+            .with_tokens("x", &ids)
+            .unwrap()
+            .with_tokens("x", &ids)
+            .unwrap_err();
+        assert!(matches!(err, CortexError::ConflictingStageBinding { .. }));
+
+        // Distinct names resolve to their own kind, whichever was bound first.
+        let bindings = ExternalBindings::new()
+            .with_tokens("tokens", &ids)
+            .unwrap()
+            .with_tensor("hidden", &hidden)
+            .unwrap();
+        assert!(matches!(
+            bindings.resolve("tokens"),
+            Some(StageInput::Tokens(_))
+        ));
+        assert!(matches!(
+            bindings.resolve("hidden"),
+            Some(StageInput::Tensor(_))
+        ));
+        assert!(bindings.resolve("absent").is_none());
+    }
+
+    #[test]
     fn wrong_hidden_width_surfaces_as_stage_failed() {
         // Feed the attention stage a tensor whose feature width is not `dim`;
         // the kernel rejects it and the executor wraps it as StageFailed.
@@ -1774,7 +1874,7 @@ mod tests {
         let model = micro_model();
         let (mut exec, topo) = ReferenceExecutor::from_transformer(&model).unwrap();
         let ids = [1u32, 3, 0];
-        let bindings = ExternalBindings::new().with_tokens("tokens", &ids);
+        let bindings = ExternalBindings::new().with_tokens("tokens", &ids).unwrap();
         let outputs = run_topology(&mut exec, &topo, &bindings).unwrap();
         let readout = outputs
             .get(&StageId::new("readout").unwrap())

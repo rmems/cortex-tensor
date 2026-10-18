@@ -156,6 +156,12 @@ pub enum CortexError {
     #[error("missing binding for external stage source '{name}'")]
     MissingStageBinding { name: String },
 
+    /// A binding name was supplied twice (for example as both token ids and a
+    /// tensor), or a bound stage output names a stage the topology itself
+    /// produces. Rejected at bind / run time instead of shadowing silently.
+    #[error("conflicting binding for stage source '{name}': {reason}")]
+    ConflictingStageBinding { name: String, reason: String },
+
     /// A stage's execution failed; the wrapped error carries the cause.
     #[error("stage '{stage_id}' failed: {source}")]
     StageFailed {
