@@ -17,8 +17,10 @@ const GGUF_MAGIC: &[u8; 4] = b"GGUF";
 const GGUF_VERSION: u32 = 3;
 const GGML_TYPE_F32: u32 = 0;
 const GGML_TYPE_F16: u32 = 1;
+const VALUE_UINT8: u32 = 0;
 const VALUE_UINT32: u32 = 4;
 const VALUE_STRING: u32 = 8;
+const VALUE_ARRAY: u32 = 9;
 
 const ARCH: &str = "reference_moe";
 const HIDDEN: usize = 32;
@@ -389,4 +391,85 @@ fn misaligned_tensor_offsets_never_reach_unsafe_alignment_assumptions() {
             assert!(!err.to_string().is_empty());
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #87: nested metadata arrays
+// ---------------------------------------------------------------------------
+
+/// `depth` arrays nested inside one another, each of length 1, the innermost
+/// an empty `UINT8` array. Every level costs 12 bytes of file.
+fn nested_array_kv(depth: usize) -> Kv {
+    let mut payload = Vec::with_capacity(depth * 12);
+    for level in 0..depth {
+        let innermost = level + 1 == depth;
+        push_u32(
+            &mut payload,
+            if innermost { VALUE_UINT8 } else { VALUE_ARRAY },
+        );
+        push_u64(&mut payload, if innermost { 0 } else { 1 });
+    }
+    Kv {
+        key: "tokenizer.ggml.nested",
+        value_type: VALUE_ARRAY,
+        payload,
+    }
+}
+
+/// 200k nesting levels (2.4 MB) used to recurse `skip_value` <-> `skip_array`
+/// once per level and abort the process with "thread has overflowed its
+/// stack" (exit 134), a DoS from the public `probe_model`. The parse must now
+/// complete without recursion, so the probe is run on a thread with a small
+/// stack: an `Ok` or an `Err` is fine, a stack overflow is not.
+#[test]
+fn deeply_nested_metadata_arrays_do_not_overflow_the_stack() {
+    const DEPTH: usize = 200_000;
+    let bytes = build_gguf(32, vec![nested_array_kv(DEPTH)], &[], &[]);
+    assert!(bytes.len() > 2 * 1024 * 1024, "fixture should be ~2.4 MB");
+    let file = TempGguf::write(&bytes, "nested-arrays");
+    let path = file.as_str().to_owned();
+
+    let probe = std::thread::Builder::new()
+        .name("nested-array-probe".into())
+        .stack_size(256 * 1024)
+        .spawn(move || MoeRouter::probe_model(&path).map(|_| ()))
+        .unwrap()
+        .join()
+        .expect("probe thread must not panic");
+
+    // The file has no tensors, so the adapter refuses it after the metadata
+    // section has been walked in full. A recursive skipper never gets here.
+    let err = probe.unwrap_err();
+    assert!(
+        !err.to_string().contains("overflow"),
+        "metadata walk must not report a stack or arithmetic overflow: {err}"
+    );
+}
+
+/// The same shape at a depth that comfortably fits any stack, with real
+/// tensors behind it, must load: deep-but-valid metadata is not an error.
+#[test]
+fn moderately_nested_metadata_arrays_are_skipped_and_the_router_loads() {
+    let gate = gate_payload();
+    let mut data = gate.clone();
+    data.extend_from_slice(&token_payload());
+    let bytes = build_gguf(
+        32,
+        vec![nested_array_kv(64)],
+        &[
+            gate_entry(0),
+            token_entry(
+                vec![HIDDEN as u64, VOCAB as u64],
+                GGML_TYPE_F32,
+                gate.len() as u64,
+            ),
+        ],
+        &data,
+    );
+    let file = TempGguf::write(&bytes, "nested-arrays-64");
+    let router = match MoeRouter::load(file.as_str(), 0, 0) {
+        Ok(router) => router,
+        Err(err) => panic!("router must load past deep-but-valid metadata: {err}"),
+    };
+    assert_eq!(router.num_experts(), EXPERTS);
 }
