@@ -458,17 +458,36 @@ impl Tensor {
 
     // ── Activation functions ─────────────────────────────────────────
 
+    // Elementwise activations follow the finite-value policy in
+    // [`finite`](crate::tensor::finite): NaN propagates, `±Inf` maps to the
+    // function's mathematical limit, finite inputs give finite outputs.
+
+    /// Rectified linear unit, `max(x, 0)` with NaN propagation.
+    ///
+    /// `f32::max` is not used because it discards NaN. NaN inputs stay NaN,
+    /// `+Inf` stays `+Inf`, and every non-positive input (including `-0.0`
+    /// and `-Inf`) is written as canonical `+0.0`.
     pub fn relu(&self) -> Self {
-        let data: Vec<f32> = self.data.iter().map(|x| x.max(0.0)).collect();
+        let data: Vec<f32> = self
+            .data
+            .iter()
+            .map(|&x| if x.is_nan() || x > 0.0 { x } else { 0.0 })
+            .collect();
         Self::from_vec(data, &self.shape)
     }
 
+    /// Tanh-approximate GELU: `x * 0.5 * (1 + tanh(sqrt(2/π) * (x + 0.044715 x³)))`.
+    ///
+    /// `+Inf` gives `+Inf` and `-Inf` gives `0` (the limits), instead of the
+    /// NaN that `-Inf * 0` would produce. NaN propagates.
     pub fn gelu(&self) -> Self {
         let data: Vec<f32> = self
             .data
             .iter()
             .map(|&x| {
-                // Approximate GELU: x * 0.5 * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
+                if x.is_infinite() {
+                    return if x.is_sign_positive() { x } else { 0.0 };
+                }
                 let c = (2.0f32 / std::f32::consts::PI).sqrt();
                 x * 0.5 * (1.0 + (c * (x + 0.044715 * x * x * x)).tanh())
             })
@@ -476,32 +495,86 @@ impl Tensor {
         Self::from_vec(data, &self.shape)
     }
 
+    /// SiLU / swish: `x / (1 + exp(-x))`.
+    ///
+    /// `+Inf` gives `+Inf` and `-Inf` gives `0` (the limits), instead of the
+    /// NaN that `-Inf / Inf` would produce. NaN propagates.
     pub fn silu(&self) -> Self {
-        let data: Vec<f32> = self.data.iter().map(|&x| x / (1.0 + (-x).exp())).collect();
+        let data: Vec<f32> = self
+            .data
+            .iter()
+            .map(|&x| {
+                if x.is_infinite() {
+                    return if x.is_sign_positive() { x } else { 0.0 };
+                }
+                x / (1.0 + (-x).exp())
+            })
+            .collect();
         Self::from_vec(data, &self.shape)
     }
 
-    /// Fast sigmoid surrogate gradient (from soma-engine's E-prop)
+    /// Fast sigmoid surrogate gradient (from soma-engine's E-prop): `x / (1 + |x|)`.
+    ///
+    /// `±Inf` gives `±1` (the limits), instead of the NaN that `Inf / Inf`
+    /// would produce. NaN propagates.
     pub fn fast_sigmoid(&self) -> Self {
-        let data: Vec<f32> = self.data.iter().map(|&x| x / (1.0 + x.abs())).collect();
+        let data: Vec<f32> = self
+            .data
+            .iter()
+            .map(|&x| {
+                if x.is_infinite() {
+                    return if x.is_sign_positive() { 1.0 } else { -1.0 };
+                }
+                x / (1.0 + x.abs())
+            })
+            .collect();
         Self::from_vec(data, &self.shape)
     }
 
     // ── Reductions ───────────────────────────────────────────────────
 
+    /// Sum of all elements, accumulated in `f64` and cast back to `f32`.
+    ///
+    /// Sequential `f64` accumulation keeps every `f32` input exact and avoids
+    /// the `f32` running-sum stall at `2^24` and spurious intermediate
+    /// overflow (`[MAX, MAX, -MAX]` sums to `MAX`). The final cast follows
+    /// IEEE rounding: a true sum outside the `f32` range becomes `±Inf`. NaN
+    /// inputs propagate and `+Inf + -Inf` is NaN. An empty tensor sums to `0`.
     pub fn sum(&self) -> f32 {
-        self.data.iter().sum()
+        self.sum_f64() as f32
     }
 
-    /// Arithmetic mean over all elements.
+    /// Arithmetic mean over all elements, computed from the `f64` sum.
     ///
     /// Returns `NaN` when `numel() == 0` (zero-sized axis or empty buffer).
     pub fn mean(&self) -> f32 {
-        self.sum() / self.numel() as f32
+        (self.sum_f64() / self.numel() as f64) as f32
     }
 
+    fn sum_f64(&self) -> f64 {
+        self.data.iter().map(|&x| f64::from(x)).sum()
+    }
+
+    /// Largest element.
+    ///
+    /// NaN policy: any NaN (either sign) makes the result NaN; `f32::max` is
+    /// not used because it silently discards NaN. Otherwise this is the
+    /// ordinary maximum, so `data()[argmax()] == max_val()` for NaN-free
+    /// input and both report NaN when a positive NaN is present. (A negative
+    /// NaN sorts below `-Inf` in [`argmax`](Self::argmax)'s total order but
+    /// still yields NaN here.) An empty tensor returns `-Inf`, the identity of
+    /// `max`.
     pub fn max_val(&self) -> f32 {
-        self.data.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+        let mut best = f32::NEG_INFINITY;
+        for &x in &self.data {
+            if x.is_nan() {
+                return f32::NAN;
+            }
+            if x > best {
+                best = x;
+            }
+        }
+        best
     }
 
     /// Index of the largest element.
@@ -1091,6 +1164,126 @@ mod tests {
         assert!(empty.mean().is_nan());
         let scalar = Tensor::try_from_vec(vec![4.0], &[]).unwrap();
         assert_eq!(scalar.mean(), 4.0);
+    }
+
+    // ── Finite-value policy: activations and whole-tensor reductions (issue 95) ──
+
+    const NEG_NAN: f32 = f32::from_bits(0xffc0_0000);
+
+    #[test]
+    fn relu_propagates_nan_and_keeps_infinities() {
+        let t = Tensor::from_vec(
+            vec![f32::NAN, 1.0, -2.0, f32::INFINITY, f32::NEG_INFINITY, 0.0],
+            &[6],
+        );
+        let r = t.relu();
+        assert!(r.data()[0].is_nan(), "relu must not erase NaN via f32::max");
+        assert_eq!(r.data()[1], 1.0);
+        assert_eq!(r.data()[2].to_bits(), 0.0f32.to_bits());
+        assert_eq!(r.data()[3], f32::INFINITY);
+        assert_eq!(r.data()[4].to_bits(), 0.0f32.to_bits());
+        assert_eq!(r.data()[5].to_bits(), 0.0f32.to_bits());
+        let neg = Tensor::from_vec(vec![NEG_NAN, -0.0], &[2]).relu();
+        assert!(neg.data()[0].is_nan());
+        // Negative zero is clamped to canonical +0.0 (deterministic bit pattern).
+        assert_eq!(neg.data()[1].to_bits(), 0.0f32.to_bits());
+    }
+
+    #[test]
+    fn max_val_propagates_nan_and_documents_empty() {
+        let t = Tensor::from_vec(vec![f32::NAN, 1.0, -2.0], &[3]);
+        assert!(
+            t.max_val().is_nan(),
+            "max_val must not drop NaN via f32::max"
+        );
+        // Positive NaN: argmax picks the NaN and max_val is NaN, so the two agree.
+        assert!(t.data()[t.argmax()].is_nan());
+        let neg = Tensor::from_vec(vec![NEG_NAN, 1.0, 3.0], &[3]);
+        assert!(neg.max_val().is_nan());
+        let fin = Tensor::from_vec(vec![-3.0, f32::NEG_INFINITY, 2.5, 2.5], &[4]);
+        assert_eq!(fin.max_val(), 2.5);
+        assert_eq!(fin.data()[fin.argmax()], fin.max_val());
+        let inf = Tensor::from_vec(vec![1.0, f32::INFINITY], &[2]);
+        assert_eq!(inf.max_val(), f32::INFINITY);
+        let empty = Tensor::try_from_vec(vec![], &[0]).unwrap();
+        assert_eq!(empty.max_val(), f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn activations_at_infinity_return_their_limits() {
+        let t = Tensor::from_vec(vec![f32::NEG_INFINITY, f32::INFINITY, f32::NAN], &[3]);
+        let silu = t.silu();
+        assert_eq!(silu.data()[0], 0.0, "silu(-Inf) = 0, not -Inf/Inf = NaN");
+        assert_eq!(silu.data()[1], f32::INFINITY);
+        assert!(silu.data()[2].is_nan());
+        let gelu = t.gelu();
+        assert_eq!(gelu.data()[0], 0.0, "gelu(-Inf) = 0, not -Inf*0 = NaN");
+        assert_eq!(gelu.data()[1], f32::INFINITY);
+        assert!(gelu.data()[2].is_nan());
+        let fs = t.fast_sigmoid();
+        assert_eq!(fs.data()[0], -1.0, "fast_sigmoid(-Inf) = -1, not Inf/Inf");
+        assert_eq!(fs.data()[1], 1.0);
+        assert!(fs.data()[2].is_nan());
+        let relu = t.relu();
+        assert_eq!(relu.data()[0], 0.0);
+        assert_eq!(relu.data()[1], f32::INFINITY);
+        assert!(relu.data()[2].is_nan());
+    }
+
+    #[test]
+    fn activations_stay_finite_for_large_finite_inputs() {
+        // x³ overflows f32 well before x does; the tanh argument must not turn
+        // a finite input into NaN, and the result must approach the ±Inf limits.
+        let t = Tensor::from_vec(vec![-1e20, 1e20, -3e38, 3e38, -100.0, 100.0], &[6]);
+        for (name, out) in [
+            ("gelu", t.gelu()),
+            ("silu", t.silu()),
+            ("fast_sigmoid", t.fast_sigmoid()),
+            ("relu", t.relu()),
+        ] {
+            for (x, y) in t.data().iter().zip(out.data()) {
+                assert!(y.is_finite(), "{name}({x}) = {y} is not finite");
+            }
+        }
+        assert_eq!(t.gelu().data()[0], 0.0);
+        assert_eq!(t.gelu().data()[1], 1e20);
+        assert_eq!(t.silu().data()[0], 0.0);
+        assert_eq!(t.silu().data()[1], 1e20);
+    }
+
+    #[test]
+    fn sum_and_mean_accumulate_in_f64() {
+        // f32 accumulation stalls at 2^24: 16777216 + 1 rounds back to 16777216.
+        let t = Tensor::from_vec(vec![16_777_216.0, 1.0, 1.0], &[3]);
+        assert_eq!(t.sum(), 16_777_218.0);
+        // 2^24 + 2 ones: the f32 running sum would freeze at 2^24.
+        let n = (1usize << 24) + 2;
+        let ones = Tensor::ones(&[n]);
+        assert_eq!(ones.sum(), n as f32);
+        assert_eq!(ones.mean(), 1.0);
+        // Intermediate f32 overflow must not leak into a finite true sum.
+        let t = Tensor::from_vec(vec![f32::MAX, f32::MAX, -f32::MAX], &[3]);
+        assert_eq!(t.sum(), f32::MAX);
+        // A true sum outside the f32 range still rounds to the signed infinity.
+        let t = Tensor::from_vec(vec![f32::MAX, f32::MAX], &[2]);
+        assert_eq!(t.sum(), f32::INFINITY);
+        // Non-finite inputs follow IEEE: NaN propagates, Inf - Inf is NaN.
+        assert!(Tensor::from_vec(vec![1.0, f32::NAN], &[2]).sum().is_nan());
+        assert_eq!(
+            Tensor::from_vec(vec![1.0, f32::INFINITY], &[2]).sum(),
+            f32::INFINITY
+        );
+        assert!(
+            Tensor::from_vec(vec![f32::INFINITY, f32::NEG_INFINITY], &[2])
+                .sum()
+                .is_nan()
+        );
+        // The reference golden (sum 21, mean 3.5) is unchanged.
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        assert_eq!((a.sum(), a.mean()), (21.0, 3.5));
+        // Mean is computed from the f64 sum, not the rounded f32 sum.
+        let t = Tensor::from_vec(vec![16_777_216.0, 1.0, 1.0, 0.0], &[4]);
+        assert_eq!(t.mean(), 16_777_218.0 / 4.0);
     }
 
     #[test]
