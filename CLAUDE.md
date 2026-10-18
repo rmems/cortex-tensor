@@ -20,7 +20,7 @@ Run from the repo root. "Verified" means it ran successfully in a fresh checkout
 | `cargo test --verbose --manifest-path compat/zip/Cargo.toml` | verified |
 | `cargo fmt --manifest-path compat/zip/Cargo.toml -- --check` | verified |
 | `cargo clippy --manifest-path compat/zip/Cargo.toml --all-targets -- -D warnings` | verified |
-| `cargo llvm-cov --lib --no-default-features --lcov --output-path lcov.info` | from CI, not run here (`cargo-llvm-cov` not installed) |
+| `cargo llvm-cov --lib --no-default-features --lcov --output-path lcov.info` | not run here (`cargo-llvm-cov` not installed); CI adds `--locked` |
 
 CI (`.github/workflows/rust.yml`) also runs reviewdog, Snyk, and Codecov upload. Those need secrets and are not local gates.
 Run the fmt and clippy gates before committing; CI fails on either.
@@ -32,7 +32,7 @@ Run the fmt and clippy gates before committing; CI fails on either.
 - `src/tensor/`: row-major `Vec<f32>` `Tensor`, ops, and the finite-value policy in `finite.rs`.
 - `src/transformer/`, `src/moe/`: reference transformer and dense MoE routing. `moe/checkpoint.rs` binds `engram-parser` output.
 - `src/snn/`: `SnnBackend`/`SnnEncoder`/`SnnDecoder` contract; `neuromod_adapter.rs` and `axon_adapter.rs` sit behind features.
-- `src/reference_json.rs`: versioned (`schema_version: 1`) serde fixture format. Goldens live in `tests/fixtures/` (see `REFERENCE_GOLDENS.md`).
+- `src/reference_json.rs`: size-limited loading (`from_slice_with_limit`) and the object-shape check for reference JSON fixtures. The `schema_version: 1` check and `deny_unknown_fields` live in `src/tensor/mod.rs` and `src/transformer/mod.rs`. Goldens live in `tests/fixtures/` (see `tests/fixtures/REFERENCE_GOLDENS.md`).
 - `compat/zip/`: local facade crate wired in through `[patch.crates-io]` in `Cargo.toml`. It is not part of the library API.
 
 ## Invariants and non-goals (from README and `Cargo.toml`)
@@ -48,9 +48,7 @@ Run the fmt and clippy gates before committing; CI fails on either.
 
 ## Gotchas
 
-- `Cargo.lock` is gitignored. Do not pass `--locked` to local builds or tests.
-- `rust-version` in `Cargo.toml` must equal `rust-toolchain.toml` `channel`; bump both together with CI and `.agents/setup`.
 - The first all-features build compiles Candle and takes about a minute; later runs are incremental.
 - Never run `cargo publish`.
-- Edit only what the task needs; the owner's repos omit Claude/Anthropic attribution, so add no `Co-Authored-By` trailers or "Generated with" footers to commits or PRs.
+- Edit only what the task needs.
 - `.claude/` is gitignored, so keep shared agent guidance in this file or `AGENTS.md`.
