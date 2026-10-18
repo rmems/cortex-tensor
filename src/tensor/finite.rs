@@ -65,7 +65,9 @@
 //! - **Attention:** Causal MHA softmaxes only the visible prefix `0..=r` of each score row and
 //!   writes exact `0.0` for the future slots, so no score value (including an all-`-Inf`
 //!   prefix, which is uniform over the prefix per the policy table) can put mass on a masked
-//!   key (see `transformer::attention` module docs).
+//!   key. The `attn × V` product likewise accumulates only value rows `0..=r`, so a non-finite
+//!   future `V` row cannot reach earlier tokens through `0.0 * NaN` (see `transformer::attention`
+//!   module docs).
 //! - **MoE:** Routing softmax shares this kernel; top-k uses raw-score ordering and NaN rejection
 //!   outside this module (RM-1355).
 

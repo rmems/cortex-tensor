@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `MultiHeadAttention` no longer leaks future tokens when every visible score is `-Inf` (e.g. `-1e40` overflow). Softmax now runs over the causal prefix `0..=r` only and future slots are exact zeros; the additive causal mask is no longer materialised. Outputs for rows with at least one finite visible score and finite future scores are unchanged; a non-finite future score no longer affects earlier rows' attention weights (issue 94).
+- `MultiHeadAttention` no longer leaks future tokens when every visible score is `-Inf` (e.g. `-1e40` overflow). Softmax now runs over the causal prefix `0..=r` only and future slots are exact zeros; the additive causal mask is no longer materialised. Outputs for rows with at least one finite visible score and finite future scores are unchanged; a non-finite future score no longer affects earlier rows' attention weights. The `attn × V` product now also accumulates only the visible prefix, so a NaN/`±Inf` value row at a future position no longer poisons earlier tokens via `0.0 * NaN`; finite outputs are bit-identical (issue 94).
 
 ### Changed
 

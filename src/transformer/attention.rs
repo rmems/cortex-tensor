@@ -162,8 +162,9 @@ impl MultiHeadAttention {
         // future slots are exactly zero (no additive mask needed).
         let attn = causal_batched_softmax(&scores, nh, seq_len);
 
-        // attn × V → [nh, seq_len, hd]
-        let ctx = try_batched_matmul(&attn, &v)?;
+        // attn × V → [nh, seq_len, hd], accumulated over the visible prefix only
+        // so a non-finite future V row cannot reach earlier rows via 0 × NaN.
+        let ctx = causal_context(&attn, &v, nh, seq_len, hd);
 
         // Reshape back to [seq_len, dim]
         let ctx = merge_heads(&ctx, seq_len, nh, hd);
@@ -279,6 +280,44 @@ fn causal_batched_softmax(t: &Tensor, nh: usize, seq: usize) -> Tensor {
     Tensor::from_vec(out, t.shape())
 }
 
+/// Causal `attn × V`: `[nh, seq, seq] × [nh, seq, hd] → [nh, seq, hd]`.
+///
+/// Row `r` accumulates only value rows `0..=r`. A dense matmul would also
+/// multiply the exactly-zero future weights by future `V` rows, and
+/// `0.0 * NaN` / `0.0 * ±Inf` is NaN, so a non-finite future value would poison
+/// earlier tokens even though their attention weights are exactly zero.
+/// For finite inputs the result is bit-identical to the dense product: the
+/// skipped terms are `±0.0` additions and the accumulation order is unchanged.
+fn causal_context(attn: &Tensor, v: &Tensor, nh: usize, seq: usize, hd: usize) -> Tensor {
+    debug_assert_eq!(
+        attn.shape(),
+        &[nh, seq, seq],
+        "weights must be [heads, seq, seq]"
+    );
+    debug_assert_eq!(
+        v.shape(),
+        &[nh, seq, hd],
+        "values must be [heads, seq, head_dim]"
+    );
+    let a = attn.data();
+    let vd = v.data();
+    let mut out = vec![0.0f32; v.numel()];
+    for h in 0..nh {
+        for r in 0..seq {
+            let a_off = h * seq * seq + r * seq;
+            let o_off = h * seq * hd + r * hd;
+            for p in 0..=r {
+                let w = a[a_off + p];
+                let v_off = h * seq * hd + p * hd;
+                for j in 0..hd {
+                    out[o_off + j] += w * vd[v_off + j];
+                }
+            }
+        }
+    }
+    Tensor::from_vec(out, v.shape())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,6 +397,34 @@ mod tests {
         softmax_row(&[0.1, 0.2, 0.3], &mut expect);
         assert_eq!(&d[6..9], &expect);
         assert!((d[6..9].iter().sum::<f32>() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn non_finite_future_value_does_not_poison_earlier_rows() {
+        // Identity projections, so v = x. Token 1's value row is NaN / +Inf; its
+        // attention weight in row 0 is exactly 0.0, and 0 * NaN must not reach row 0.
+        let mut attn = MultiHeadAttention::new(2, 1);
+        attn.wq = identity(2, 1.0);
+        attn.wk = identity(2, 1.0);
+        attn.wv = identity(2, 1.0);
+        attn.wo = identity(2, 1.0);
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let out = attn.forward(&Tensor::from_vec(vec![1.0, 2.0, bad, bad], &[2, 2]));
+            let clean = attn.forward(&Tensor::from_vec(vec![1.0, 2.0, 0.0, 0.0], &[2, 2]));
+            assert_eq!(&out.data()[..2], &clean.data()[..2], "bad = {bad}");
+            assert!(out.data()[..2].iter().all(|x| x.is_finite()));
+        }
+    }
+
+    #[test]
+    fn causal_context_matches_dense_matmul_for_finite_inputs() {
+        let (nh, seq, hd) = (2, 5, 3);
+        let scores = Tensor::randn(&[nh, seq, seq], 0.0, 1.0);
+        let attn = causal_batched_softmax(&scores, nh, seq);
+        let v = Tensor::randn(&[nh, seq, hd], 0.0, 1.0);
+        let dense = try_batched_matmul(&attn, &v).unwrap();
+        let causal = causal_context(&attn, &v, nh, seq, hd);
+        assert_eq!(dense.data(), causal.data());
     }
 
     #[test]
