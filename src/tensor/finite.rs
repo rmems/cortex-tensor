@@ -62,10 +62,10 @@
 //!   validate rank, shapes, [`validate_norm_eps`], and output size before calling the kernels.
 //! - **Sum tolerance:** [`apply_simplex_residual`] adjusts the largest `f32` mass after every
 //!   softmax branch so documented rows meet [`SOFTMAX_SUM_TOLERANCE`].
-//! - **Attention:** Causal MHA softmaxes each full score row after the additive mask. An
-//!   all-`-Inf` row is uniform over the row length (see policy table); callers that need zero
-//!   mass on masked keys must ensure at least one finite logit on the attended prefix or apply
-//!   a mask after softmax (see `transformer::attention` module docs).
+//! - **Attention:** Causal MHA softmaxes only the visible prefix `0..=r` of each score row and
+//!   writes exact `0.0` for the future slots, so no score value (including an all-`-Inf`
+//!   prefix, which is uniform over the prefix per the policy table) can put mass on a masked
+//!   key (see `transformer::attention` module docs).
 //! - **MoE:** Routing softmax shares this kernel; top-k uses raw-score ordering and NaN rejection
 //!   outside this module (RM-1355).
 

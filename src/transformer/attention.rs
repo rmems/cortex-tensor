@@ -260,6 +260,11 @@ fn transpose_last_two(t: &Tensor) -> Tensor {
 /// scores are never read, so no score value (including `-Inf` overflow of the
 /// whole prefix) can move probability mass onto a future token (issue #94).
 fn causal_batched_softmax(t: &Tensor, nh: usize, seq: usize) -> Tensor {
+    debug_assert_eq!(
+        t.shape(),
+        &[nh, seq, seq],
+        "scores must be [heads, seq, seq]"
+    );
     let d = t.data();
     let mut out = vec![0.0f32; t.numel()];
     if seq == 0 {
