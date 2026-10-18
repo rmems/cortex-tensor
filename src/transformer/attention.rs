@@ -261,7 +261,7 @@ fn transpose_last_two(t: &Tensor) -> Tensor {
 /// scores are never read, so no score value (including `-Inf` overflow of the
 /// whole prefix) can move probability mass onto a future token (issue #94).
 fn causal_batched_softmax(t: &Tensor, nh: usize, seq: usize) -> Tensor {
-    debug_assert_eq!(
+    assert_eq!(
         t.shape(),
         &[nh, seq, seq],
         "scores must be [heads, seq, seq]"
@@ -289,12 +289,12 @@ fn causal_batched_softmax(t: &Tensor, nh: usize, seq: usize) -> Tensor {
 /// For finite inputs the result is bit-identical to the dense product: the
 /// skipped terms are `±0.0` additions and the accumulation order is unchanged.
 fn causal_context(attn: &Tensor, v: &Tensor, nh: usize, seq: usize, hd: usize) -> Tensor {
-    debug_assert_eq!(
+    assert_eq!(
         attn.shape(),
         &[nh, seq, seq],
         "weights must be [heads, seq, seq]"
     );
-    debug_assert_eq!(
+    assert_eq!(
         v.shape(),
         &[nh, seq, hd],
         "values must be [heads, seq, head_dim]"
@@ -330,6 +330,23 @@ mod tests {
         Tensor::from_vec(d, &[dim, dim])
     }
 
+    /// Deterministic pseudo-random values in `[-1, 1)` (LCG), so a failure is
+    /// reproducible; the properties below hold for every finite input.
+    fn pseudo_random(shape: &[usize], seed: u64, scale: f32) -> Tensor {
+        let n: usize = shape.iter().product();
+        let mut state = seed;
+        let data = (0..n)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let unit = ((state >> 40) as f32) / ((1u64 << 24) as f32);
+                (unit * 2.0 - 1.0) * scale
+            })
+            .collect();
+        Tensor::from_vec(data, shape)
+    }
+
     /// `dim=2, heads=1`, `wq=-I`, `wk=wv=wo=I`, zero biases (issue #94).
     fn overflow_attention() -> MultiHeadAttention {
         let mut attn = MultiHeadAttention::new(2, 1);
@@ -343,7 +360,7 @@ mod tests {
     #[test]
     fn test_attention_shapes() {
         let attn = MultiHeadAttention::new(64, 4);
-        let x = Tensor::randn(&[8, 64], 0.0, 0.1);
+        let x = pseudo_random(&[8, 64], 1, 0.1);
         let out = attn.forward(&x);
         assert_eq!(out.shape(), &[8, 64]);
     }
@@ -361,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn batched_softmax_all_neg_inf_row_zeroes_future_slots() {
+    fn causal_softmax_all_neg_inf_row_zeroes_future_slots() {
         let ninf = f32::NEG_INFINITY;
         let scores = Tensor::from_vec(
             vec![ninf, ninf, ninf, ninf, ninf, ninf, ninf, ninf, ninf],
@@ -381,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn batched_softmax_partial_mask_matches_row_softmax() {
+    fn causal_softmax_ignores_future_scores_and_matches_row_softmax() {
         let ninf = f32::NEG_INFINITY;
         // Future slots are -Inf as an additive causal mask would leave them;
         // row 1 also has a -Inf inside its visible prefix; row 2 is plain finite.
@@ -397,6 +414,38 @@ mod tests {
         softmax_row(&[0.1, 0.2, 0.3], &mut expect);
         assert_eq!(&d[6..9], &expect);
         assert!((d[6..9].iter().sum::<f32>() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nan_inside_prefix_poisons_only_that_row() {
+        // RM-1354: NaN in a visible prefix poisons that row's prefix; future
+        // slots stay exactly 0.0 and other rows are untouched.
+        let scores = Tensor::from_vec(
+            vec![0.5, 9.0, 9.0, f32::NAN, 1.0, 9.0, 0.1, 0.2, 0.3],
+            &[1, 3, 3],
+        );
+        let p = causal_batched_softmax(&scores, 1, 3);
+        let d = p.data();
+        assert_eq!(&d[0..3], &[1.0, 0.0, 0.0]);
+        assert!(d[3].is_nan() && d[4].is_nan());
+        assert_eq!(d[5], 0.0);
+        assert!(d[6..9].iter().all(|w| w.is_finite()));
+    }
+
+    #[test]
+    fn plus_inf_inside_prefix_is_one_hot_and_future_inf_is_ignored() {
+        // +Inf in the prefix wins outright; +Inf in a future slot (which an
+        // additive mask would have turned into NaN via -Inf + Inf) is never read.
+        let inf = f32::INFINITY;
+        let scores = Tensor::from_vec(
+            vec![0.0, inf, inf, 1.0, inf, inf, 0.1, 0.2, 0.3],
+            &[1, 3, 3],
+        );
+        let p = causal_batched_softmax(&scores, 1, 3);
+        let d = p.data();
+        assert_eq!(&d[0..3], &[1.0, 0.0, 0.0]);
+        assert_eq!(&d[3..6], &[0.0, 1.0, 0.0]);
+        assert!(d[6..9].iter().all(|w| w.is_finite()));
     }
 
     #[test]
@@ -419,9 +468,9 @@ mod tests {
     #[test]
     fn causal_context_matches_dense_matmul_for_finite_inputs() {
         let (nh, seq, hd) = (2, 5, 3);
-        let scores = Tensor::randn(&[nh, seq, seq], 0.0, 1.0);
+        let scores = pseudo_random(&[nh, seq, seq], 2, 1.0);
         let attn = causal_batched_softmax(&scores, nh, seq);
-        let v = Tensor::randn(&[nh, seq, hd], 0.0, 1.0);
+        let v = pseudo_random(&[nh, seq, hd], 3, 1.0);
         let dense = try_batched_matmul(&attn, &v).unwrap();
         let causal = causal_context(&attn, &v, nh, seq, hd);
         assert_eq!(dense.data(), causal.data());
@@ -430,7 +479,7 @@ mod tests {
     #[test]
     fn causal_attention_output_independent_of_future_tokens() {
         let attn = MultiHeadAttention::new(8, 2);
-        let base = Tensor::randn(&[4, 8], 0.0, 0.5);
+        let base = pseudo_random(&[4, 8], 4, 0.5);
         let mut changed = base.data().to_vec();
         for v in &mut changed[2 * 8..] {
             *v += 3.0; // perturb tokens 2 and 3
