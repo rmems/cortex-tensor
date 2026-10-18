@@ -533,11 +533,13 @@ impl Tensor {
 
     // ── Reductions ───────────────────────────────────────────────────
 
-    /// Sum of all elements, accumulated in `f64` and cast back to `f32`.
+    /// Sum of all elements, accumulated in compensated `f64` and cast back to `f32`.
     ///
-    /// Sequential `f64` accumulation keeps every `f32` input exact and avoids
-    /// the `f32` running-sum stall at `2^24` and spurious intermediate
-    /// overflow (`[MAX, MAX, -MAX]` sums to `MAX`). The final cast follows
+    /// Sequential Neumaier (Kahan-Babuška) `f64` accumulation keeps every
+    /// `f32` input exact, avoids the `f32` running-sum stall at `2^24` and
+    /// spurious intermediate overflow (`[MAX, MAX, -MAX]` sums to `MAX`), and
+    /// keeps a small term that plain `f64` would cancel away between two large
+    /// ones (`[MAX, 1e20, -MAX]` sums to `1e20`). The final cast follows
     /// IEEE rounding: a true sum outside the `f32` range becomes `±Inf`. NaN
     /// inputs propagate and `+Inf + -Inf` is NaN. An empty tensor sums to `0`.
     pub fn sum(&self) -> f32 {
@@ -551,8 +553,23 @@ impl Tensor {
         (self.sum_f64() / self.numel() as f64) as f32
     }
 
+    /// Neumaier-compensated sequential `f64` sum (deterministic for a given
+    /// input bit pattern). Non-finite inputs fall through IEEE arithmetic:
+    /// NaN propagates and `+Inf + -Inf` is NaN.
     fn sum_f64(&self) -> f64 {
-        self.data.iter().map(|&x| f64::from(x)).sum()
+        let mut sum = 0.0f64;
+        let mut comp = 0.0f64;
+        for &x in &self.data {
+            let x = f64::from(x);
+            let t = sum + x;
+            if sum.abs() >= x.abs() {
+                comp += (sum - t) + x;
+            } else {
+                comp += (x - t) + sum;
+            }
+            sum = t;
+        }
+        if sum.is_finite() { sum + comp } else { sum }
     }
 
     /// Largest element.
@@ -1249,6 +1266,12 @@ mod tests {
         assert_eq!(t.gelu().data()[1], 1e20);
         assert_eq!(t.silu().data()[0], 0.0);
         assert_eq!(t.silu().data()[1], 1e20);
+        // Finite fast sigmoid lies in the closed interval [-1, 1]: once
+        // |x| >= 2^24, `1 + |x|` rounds to `|x|` in f32 and the result is ±1.
+        let fs = Tensor::from_vec(vec![16_777_216.0, -16_777_216.0, 1e20], &[3]).fast_sigmoid();
+        assert_eq!(fs.data(), &[1.0, -1.0, 1.0]);
+        let fs = Tensor::from_vec(vec![16_777_215.0], &[1]).fast_sigmoid();
+        assert!(fs.data()[0] < 1.0 && fs.data()[0] > 0.99);
     }
 
     #[test]
@@ -1264,6 +1287,11 @@ mod tests {
         // Intermediate f32 overflow must not leak into a finite true sum.
         let t = Tensor::from_vec(vec![f32::MAX, f32::MAX, -f32::MAX], &[3]);
         assert_eq!(t.sum(), f32::MAX);
+        // Compensation keeps a term that plain f64 cancels away: 1e20 is below
+        // half an f64 ulp of f32::MAX (~7.5e22), so MAX + 1e20 - MAX would be 0.
+        let t = Tensor::from_vec(vec![f32::MAX, 1e20, -f32::MAX], &[3]);
+        assert_eq!(t.sum(), 1e20);
+        assert_eq!(t.mean(), 1e20 / 3.0);
         // A true sum outside the f32 range still rounds to the signed infinity.
         let t = Tensor::from_vec(vec![f32::MAX, f32::MAX], &[2]);
         assert_eq!(t.sum(), f32::INFINITY);

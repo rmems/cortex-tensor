@@ -63,13 +63,15 @@
 //! | NaN (either sign) | NaN | NaN | NaN | NaN |
 //! | `+Inf` | `+Inf` | `+Inf` | `+Inf` | `1` |
 //! | `-Inf` | `0` | `0` | `0` | `-1` |
-//! | Finite | `x` if `x > 0`, else canonical `+0.0` | Finite (large magnitudes reach `x` / `0`) | Finite | Finite, in `(-1, 1)` |
+//! | Finite | `x` if `x > 0`, else canonical `+0.0` | Finite (large magnitudes reach `x` / `0`) | Finite | Finite, in `[-1, 1]` (exactly `±1` once `1 + abs(x)` rounds to `abs(x)`, i.e. `abs(x) ≥ 2^24`) |
 //!
 //! ## Whole-tensor reductions
 //!
 //! [`Tensor::sum`](crate::tensor::Tensor::sum) and [`mean`](crate::tensor::Tensor::mean)
-//! accumulate sequentially in `f64` and cast once at the end, so the `f32`
-//! running sum cannot stall at `2^24` or overflow on a finite true total.
+//! accumulate sequentially in `f64` with Neumaier compensation and cast once
+//! at the end, so the `f32` running sum cannot stall at `2^24` or overflow on
+//! a finite true total, and a small term is not lost to cancellation between
+//! two large ones (`[MAX, 1e20, -MAX]` sums to `1e20`).
 //! [`max_val`](crate::tensor::Tensor::max_val) ranks with `>` after an explicit
 //! NaN check, never `f32::max`.
 //!
@@ -78,7 +80,7 @@
 //! | Empty (`numel = 0`) | `0` | NaN | `-Inf` (identity of `max`) |
 //! | Any NaN | NaN | NaN | NaN |
 //! | `+Inf` and `-Inf` both present | NaN | NaN | `+Inf` |
-//! | One signed infinity (no NaN) | That infinity | That infinity | `+Inf` if present, else the finite maximum |
+//! | One signed infinity (no NaN) | That infinity | That infinity | `+Inf` if present, else the largest element (`-Inf` when every element is `-Inf`) |
 //! | Finite | `f64` total rounded to `f32`; `±Inf` only when the true total is outside the `f32` range | `f64` total `/ numel`, rounded to `f32` | The maximum, equal to `data()[argmax()]` |
 //!
 //! Behavior is sequential and therefore identical across debug/release and
