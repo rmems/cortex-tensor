@@ -163,13 +163,36 @@ impl SnnDecoder for SpikeCountDecoder {
 ///
 /// Replaces the removed embedded `RoutingMode::SpikingSim`: gate scores are
 /// computed by [`MoeRouter`], encoded into backend stimuli by `E`, stepped by
-/// `B`, and decoded by `D`. Routing scores are `gate * (1 + spikes)`, so a
-/// spiked channel amplifies its expert without masking the ANN gate signal.
-/// NaN gate scores and NaN encoder output are rejected before the
-/// backend steps, preserving the fail-closed ordering of the old embedded
-/// path. Errors raised after the step (backend step failure, NaN or
-/// wrong-length decoder output) consume the tick — `reset()` restores a
-/// clean epoch.
+/// `B`, and decoded by `D`.
+///
+/// # Routing contract
+///
+/// * **Scores:** `gate + spike_boost * activity`, where `activity` is the
+///   decoder readout for the expert's channel (≥ 0) and `spike_boost` is
+///   [`DEFAULT_SPIKE_BOOST`] unless changed with [`Self::with_spike_boost`].
+///   The boost is additive so it is monotone in spike activity for *any*
+///   logit sign: a spike can only promote its expert, never demote it (the
+///   earlier multiplicative `gate * (1 + spikes)` pushed negative logits
+///   further down the ranking). Selection is `route_top_k` over those scores;
+///   `expert_weights` is their softmax.
+/// * **Hidden state:** `embedding * Σ_{selected} expert_weights[e] * a[e]`,
+///   where `a[e] = activity[e] / max(activity)` lies in `[0, 1]`. The gain is
+///   therefore bounded by the selected softmax mass (≤ 1), like
+///   `MoeRouter::forward`, whatever the decoder's count scale. On a silent
+///   tick (`max(activity) == 0`) `a[e] = 1` for every expert, so the output
+///   degrades to the dense selected mass instead of a zero hidden state.
+///
+/// # Validation
+///
+/// NaN gate scores and NaN encoder output are rejected before the backend
+/// steps, preserving the fail-closed ordering of the old embedded path.
+/// After the step, the backend's spike list is checked against its contract
+/// — every index in `0..channels` ([`CortexError::SnnSpikeOutOfRange`]) and
+/// each channel at most once ([`CortexError::SnnDuplicateSpike`]) — and the
+/// decoder readout must have exactly `channels` entries, be NaN-free
+/// ([`CortexError::SnnNan`]) and be finite and non-negative
+/// ([`CortexError::SnnInvalidReadout`]). Errors raised after the step consume
+/// the tick — `reset()` restores a clean epoch.
 ///
 /// `B` is generic (not `dyn`) so callers keep concrete backend types for
 /// checkpointing and backend-specific tuning.
@@ -183,6 +206,47 @@ where
     backend: B,
     encoder: E,
     decoder: D,
+    spike_boost: f32,
+}
+
+/// Default additive routing boost per unit of decoded spike activity: one
+/// spike on a channel adds `1.0` to its expert's gate logit.
+pub const DEFAULT_SPIKE_BOOST: f32 = 1.0;
+
+/// Validate one backend tick against the [`SnnStepOutput`] contract.
+fn validate_spikes(step_out: &SnnStepOutput, channels: usize) -> Result<()> {
+    let mut seen = vec![false; channels];
+    for &channel in &step_out.spikes {
+        if channel >= channels {
+            return Err(CortexError::SnnSpikeOutOfRange { channel, channels });
+        }
+        if seen[channel] {
+            return Err(CortexError::SnnDuplicateSpike { channel });
+        }
+        seen[channel] = true;
+    }
+    Ok(())
+}
+
+/// Validate a decoder readout: exactly `channels` entries, each finite and
+/// non-negative. NaN keeps its dedicated variant.
+fn validate_readout(decoded: &[f32], channels: usize) -> Result<()> {
+    if decoded.len() != channels {
+        return Err(CortexError::SnnNan {
+            stage: "decoder readout",
+        });
+    }
+    for (channel, &value) in decoded.iter().enumerate() {
+        if value.is_nan() {
+            return Err(CortexError::SnnNan {
+                stage: "decoder readout",
+            });
+        }
+        if !value.is_finite() || value < 0.0 {
+            return Err(CortexError::SnnInvalidReadout { channel, value });
+        }
+    }
+    Ok(())
 }
 
 impl<B, E, D> SpikingMoeRouter<B, E, D>
@@ -206,7 +270,27 @@ where
             backend,
             encoder,
             decoder,
+            spike_boost: DEFAULT_SPIKE_BOOST,
         })
+    }
+
+    /// Set the additive routing boost per unit of decoded spike activity
+    /// (default [`DEFAULT_SPIKE_BOOST`]). Must be finite and non-negative so
+    /// the boost stays monotone; `0.0` makes routing purely ANN-driven while
+    /// the backend still steps and shapes the hidden state.
+    pub fn with_spike_boost(mut self, spike_boost: f32) -> Result<Self> {
+        if !spike_boost.is_finite() || spike_boost < 0.0 {
+            return Err(CortexError::InvalidConfig(format!(
+                "spike_boost must be finite and >= 0, got {spike_boost}"
+            )));
+        }
+        self.spike_boost = spike_boost;
+        Ok(self)
+    }
+
+    /// Additive routing boost per unit of decoded spike activity.
+    pub fn spike_boost(&self) -> f32 {
+        self.spike_boost
     }
 
     /// Shared forward path. `frozen` selects [`SnnBackend::step_frozen`].
@@ -231,26 +315,36 @@ where
         };
         // Failures past this point have consumed a backend tick; callers that
         // need a clean epoch should `reset()` after such an error.
-        let decoded = self.decoder.decode(&step_out, self.backend.channels());
-        if decoded.len() != self.backend.channels() || decoded.iter().any(|v| v.is_nan()) {
-            return Err(CortexError::SnnNan {
-                stage: "decoder readout",
-            });
-        }
+        let channels = self.backend.channels();
+        validate_spikes(&step_out, channels)?;
+        let decoded = self.decoder.decode(&step_out, channels);
+        validate_readout(&decoded, channels)?;
 
+        // Additive boost: monotone in activity for any logit sign (issue #93).
         let num_experts = self.router.num_experts();
         let routing_scores: Vec<f32> = (0..num_experts)
-            .map(|expert_id| {
-                let spikes = decoded.get(expert_id).copied().unwrap_or(0.0);
-                gate_scores[expert_id] * (1.0 + spikes)
-            })
+            .map(|expert_id| gate_scores[expert_id] + self.spike_boost * decoded[expert_id])
             .collect();
         let (expert_weights, selected_experts) =
             crate::moe::route_top_k(&routing_scores, self.router.top_k())?;
 
+        // Hidden gain = selected softmax mass weighted by activity normalised
+        // to the tick's peak, so it stays within [0, 1] regardless of the
+        // decoder's count scale; a silent tick keeps the dense selected mass.
+        let peak_activity = decoded[..num_experts]
+            .iter()
+            .copied()
+            .fold(0.0f32, f32::max);
         let spiking_mass: f32 = selected_experts
             .iter()
-            .map(|&idx| decoded.get(idx).copied().unwrap_or(0.0))
+            .map(|&idx| {
+                let activity = if peak_activity > 0.0 {
+                    decoded[idx] / peak_activity
+                } else {
+                    1.0
+                };
+                expert_weights[idx] * activity
+            })
             .sum();
         let hidden: Vec<f32> = embedding.iter().map(|&v| v * spiking_mass).collect();
 
