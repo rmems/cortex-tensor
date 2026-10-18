@@ -501,6 +501,34 @@ fn spike_boost_saturates_instead_of_overflowing() {
     assert!(out.hidden.iter().all(|h| !h.is_nan()));
 }
 
+/// A gate already at `f32::MAX` plus a large bonus must saturate rather
+/// than overflow to `+Inf`: the score stays finite and the expert wins.
+/// Expert 1 sits at `f32::MAX` without spiking, so if the spiked expert 0
+/// overflowed to `+Inf` the softmax would hand it all the mass; saturation
+/// leaves both at `f32::MAX` and they share it.
+#[test]
+fn finite_gate_plus_large_bonus_saturates_to_finite_score() {
+    let mut logits = [0.0f32; 8];
+    logits[0] = f32::MAX;
+    logits[1] = f32::MAX;
+    let embedding = embedding_with_gate_logits(&logits);
+    // Expert 0 spikes with activity 1e30 under a 1e30 boost.
+    let mut model = scripted_router(vec![0], ScaledCountDecoder(1e30))
+        .with_spike_boost(1e30)
+        .unwrap();
+    let scores = model.router().gate_scores(&embedding).unwrap();
+    assert!(scores[0].is_finite(), "gate must be finite: {}", scores[0]);
+    let out = model.forward(&embedding).unwrap();
+    assert_eq!(out.selected_experts, vec![0, 1]);
+    assert!(out.expert_weights.iter().all(|w| w.is_finite()));
+    assert_eq!(
+        out.expert_weights[0], out.expert_weights[1],
+        "both scores saturate at f32::MAX, so neither may absorb the mass"
+    );
+    assert!(out.expert_weights[0] > 0.0);
+    assert!(out.hidden.iter().all(|h| h.is_finite()));
+}
+
 /// Spikes only on unselected experts must not zero the hidden state: the
 /// gain falls back to the dense selected mass exactly as on a silent tick.
 #[test]

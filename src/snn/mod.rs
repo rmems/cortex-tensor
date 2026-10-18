@@ -282,9 +282,10 @@ where
     /// Set the additive routing boost per unit of decoded spike activity
     /// (default [`DEFAULT_SPIKE_BOOST`]). Must be finite and non-negative so
     /// the boost stays monotone; `0.0` makes routing purely ANN-driven while
-    /// the backend still steps and shapes the hidden state. The boost term
-    /// `spike_boost * activity` saturates at `f32::MAX` instead of overflowing
-    /// to `+Inf`, so a finite gate stays finite and a `-Inf` gate stays `-Inf`.
+    /// the backend still steps and shapes the hidden state. For a finite gate
+    /// the score `gate + spike_boost * activity` saturates at `f32::MAX`
+    /// instead of overflowing to `+Inf`; a `±Inf` gate keeps its value, so the
+    /// boost never turns a finite score infinite or a `-Inf` gate into NaN.
     pub fn with_spike_boost(mut self, spike_boost: f32) -> Result<Self> {
         if !spike_boost.is_finite() || spike_boost < 0.0 {
             return Err(CortexError::InvalidConfig(format!(
@@ -328,14 +329,20 @@ where
         validate_readout(&decoded, channels)?;
 
         // Additive boost: monotone in activity for any logit sign (issue #93).
-        // Both factors are finite and >= 0, so saturating the product keeps
-        // the bonus finite: a finite gate cannot overflow to +Inf and a -Inf
-        // gate cannot become NaN after the tick has been consumed.
+        // Both factors are finite and >= 0, so the bonus is finite once its
+        // product is capped; a finite gate plus that bonus is then saturated
+        // at f32::MAX so it can never become +Inf, while a ±Inf gate keeps its
+        // sign (bonus >= 0, so -Inf + bonus cannot be NaN).
         let num_experts = self.router.num_experts();
         let routing_scores: Vec<f32> = (0..num_experts)
             .map(|expert_id| {
+                let gate = gate_scores[expert_id];
                 let bonus = (self.spike_boost * decoded[expert_id]).min(f32::MAX);
-                gate_scores[expert_id] + bonus
+                if gate.is_finite() {
+                    (gate + bonus).min(f32::MAX)
+                } else {
+                    gate
+                }
             })
             .collect();
         let (expert_weights, selected_experts) =
