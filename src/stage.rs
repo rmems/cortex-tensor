@@ -746,7 +746,9 @@ pub enum ReferenceStageParams<'p> {
     Normalization {
         /// Scale/gain vector `[dim]`.
         weight: &'p Tensor,
-        /// Optional shift vector `[dim]` (LayerNorm only; `None` for RMS).
+        /// Optional shift vector `[dim]`. Required for [`NormKind::Layer`]
+        /// and must be `None` for [`NormKind::Rms`]; either violation is
+        /// reported as [`CortexError::InvalidStageParams`] at execute time.
         bias: Option<&'p Tensor>,
         /// Numerical-stability epsilon.
         eps: f32,
@@ -843,6 +845,12 @@ pub struct ReferenceExecutor<'p> {
 impl<'p> ReferenceExecutor<'p> {
     /// Backend name reported by [`AnnCapabilities::backend_name`].
     pub const BACKEND_NAME: &'static str = "reference";
+
+    /// Numerical-stability epsilon the reference transformer uses for every
+    /// normalization, so hand-bound [`ReferenceStageParams::Normalization`]
+    /// can match [`ReferenceExecutor::from_transformer`] without re-stating
+    /// the literal.
+    pub const LAYER_NORM_EPS: f32 = crate::transformer::LAYER_NORM_EPS;
 
     /// An executor with no bound params.
     ///
@@ -990,7 +998,7 @@ impl<'p> ReferenceExecutor<'p> {
     pub fn from_transformer(model: &'p TransformerLM) -> Result<(Self, AnnTopology)> {
         model.validate_wire()?;
 
-        let eps = crate::transformer::LAYER_NORM_EPS;
+        let eps = Self::LAYER_NORM_EPS;
         let mut stages: Vec<AnnStage> = Vec::new();
         let mut executor = ReferenceExecutor::new();
 
@@ -1227,87 +1235,91 @@ impl<'p> AnnExecutor for ReferenceExecutor<'p> {
             });
         }
 
-        // Add stages carry no params; everything else needs a binding.
-        if !matches!(stage.kind, StageKind::Add) {
+        // Add stages carry no params; everything else needs a binding whose
+        // kind agrees with the descriptor. Missing and mismatched params are
+        // reported separately so a wiring bug is not mistaken for an unbound
+        // stage.
+        let params = if matches!(stage.kind, StageKind::Add) {
+            None
+        } else {
             let params =
                 self.params
                     .get(stage_id)
                     .ok_or_else(|| CortexError::MissingStageParams {
                         stage_id: stage_id.to_string(),
                     })?;
-            // A params/kind disagreement is a wiring bug; treat it as missing
-            // params for the requested kind.
             if params.tag() != stage.kind.tag() {
-                return Err(CortexError::MissingStageParams {
+                return Err(CortexError::StageParamsMismatch {
                     stage_id: stage_id.to_string(),
+                    expected: stage.kind.tag().as_str().to_string(),
+                    got: params.tag().as_str().to_string(),
                 });
             }
-        }
+            Some(params)
+        };
 
-        match &stage.kind {
-            StageKind::Embedding => {
-                Self::expect_arity(stage_id, inputs, 1)?;
-                let token_ids = Self::tokens_arg(stage_id, inputs, 0)?;
-                let ReferenceStageParams::Embedding {
+        match (&stage.kind, params) {
+            (
+                StageKind::Embedding,
+                Some(&ReferenceStageParams::Embedding {
                     tok_embed,
                     pos_embed,
                     max_seq_len,
-                } = self.params[stage_id]
-                else {
-                    unreachable!("embedding params checked above");
-                };
+                }),
+            ) => {
+                Self::expect_arity(stage_id, inputs, 1)?;
+                let token_ids = Self::tokens_arg(stage_id, inputs, 0)?;
                 Self::run_embedding(stage_id, tok_embed, pos_embed, max_seq_len, token_ids)
             }
-            StageKind::Attention => {
+            (StageKind::Attention, Some(&ReferenceStageParams::Attention(attn))) => {
                 Self::expect_arity(stage_id, inputs, 1)?;
                 let x = Self::tensor_arg(stage_id, inputs, 0)?;
-                let ReferenceStageParams::Attention(attn) = self.params[stage_id] else {
-                    unreachable!("attention params checked above");
-                };
                 attn.try_forward(x)
                     .map_err(|err| Self::wrap_failure(stage_id, err))
             }
-            StageKind::Normalization { .. } => {
-                Self::expect_arity(stage_id, inputs, 1)?;
-                let x = Self::tensor_arg(stage_id, inputs, 0)?;
-                let ReferenceStageParams::Normalization {
+            (
+                StageKind::Normalization { .. },
+                Some(&ReferenceStageParams::Normalization {
                     weight,
                     bias,
                     eps,
                     kind,
-                } = self.params[stage_id]
-                else {
-                    unreachable!("normalization params checked above");
-                };
-                let out = match kind {
-                    NormKind::Layer => {
-                        let bias = bias.ok_or_else(|| CortexError::MissingStageParams {
+                }),
+            ) => {
+                Self::expect_arity(stage_id, inputs, 1)?;
+                let x = Self::tensor_arg(stage_id, inputs, 0)?;
+                let out = match (kind, bias) {
+                    (NormKind::Layer, Some(bias)) => try_layer_norm(x, weight, bias, eps),
+                    (NormKind::Layer, None) => {
+                        return Err(CortexError::InvalidStageParams {
                             stage_id: stage_id.to_string(),
-                        })?;
-                        try_layer_norm(x, weight, bias, eps)
+                            reason: "layer_norm requires a bias, but none is bound".to_string(),
+                        });
                     }
-                    NormKind::Rms => try_rms_norm(x, weight, eps),
+                    (NormKind::Rms, None) => try_rms_norm(x, weight, eps),
+                    // RMSNorm has no bias term in the reference math; a bound
+                    // bias would be silently ignored, so reject it instead.
+                    (NormKind::Rms, Some(_)) => {
+                        return Err(CortexError::InvalidStageParams {
+                            stage_id: stage_id.to_string(),
+                            reason: "rms_norm takes no bias, but one is bound".to_string(),
+                        });
+                    }
                 };
                 out.map_err(|err| Self::wrap_failure(stage_id, err))
             }
-            StageKind::Mlp { .. } => {
+            (StageKind::Mlp { .. }, Some(&ReferenceStageParams::Mlp(ffn))) => {
                 Self::expect_arity(stage_id, inputs, 1)?;
                 let x = Self::tensor_arg(stage_id, inputs, 0)?;
-                let ReferenceStageParams::Mlp(ffn) = self.params[stage_id] else {
-                    unreachable!("mlp params checked above");
-                };
                 ffn.try_forward(x)
                     .map_err(|err| Self::wrap_failure(stage_id, err))
             }
-            StageKind::Readout => {
+            (StageKind::Readout, Some(&ReferenceStageParams::Readout { lm_head })) => {
                 Self::expect_arity(stage_id, inputs, 1)?;
                 let x = Self::tensor_arg(stage_id, inputs, 0)?;
-                let ReferenceStageParams::Readout { lm_head } = self.params[stage_id] else {
-                    unreachable!("readout params checked above");
-                };
                 try_matmul(x, lm_head).map_err(|err| Self::wrap_failure(stage_id, err))
             }
-            StageKind::Add => {
+            (StageKind::Add, _) => {
                 if inputs.is_empty() {
                     return Err(CortexError::StageInputArity {
                         stage_id: stage_id.to_string(),
@@ -1327,7 +1339,8 @@ impl<'p> AnnExecutor for ReferenceExecutor<'p> {
                 }
                 Ok(acc)
             }
-            // Unsupported kinds were rejected above.
+            // Unsupported kinds were rejected above, and the tag check makes
+            // a kind/params disagreement unreachable here.
             _ => Err(CortexError::UnsupportedStage {
                 backend: Self::BACKEND_NAME,
                 stage_id: stage_id.to_string(),
@@ -1652,6 +1665,143 @@ mod tests {
     }
 
     #[test]
+    fn execute_reports_params_bound_for_a_different_kind() {
+        // Readout params bound under an RmsNorm stage id: the params exist,
+        // they are just for the wrong kind.
+        let model = micro_model();
+        let norm_id = StageId::new("n").unwrap();
+        let mut exec = ReferenceExecutor::new().bind(
+            norm_id,
+            ReferenceStageParams::Readout {
+                lm_head: &model.lm_head,
+            },
+        );
+        let x = Tensor::try_from_vec(vec![0.0; 8], &[1, 8]).unwrap();
+        let descriptor = stage(
+            "n",
+            StageKind::Normalization {
+                kind: NormKind::Rms,
+            },
+            vec![],
+        );
+        let err = exec
+            .execute(&descriptor, &[StageInput::Tensor(&x)])
+            .unwrap_err();
+        match err {
+            CortexError::StageParamsMismatch {
+                stage_id,
+                expected,
+                got,
+            } => {
+                assert_eq!(stage_id, "n");
+                assert_eq!(expected, "rms_norm");
+                assert_eq!(got, "readout");
+            }
+            other => panic!("expected StageParamsMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn layer_norm_without_bias_is_invalid_params_not_missing() {
+        let model = micro_model();
+        let block = &model.blocks[0];
+        let norm_id = StageId::new("n").unwrap();
+        let mut exec = ReferenceExecutor::new().bind(
+            norm_id,
+            ReferenceStageParams::Normalization {
+                weight: &block.ln1_w,
+                bias: None,
+                eps: ReferenceExecutor::LAYER_NORM_EPS,
+                kind: NormKind::Layer,
+            },
+        );
+        let x = Tensor::randn(&[2, model.config.dim], 0.0, 0.1);
+        let descriptor = stage(
+            "n",
+            StageKind::Normalization {
+                kind: NormKind::Layer,
+            },
+            vec![],
+        );
+        let err = exec
+            .execute(&descriptor, &[StageInput::Tensor(&x)])
+            .unwrap_err();
+        assert!(
+            matches!(err, CortexError::InvalidStageParams { ref stage_id, .. } if stage_id == "n"),
+            "expected InvalidStageParams, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rms_norm_rejects_a_bias_instead_of_ignoring_it() {
+        let model = micro_model();
+        let block = &model.blocks[0];
+        let norm_id = StageId::new("n").unwrap();
+        let mut exec = ReferenceExecutor::new().bind(
+            norm_id,
+            ReferenceStageParams::Normalization {
+                weight: &block.ln1_w,
+                bias: Some(&block.ln1_b),
+                eps: ReferenceExecutor::LAYER_NORM_EPS,
+                kind: NormKind::Rms,
+            },
+        );
+        let x = Tensor::randn(&[2, model.config.dim], 0.0, 0.1);
+        let descriptor = stage(
+            "n",
+            StageKind::Normalization {
+                kind: NormKind::Rms,
+            },
+            vec![],
+        );
+        let err = exec
+            .execute(&descriptor, &[StageInput::Tensor(&x)])
+            .unwrap_err();
+        assert!(
+            matches!(err, CortexError::InvalidStageParams { ref stage_id, .. } if stage_id == "n"),
+            "expected InvalidStageParams, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rms_norm_stage_matches_kernel_bitwise() {
+        let model = micro_model();
+        let block = &model.blocks[0];
+        let norm_id = StageId::new("n").unwrap();
+        let eps = ReferenceExecutor::LAYER_NORM_EPS;
+        let mut exec = ReferenceExecutor::new().bind(
+            norm_id,
+            ReferenceStageParams::Normalization {
+                weight: &block.ln1_w,
+                bias: None,
+                eps,
+                kind: NormKind::Rms,
+            },
+        );
+        let x = Tensor::randn(&[2, model.config.dim], 0.0, 0.1);
+        let descriptor = stage(
+            "n",
+            StageKind::Normalization {
+                kind: NormKind::Rms,
+            },
+            vec![],
+        );
+        let staged = exec
+            .execute(&descriptor, &[StageInput::Tensor(&x)])
+            .unwrap();
+        let direct = try_rms_norm(&x, &block.ln1_w, eps).unwrap();
+        assert_eq!(staged.data(), direct.data());
+    }
+
+    #[test]
+    fn public_layer_norm_eps_matches_transformer_constant() {
+        assert_eq!(
+            ReferenceExecutor::LAYER_NORM_EPS,
+            crate::transformer::LAYER_NORM_EPS
+        );
+    }
+
+    #[test]
     fn execute_reports_wrong_arity() {
         let model = micro_model();
         let lm_head = &model.lm_head;
@@ -1827,7 +1977,7 @@ mod tests {
             ReferenceStageParams::Normalization {
                 weight: &block.ln1_w,
                 bias: Some(&block.ln1_b),
-                eps: crate::transformer::LAYER_NORM_EPS,
+                eps: ReferenceExecutor::LAYER_NORM_EPS,
                 kind: NormKind::Layer,
             },
         );

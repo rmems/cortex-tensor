@@ -128,6 +128,21 @@ pub enum CortexError {
     #[error("stage '{stage_id}' is missing required parameters")]
     MissingStageParams { stage_id: String },
 
+    /// Parameters are bound for the stage, but for a different stage kind
+    /// (`expected` / `got` are [`crate::stage::StageKindTag`] tokens).
+    #[error("stage '{stage_id}' has parameters for kind {got}, expected {expected}")]
+    StageParamsMismatch {
+        stage_id: String,
+        expected: String,
+        got: String,
+    },
+
+    /// Parameters are bound for the right stage kind but are internally
+    /// inconsistent with it (e.g. a LayerNorm without a bias, or an RMSNorm
+    /// with one).
+    #[error("stage '{stage_id}' has invalid parameters: {reason}")]
+    InvalidStageParams { stage_id: String, reason: String },
+
     /// A stage received the wrong number of inputs.
     #[error("stage '{stage_id}' expected {expected} input(s), got {got}")]
     StageInputArity {

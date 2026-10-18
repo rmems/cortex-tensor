@@ -30,11 +30,10 @@ use cortex_tensor::tensor::ops::try_layer_norm;
 use cortex_tensor::transformer::{MultiHeadAttention, TransformerConfig, TransformerLM};
 use cortex_tensor::{CortexError, Result, Tensor};
 
-/// Epsilon the reference transformer uses for every LayerNorm. The crate const
-/// is `pub(crate)`, so the integration test (an external crate) re-states it;
-/// the full-composition tests independently prove the executor and the model
-/// agree bit for bit, which would fail immediately if this drifted.
-const LAYER_NORM_EPS: f32 = 1e-5;
+/// Epsilon the reference transformer uses for every LayerNorm, read from the
+/// executor's public constant so hand-bound params cannot drift from
+/// `from_transformer`.
+const LAYER_NORM_EPS: f32 = ReferenceExecutor::LAYER_NORM_EPS;
 
 /// A small, valid multi-layer model so the tests stay fast while still
 /// exercising cross-block wiring.
