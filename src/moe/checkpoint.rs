@@ -855,10 +855,31 @@ mod tests {
         }
         payload.extend_from_slice(&plain);
 
-        let bytes = build_native_tensor("token_embd.weight", GGML_TYPE_Q5_K, 256, 2, payload);
+        // A gate tensor is included so the same file can also be bound the way
+        // `MoeRouter::load_with_mode` binds it (see the bound-path check below).
+        let hidden = 256usize;
+        let experts = 4usize;
+        let bytes = build_test_gguf(
+            vec![
+                (
+                    "blk.0.ffn_gate_inp.weight",
+                    vec![hidden, experts],
+                    GGML_TYPE_F32,
+                    vec![0u8; hidden * experts * std::mem::size_of::<f32>()],
+                ),
+                (
+                    "token_embd.weight",
+                    vec![hidden, 2],
+                    GGML_TYPE_Q5_K,
+                    payload,
+                ),
+            ],
+            32,
+            hidden,
+        );
         let path = write_temp_file(&bytes, "token_q5k_gh88");
         let path_str = path.to_str().unwrap();
-        let checkpoint = open_mapped_checkpoint(path_str).unwrap();
+        let mut checkpoint = open_mapped_checkpoint(path_str).unwrap();
 
         let row0 = checkpoint
             .extract_token_embedding("token_embd.weight", path_str, 0)
@@ -902,6 +923,21 @@ mod tests {
             packed_row_size(DType::Q5_K.ggml_type(), 256).unwrap(),
             Q5_K_BYTES
         );
+
+        // Bound-router path: `bind_router_weights` copies the token payload and
+        // drops the parser; `MoeRouter::extract_token_embedding` then reads that
+        // copy. The rows must be identical to the pre-bind extraction.
+        checkpoint
+            .bind_router_weights("token_embd.weight", "blk.0.ffn_gate_inp.weight", path_str)
+            .unwrap();
+        let bound0 = checkpoint
+            .extract_token_embedding("token_embd.weight", path_str, 0)
+            .unwrap();
+        let bound1 = checkpoint
+            .extract_token_embedding("token_embd.weight", path_str, 1)
+            .unwrap();
+        assert_eq!(bound0, row0);
+        assert_eq!(bound1, row1);
         let _ = std::fs::remove_file(path);
     }
 
