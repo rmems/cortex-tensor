@@ -144,7 +144,7 @@ jobs:
         SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
       run: |
         # Only use SBOM path if it has real content; otherwise fall back to avoid empty scan.
-        if [ -s sbom.cdx.json ] && grep -q '"components"' sbom.cdx.json && ! grep -q '"components": \[\]' sbom.cdx.json; then
+        if [ -s sbom.cdx.json ] && grep -q '"components"' sbom.cdx.json && ! grep -qE '"components"\s*:\s*\[\]' sbom.cdx.json; then
           snyk sbom test --file=sbom.cdx.json --package-manager=rust --severity-threshold=high || \
           snyk test --all-projects --severity-threshold=high
         else
