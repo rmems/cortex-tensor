@@ -98,11 +98,31 @@ jobs:
 
     # Snyk: pinned setup using exact SHA (for official Snyk logo in UI per Aikido), no || true on primary paths (CodeRabbit).
     # OSS scan prefers SBOM when a real one is generated (chatgpt-codex / Devin feedback); falls back to standard test.
-    # Both OSS and SAST steps skip cleanly (exit 0) when SNYK_TOKEN is absent (fork PRs etc.) but run hard when token present.
+    # `secrets` cannot be used in step `if:` conditions, so the gate step below
+    # exposes whether SNYK_TOKEN exists as an output. When it is absent (fork PRs,
+    # or the secret not yet added) every Snyk step is skipped, including the ~60 s
+    # cargo-cyclonedx install, and a warning annotation + job summary make the
+    # skip visible instead of a silent green no-op (#112). When the token exists
+    # behavior is unchanged.
     # continue-on-error only on OSS to tolerate "no supported files" in some Rust setups (see raulmc-26r).
+    - name: Check for SNYK_TOKEN
+      id: snyk_gate
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      run: |
+        if [ -n "$SNYK_TOKEN" ]; then
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          echo "::warning title=Snyk skipped::SNYK_TOKEN is not set (fork PR or secret not added); dependency and SAST scans did NOT run."
+          echo "### Snyk scans skipped" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`SNYK_TOKEN\` is not available, so no Snyk dependency or code scan ran. Add the \`SNYK_TOKEN\` repo secret to enable them." >> "$GITHUB_STEP_SUMMARY"
+        fi
     - name: Snyk setup (pinned SHA for branding)
+      if: ${{ steps.snyk_gate.outputs.enabled == 'true' }}
       uses: snyk/actions/setup@11b673cfb4b0dc0d860a1323caa199d54950dcce
     - name: Generate CycloneDX SBOM (for Rust Snyk scans)
+      if: ${{ steps.snyk_gate.outputs.enabled == 'true' }}
       run: |
         cargo install --locked cargo-cyclonedx 2>/dev/null || true
         # cargo-cyclonedx often fails or produces no/empty output on this crate
@@ -112,13 +132,10 @@ jobs:
           echo '{"bomFormat":"CycloneDX","specVersion":"1.5","version":1,"components":[]}' > sbom.cdx.json
         fi
     - name: Snyk test (open source / deps - Rust prefers SBOM)
+      if: ${{ steps.snyk_gate.outputs.enabled == 'true' }}
       env:
         SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
       run: |
-        if [ -z "$SNYK_TOKEN" ]; then
-          echo "Skipping Snyk OSS (no SNYK_TOKEN secret available, e.g. fork PR)"
-          exit 0
-        fi
         # Only use SBOM path if it has real content; otherwise fall back to avoid empty scan.
         if [ -s sbom.cdx.json ] && grep -q '"components"' sbom.cdx.json && ! grep -q '"components": \[\]' sbom.cdx.json; then
           snyk sbom test --file=sbom.cdx.json --package-manager=rust --severity-threshold=high || \
@@ -129,13 +146,10 @@ jobs:
         fi
       continue-on-error: true
     - name: Snyk code test (SAST)
+      if: ${{ steps.snyk_gate.outputs.enabled == 'true' }}
       env:
         SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
       run: |
-        if [ -z "$SNYK_TOKEN" ]; then
-          echo "Skipping Snyk SAST (no SNYK_TOKEN secret available, e.g. fork PR)"
-          exit 0
-        fi
         snyk code test --severity-threshold=high
       # When token IS present, the step runs to completion and will fail the job on real high-severity findings.
       # No blanket continue-on-error, so security gate is effective for internal/PRs with secret.
