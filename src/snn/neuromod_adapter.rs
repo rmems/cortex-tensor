@@ -86,10 +86,13 @@ impl NeuromodNetwork {
     /// Wrap an already-configured `SpikingNetwork` (e.g. a restored checkpoint).
     ///
     /// Same one-LIF-per-channel requirement as [`Self::new`]. Every LIF neuron
-    /// must also carry at least one non-zero finite weight: a blank neuron
-    /// receives no input current, never reaches threshold, and (because the
-    /// renormalization pass skips it) cannot be bootstrapped by STDP, so its
-    /// channel would be permanently silent.
+    /// must also carry a weight vector of at least `num_channels` finite
+    /// entries with at least one strictly positive weight in
+    /// `weights[..num_channels]`. The engine integrates only that range, takes
+    /// `|stimulus|` (so a negative-only neuron receives non-positive current),
+    /// skips channels past a short vector, and (because the renormalization
+    /// pass skips a blank neuron) cannot bootstrap such a neuron through STDP:
+    /// in each case the channel would be permanently silent.
     pub fn from_network(network: SpikingNetwork) -> Result<Self> {
         Self::checked(network)
     }
@@ -103,14 +106,29 @@ impl NeuromodNetwork {
                 network.iz_neurons.len()
             )));
         }
-        if let Some(idx) = network
-            .neurons
-            .iter()
-            .position(|neuron| !neuron.weights.iter().any(|w| w.is_finite() && *w != 0.0))
-        {
-            return Err(CortexError::InvalidConfig(format!(
-                "neuromod SpikingNetwork LIF neuron {idx} has no non-zero finite weight, so channel {idx} can never spike; seed its weights (e.g. via network_mut()) before wrapping it"
-            )));
+        let channels = network.num_channels;
+        for (idx, neuron) in network.neurons.iter().enumerate() {
+            // Only `weights[..num_channels]` is ever integrated; a longer
+            // vector is tolerated, a shorter one leaves channels the engine
+            // silently skips.
+            let Some(in_range) = neuron.weights.get(..channels) else {
+                return Err(CortexError::InvalidConfig(format!(
+                    "neuromod SpikingNetwork LIF neuron {idx} has {} weights but the network has {channels} channels; the engine integrates one weight per channel",
+                    neuron.weights.len()
+                )));
+            };
+            if let Some(ch) = in_range.iter().position(|w| !w.is_finite()) {
+                return Err(CortexError::InvalidConfig(format!(
+                    "neuromod SpikingNetwork LIF neuron {idx} has a non-finite weight on channel {ch}; it would poison the membrane potential"
+                )));
+            }
+            // The engine integrates `|stimulus| * weight`, so only a strictly
+            // positive weight can ever drive the membrane toward threshold.
+            if !in_range.iter().any(|w| *w > 0.0) {
+                return Err(CortexError::InvalidConfig(format!(
+                    "neuromod SpikingNetwork LIF neuron {idx} has no positive weight on channels 0..{channels}, so channel {idx} can never spike; seed its weights (e.g. via network_mut()) before wrapping it"
+                )));
+            }
         }
         Ok(Self {
             network,

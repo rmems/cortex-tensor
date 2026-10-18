@@ -346,6 +346,52 @@ fn neuromod_adapter_rejects_blank_lif_neurons() {
         .expect("rejected");
     assert!(err.to_string().contains("neuron 3"), "{err}");
 
+    // Only `weights[..num_channels]` is ever integrated, so a neuron whose
+    // sole non-zero weight sits past the channel range is just as silent.
+    let mut out_of_range = neuromod::SpikingNetwork::with_dimensions(8, 0, 8);
+    for (i, neuron) in out_of_range.neurons.iter_mut().enumerate() {
+        if i == 3 {
+            neuron.weights.push(1.0);
+        } else {
+            neuron.weights[i] = 1.0;
+        }
+    }
+    let err = NeuromodNetwork::from_network(out_of_range)
+        .err()
+        .expect("rejected");
+    assert!(err.to_string().contains("neuron 3"), "{err}");
+
+    // neuromod integrates `|stimulus|`, so a negative-only neuron receives
+    // non-positive current and never reaches threshold either.
+    let mut negative = neuromod::SpikingNetwork::with_dimensions(8, 0, 8);
+    for (i, neuron) in negative.neurons.iter_mut().enumerate() {
+        neuron.weights[i] = if i == 3 { -1.0 } else { 1.0 };
+    }
+    let err = NeuromodNetwork::from_network(negative)
+        .err()
+        .expect("rejected");
+    assert!(err.to_string().contains("neuron 3"), "{err}");
+
+    // A non-finite in-range weight poisons the membrane; a short weight vector
+    // leaves channels the engine silently skips. Both are rejected by name.
+    let mut nan = neuromod::SpikingNetwork::with_dimensions(8, 0, 8);
+    for (i, neuron) in nan.neurons.iter_mut().enumerate() {
+        neuron.weights[i] = 1.0;
+    }
+    nan.neurons[3].weights[5] = f32::NAN;
+    let err = NeuromodNetwork::from_network(nan).err().expect("rejected");
+    assert!(err.to_string().contains("neuron 3"), "{err}");
+
+    let mut short = neuromod::SpikingNetwork::with_dimensions(8, 0, 8);
+    for (i, neuron) in short.neurons.iter_mut().enumerate() {
+        neuron.weights[i] = 1.0;
+    }
+    short.neurons[3].weights.truncate(4);
+    let err = NeuromodNetwork::from_network(short)
+        .err()
+        .expect("rejected");
+    assert!(err.to_string().contains("neuron 3"), "{err}");
+
     // A fully wired network round-trips through `from_network`.
     let wired = NeuromodNetwork::new(8, 0, 8).unwrap();
     let json = serde_json::to_string(wired.network()).unwrap();
