@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- `Tensor::relu` and `Tensor::max_val` no longer discard NaN through `f32::max`: NaN inputs now propagate (`max_val` of any NaN-bearing tensor is NaN, so it agrees with `argmax` for positive NaN), and the empty `max_val` result (`-Inf`) is documented. `gelu`, `silu` and `fast_sigmoid` take an explicit `±Inf` branch and return the mathematical limits (`+Inf`/`0`, `+Inf`/`0`, `±1`) instead of NaN from `Inf − Inf`, `Inf × 0` or `Inf / Inf`. `sum` and `mean` accumulate in `f64` and cast once, so the `f32` running sum no longer stalls at `2^24` (`ones(2^24 + 2).sum()` was `16777216`) or overflows on a finite total (`[MAX, MAX, −MAX].sum()` was `+Inf`, now `MAX`); every existing reference golden, including `(sum, mean) = (21, 3.5)`, is unchanged. The `tensor::finite` policy table gains rows for these activations and reductions (issue 95).
-
 ### Changed
 
 - **Breaking (checkpoint binding):** `MoeRouter` loads GGUF and Safetensors through published `engram-parser` 0.3.0 (`default-features = false`, `features = ["safetensors"]`; `mmap` is not enabled). Tensor shapes are that crate's outermost-first order, and gate weights are row-major on those shapes (GGUF `ne[0]` is the contiguous axis). Q8_0, Q5_K, and Q6_K rows are dequantized by engram-parser, including Q5_K's low-nibble-then-high-nibble group order. IQ3_S and IQ3_XXS stay explicit errors (engram-parser 0.3.0 does not decode those wire types). A checkpoint with no `general.file_type` reports quantization `unknown`. Validated against engram-parser 0.3.0 (RM-1265 / issue 47).
@@ -52,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `Tensor::relu` and `Tensor::max_val` no longer discard NaN through `f32::max`: NaN inputs now propagate (`max_val` of any NaN-bearing tensor is NaN, so it agrees with `argmax` for positive NaN), and the empty `max_val` result (`-Inf`) is documented. `gelu`, `silu` and `fast_sigmoid` take an explicit `±Inf` branch and return the mathematical limits (`+Inf`/`0`, `+Inf`/`0`, `±1`) instead of NaN from `Inf − Inf`, `Inf × 0` or `Inf / Inf`. `sum` and `mean` accumulate in `f64` and cast once, so the `f32` running sum no longer stalls at `2^24` (`ones(2^24 + 2).sum()` was `16777216`) or overflows on a finite total (`[MAX, MAX, −MAX].sum()` was `+Inf`, now `MAX`); every existing reference golden, including `(sum, mean) = (21, 3.5)`, is unchanged. The `tensor::finite` policy table gains rows for these activations and reductions (issue 95).
 - Optional `candle` builds after crates.io yanked `zip` 8.6.0 (2026-10-16). `candle-core` 0.11 requires `zip ^8.6.0`, which cannot select the unyanked 9.0.3 release. `[patch.crates-io]` points at `compat/zip`, a facade of zip 9.0.3 that restores `ZipFile::name() -> &str` and `file_names()` items candle 0.11 calls. The patch applies when this repository is the Cargo root.
 - Tensor constructors and JSON deserialization validate shape products and row-major stride arithmetic with checked multiplication, rejecting overflowing extents in release instead of wrapping to `numel == 0` (RM-1488). Documented rank-0 scalar vs zero-axis contracts and `mean()` returning `NaN` on empty tensors.
 - `MoeRouter::extract_token_embedding` returns checkpoint-native `hidden_size` without implicit resample to `EMBEDDING_DIM` or L2 normalization (RM-1519). Use `ExtractTokenOptions::for_projector_forward()` when feeding `MoeRouter::forward`.
