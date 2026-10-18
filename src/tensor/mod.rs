@@ -546,7 +546,8 @@ impl Tensor {
         self.sum_f64() as f32
     }
 
-    /// Arithmetic mean over all elements, computed from the `f64` sum.
+    /// Arithmetic mean over all elements: the compensated `f64` total divided
+    /// by `numel()` in `f64`, then cast once to `f32` (not `sum() / numel()`).
     ///
     /// Returns `NaN` when `numel() == 0` (zero-sized axis or empty buffer).
     pub fn mean(&self) -> f32 {
