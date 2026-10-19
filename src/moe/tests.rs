@@ -48,6 +48,57 @@ fn test_dense_sim_uses_real_gate_weights() {
     let _ = remove_file(path);
 }
 
+/// Issue #89: the gate is written in GGUF `ne` order (`ne = [n_embd, n_expert]`,
+/// `dims[0]` contiguous), so expert `e` occupies `gate[e * n_embd + d]`. Mark
+/// only expert 5's row and feed `e_0`; a transposed read sees all zeros and
+/// falls back to expert 0.
+#[test]
+fn dense_sim_selects_expert_by_gguf_ne_order_row() {
+    let experts = 64usize;
+    let mut gate = vec![0.0f32; EMBEDDING_DIM * experts];
+    gate[5 * EMBEDDING_DIM..6 * EMBEDDING_DIM].fill(1.0);
+    let gate_bytes: Vec<u8> = gate.iter().flat_map(|value| value.to_le_bytes()).collect();
+    let path = write_temp_file(&build_real_size_checkpoint(gate_bytes), "dense-row-order");
+
+    let mut model =
+        MoeRouter::load_with_mode(path.to_str().unwrap(), 8, 1, RoutingMode::DenseSim).unwrap();
+    let mut embedding = vec![0.0f32; EMBEDDING_DIM];
+    embedding[0] = 1.0;
+    let out = model.forward(&embedding).unwrap();
+    assert_eq!(out.selected_experts, vec![5]);
+    assert!(out.expert_weights[5] > out.expert_weights[0]);
+
+    let _ = remove_file(path);
+}
+
+/// Every gate cell carries `100 * expert + dim`, so a one-hot input at `dim`
+/// must produce exactly that column of scores through the public forward
+/// path (resample is identity at `EMBEDDING_DIM`; L2 keeps a one-hot).
+#[test]
+fn dense_sim_gate_scores_match_marked_cells() {
+    let experts = 64usize;
+    let mut gate = vec![0.0f32; EMBEDDING_DIM * experts];
+    for expert in 0..experts {
+        for dim in 0..EMBEDDING_DIM {
+            gate[expert * EMBEDDING_DIM + dim] = (100 * expert + dim) as f32;
+        }
+    }
+    let gate_bytes: Vec<u8> = gate.iter().flat_map(|value| value.to_le_bytes()).collect();
+    let path = write_temp_file(&build_real_size_checkpoint(gate_bytes), "dense-marker");
+
+    let model =
+        MoeRouter::load_with_mode(path.to_str().unwrap(), 8, 1, RoutingMode::DenseSim).unwrap();
+    for dim in [0usize, 7, EMBEDDING_DIM - 1] {
+        let mut embedding = vec![0.0f32; EMBEDDING_DIM];
+        embedding[dim] = 1.0;
+        let scores = model.gate_scores(&embedding).unwrap();
+        let expected: Vec<f32> = (0..8).map(|e| (100 * e + dim) as f32).collect();
+        assert_eq!(scores, expected, "input e_{dim}");
+    }
+
+    let _ = remove_file(path);
+}
+
 #[test]
 fn dense_sim_ranks_raw_gate_scores_before_softmax() {
     let mut model =
@@ -87,16 +138,21 @@ fn test_real_checkpoint_probe_via_env() {
 
 #[test]
 fn test_q5k_dequant_follows_engram_group_order() {
+    // GH#88 repro: d = 1, sc0 = sc1 = 1, ql = 0x35 (low nibble 5, high nibble 3).
+    // llama.cpp emits `[5; 32]` then `[3; 32]`; the retired in-tree decoder
+    // interleaved them as `[5, 3, 5, 3, ...]`.
     let mut block = [0u8; 176];
     block[0..2].copy_from_slice(&0x3C00u16.to_le_bytes());
     block[4] = 1;
+    block[5] = 1;
     for byte in block[48..80].iter_mut() {
-        *byte = 0x05;
+        *byte = 0x35;
     }
     let out = engram_parser::dequantize_q5_k(&block, &[256]).expect("Q5_K row should dequantize");
     assert_eq!(out.len(), 256);
     assert!(out[..32].iter().all(|value| (value - 5.0).abs() <= 1e-4));
-    assert!(out[32..64].iter().all(|value| value.abs() <= 1e-4));
+    assert!(out[32..64].iter().all(|value| (value - 3.0).abs() <= 1e-4));
+    assert!(out[64..].iter().all(|value| value.abs() <= 1e-4));
 }
 
 fn adapter_probe(bytes: &[u8], label: &str) -> (PathBuf, super::checkpoint::MappedCheckpoint) {
