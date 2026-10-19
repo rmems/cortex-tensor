@@ -18,7 +18,7 @@
 //!   orchestrators such as `hybrid-fusion` can pick execution paths.
 //!
 //! Adapters are optional and feature-gated. Enable `neuromod` for
-//! [`NeuromodNetwork`], the primary integration candidate backed by the
+//! `NeuromodNetwork`, the primary integration candidate backed by the
 //! published `neuromod` crate's `SpikingNetwork`.
 //!
 //! [`SpikingMoeRouter`] composes a [`MoeRouter`] (gate scores + deterministic

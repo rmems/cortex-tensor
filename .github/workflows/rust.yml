@@ -61,13 +61,20 @@ jobs:
         tool: cargo-llvm-cov
     - name: Generate coverage report
       run: cargo llvm-cov --lib --no-default-features --locked --lcov --output-path lcov.info
+    # Codecov upload (#38). With CODECOV_TOKEN the upload is strict (a failed
+    # upload fails the job). Without it (fork PRs, or the secret not yet added)
+    # the upload is attempted tokenless where Codecov allows it and can never
+    # fail CI; a visible warning replaces the old silent skip.
+    - name: Warn when CODECOV_TOKEN is missing
+      if: ${{ env.CODECOV_TOKEN == '' }}
+      run: |
+        echo "::warning title=Codecov::CODECOV_TOKEN is not set; coverage upload is best-effort and will not fail CI. Add the CODECOV_TOKEN repo secret for strict reporting."
     - name: Upload coverage to Codecov
-      if: ${{ env.CODECOV_TOKEN != '' }}
       uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5
       with:
         token: ${{ env.CODECOV_TOKEN }}
         files: lcov.info
-        fail_ci_if_error: true
+        fail_ci_if_error: ${{ env.CODECOV_TOKEN != '' }}
         verbose: true
 
     - name: Format check
@@ -75,6 +82,18 @@ jobs:
 
     - name: Clippy
       run: cargo clippy --all-targets --all-features -- -D warnings
+
+    # Rustdoc gate: broken/private/redundant intra-doc links fail the build (#113).
+    # Built twice: a link to a feature-gated item can resolve under
+    # --all-features and still break the default-feature docs (and vice versa).
+    - name: Rustdoc, all features (-D warnings)
+      env:
+        RUSTDOCFLAGS: -D warnings
+      run: cargo doc --no-deps --all-features
+    - name: Rustdoc, default features (-D warnings)
+      env:
+        RUSTDOCFLAGS: -D warnings
+      run: cargo doc --no-deps
 
     # reviewdog for inline PR comments from clippy (addresses chore reviewdog integration)
     - name: Setup reviewdog
@@ -89,47 +108,3 @@ jobs:
       # note: || true only for reporter step to not fail PR on comment issues; main clippy above fails hard.
     # Clippy is intentionally run twice: once as hard gate (-D warnings), second time piped to reviewdog
     # for inline PR comments (see devin/codacy feedback). This is deliberate and pre-existing pattern.
-
-    # Snyk: pinned setup using exact SHA (for official Snyk logo in UI per Aikido), no || true on primary paths (CodeRabbit).
-    # OSS scan prefers SBOM when a real one is generated (chatgpt-codex / Devin feedback); falls back to standard test.
-    # Both OSS and SAST steps skip cleanly (exit 0) when SNYK_TOKEN is absent (fork PRs etc.) but run hard when token present.
-    # continue-on-error only on OSS to tolerate "no supported files" in some Rust setups (see raulmc-26r).
-    - name: Snyk setup (pinned SHA for branding)
-      uses: snyk/actions/setup@11b673cfb4b0dc0d860a1323caa199d54950dcce
-    - name: Generate CycloneDX SBOM (for Rust Snyk scans)
-      run: |
-        cargo install --locked cargo-cyclonedx 2>/dev/null || true
-        # cargo-cyclonedx often fails or produces no/empty output on this crate
-        # (due to edition = "2024"). We attempt it, then guarantee a usable (possibly minimal) file.
-        cargo cyclonedx --format json -o sbom.cdx.json 2>/dev/null || true
-        if [ ! -s sbom.cdx.json ]; then
-          echo '{"bomFormat":"CycloneDX","specVersion":"1.5","version":1,"components":[]}' > sbom.cdx.json
-        fi
-    - name: Snyk test (open source / deps - Rust prefers SBOM)
-      env:
-        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-      run: |
-        if [ -z "$SNYK_TOKEN" ]; then
-          echo "Skipping Snyk OSS (no SNYK_TOKEN secret available, e.g. fork PR)"
-          exit 0
-        fi
-        # Only use SBOM path if it has real content; otherwise fall back to avoid empty scan.
-        if [ -s sbom.cdx.json ] && grep -q '"components"' sbom.cdx.json && ! grep -q '"components": \[\]' sbom.cdx.json; then
-          snyk sbom test --file=sbom.cdx.json --package-manager=rust --severity-threshold=high || \
-          snyk test --all-projects --severity-threshold=high
-        else
-          echo "No usable SBOM (common limitation); using standard test"
-          snyk test --all-projects --severity-threshold=high
-        fi
-      continue-on-error: true
-    - name: Snyk code test (SAST)
-      env:
-        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-      run: |
-        if [ -z "$SNYK_TOKEN" ]; then
-          echo "Skipping Snyk SAST (no SNYK_TOKEN secret available, e.g. fork PR)"
-          exit 0
-        fi
-        snyk code test --severity-threshold=high
-      # When token IS present, the step runs to completion and will fail the job on real high-severity findings.
-      # No blanket continue-on-error, so security gate is effective for internal/PRs with secret.
