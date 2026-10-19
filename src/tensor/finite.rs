@@ -36,8 +36,8 @@
 //!
 //! | Case | Behavior |
 //! |----------|----------|
-//! | `eps` not finite or `eps ≤ 0` | [`CortexError::InvalidEpsilon`](crate::CortexError::InvalidEpsilon). |
-//! | Last-axis width `0` | [`CortexError::ZeroWidth`](crate::CortexError::ZeroWidth). |
+//! | `eps` not finite or `eps ≤ 0` | [`CortexError::InvalidEpsilon`]. |
+//! | Last-axis width `0` | [`CortexError::ZeroWidth`]. |
 //! | Empty batch (`rows = 0`, `dim > 0`) | Empty output with the same shape. |
 //! | Any non-finite value in a data row | That output row is all NaN. |
 //! | Finite data and finite affine parameters | Finite output. Values that overflow `f32` saturate to `±f32::MAX`. Constant rows yield the bias (LayerNorm) or `0` (RMSNorm with finite weight). |
@@ -51,21 +51,57 @@
 //! | Euclidean norm `≤` [`L2_NORM_FLOOR`] | Leave the vector unchanged (zero / tiny embeddings stay zero). |
 //! | Otherwise | Divide by the `f64` Euclidean norm. |
 //!
+//! ## Elementwise activations
+//!
+//! [`Tensor::relu`](crate::tensor::Tensor::relu), [`gelu`](crate::tensor::Tensor::gelu),
+//! [`silu`](crate::tensor::Tensor::silu) and [`fast_sigmoid`](crate::tensor::Tensor::fast_sigmoid)
+//! are total on the `f32` classes. `±Inf` takes an explicit branch so the
+//! formulas never evaluate `Inf − Inf`, `Inf × 0` or `Inf / Inf`.
+//!
+//! | Input element | ReLU | tanh-GELU | SiLU | fast sigmoid `x / (1 + abs(x))` |
+//! |---------------|------|-----------|------|---------------------------|
+//! | NaN (either sign) | NaN | NaN | NaN | NaN |
+//! | `+Inf` | `+Inf` | `+Inf` | `+Inf` | `1` |
+//! | `-Inf` | `0` | `0` | `0` | `-1` |
+//! | Finite | `x` if `x > 0`, else canonical `+0.0` | Finite (large magnitudes reach `x` / `0`) | Finite | Finite, in `[-1, 1]` (exactly `±1` once `1 + abs(x)` rounds to `abs(x)`, i.e. `abs(x) ≥ 2^24`) |
+//!
+//! ## Whole-tensor reductions
+//!
+//! [`Tensor::sum`](crate::tensor::Tensor::sum) and [`mean`](crate::tensor::Tensor::mean)
+//! accumulate sequentially in `f64` with Neumaier compensation and cast once
+//! at the end, so the `f32` running sum cannot stall at `2^24` or overflow on
+//! a finite true total, and a small term is not lost to cancellation between
+//! two large ones (`[MAX, 1e20, -MAX]` sums to `1e20`).
+//! [`max_val`](crate::tensor::Tensor::max_val) ranks with `>` after an explicit
+//! NaN check, never `f32::max`.
+//!
+//! | Case | `sum` | `mean` | `max_val` |
+//! |------|-------|--------|-----------|
+//! | Empty (`numel = 0`) | `0` | NaN | `-Inf` (identity of `max`) |
+//! | Any NaN | NaN | NaN | NaN |
+//! | `+Inf` and `-Inf` both present | NaN | NaN | `+Inf` |
+//! | One signed infinity (no NaN) | That infinity | That infinity | `+Inf` if present, else the largest element (`-Inf` when every element is `-Inf`) |
+//! | Finite | `f64` total rounded to `f32`; `±Inf` only when the true total is outside the `f32` range | `f64` total `/ numel`, rounded to `f32` | The maximum, equal to `data()[argmax()]` |
+//!
 //! Behavior is sequential and therefore identical across debug/release and
 //! supported platforms for a given input bit pattern.
 //!
 //! ## Integration (RM-1354)
 //!
-//! - **Call sites:** [`softmax_row`] and norm row helpers are `pub(crate)`. External
+//! - **Call sites:** `softmax_row` and norm row helpers are `pub(crate)`. External
 //!   code should use [`crate::tensor::ops::try_softmax`], [`crate::tensor::Tensor::try_softmax_last`],
 //!   [`crate::tensor::ops::try_layer_norm`], and [`crate::tensor::ops::try_rms_norm`], which
 //!   validate rank, shapes, [`validate_norm_eps`], and output size before calling the kernels.
-//! - **Sum tolerance:** [`apply_simplex_residual`] adjusts the largest `f32` mass after every
-//!   softmax branch so documented rows meet [`SOFTMAX_SUM_TOLERANCE`].
-//! - **Attention:** Causal MHA softmaxes each full score row after the additive mask. An
-//!   all-`-Inf` row is uniform over the row length (see policy table); callers that need zero
-//!   mass on masked keys must ensure at least one finite logit on the attended prefix or apply
-//!   a mask after softmax (see `transformer::attention` module docs).
+//! - **Sum tolerance:** `apply_simplex_residual` adjusts the largest `f32` mass after every
+//!   softmax branch that produces a probability row, so those rows meet
+//!   [`SOFTMAX_SUM_TOLERANCE`]. Empty rows and rows containing NaN (filled with NaN) return
+//!   before it and are not adjusted.
+//! - **Attention:** Causal MHA softmaxes only the visible prefix `0..=r` of each score row and
+//!   writes exact `0.0` for the future slots, so no score value (including an all-`-Inf`
+//!   prefix, which is uniform over the prefix per the policy table) can put mass on a masked
+//!   key. The `attn × V` product likewise accumulates only value rows `0..=r`, so a non-finite
+//!   future `V` row cannot reach earlier tokens through `0.0 * NaN` (see `transformer::attention`
+//!   module docs).
 //! - **MoE:** Routing softmax shares this kernel; top-k uses raw-score ordering and NaN rejection
 //!   outside this module (RM-1355).
 

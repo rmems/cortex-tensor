@@ -932,7 +932,7 @@ impl<'p> ReferenceExecutor<'p> {
     ///
     /// # Errors
     ///
-    /// Returns the structured error from [`TransformerLM::validate_wire`] when
+    /// Returns the structured error from the model's internal wire validation when
     /// the model is malformed, or [`CortexError::InvalidStageId`] /
     /// [`CortexError::InvalidTopology`] if id construction or topology
     /// validation fails (not expected for a valid model).
