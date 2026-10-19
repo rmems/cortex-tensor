@@ -51,6 +51,38 @@
 //! | Euclidean norm `≤` [`L2_NORM_FLOOR`] | Leave the vector unchanged (zero / tiny embeddings stay zero). |
 //! | Otherwise | Divide by the `f64` Euclidean norm. |
 //!
+//! ## Elementwise activations
+//!
+//! [`Tensor::relu`](crate::tensor::Tensor::relu), [`gelu`](crate::tensor::Tensor::gelu),
+//! [`silu`](crate::tensor::Tensor::silu) and [`fast_sigmoid`](crate::tensor::Tensor::fast_sigmoid)
+//! are total on the `f32` classes. `±Inf` takes an explicit branch so the
+//! formulas never evaluate `Inf − Inf`, `Inf × 0` or `Inf / Inf`.
+//!
+//! | Input element | ReLU | tanh-GELU | SiLU | fast sigmoid `x / (1 + abs(x))` |
+//! |---------------|------|-----------|------|---------------------------|
+//! | NaN (either sign) | NaN | NaN | NaN | NaN |
+//! | `+Inf` | `+Inf` | `+Inf` | `+Inf` | `1` |
+//! | `-Inf` | `0` | `0` | `0` | `-1` |
+//! | Finite | `x` if `x > 0`, else canonical `+0.0` | Finite (large magnitudes reach `x` / `0`) | Finite | Finite, in `[-1, 1]` (exactly `±1` once `1 + abs(x)` rounds to `abs(x)`, i.e. `abs(x) ≥ 2^24`) |
+//!
+//! ## Whole-tensor reductions
+//!
+//! [`Tensor::sum`](crate::tensor::Tensor::sum) and [`mean`](crate::tensor::Tensor::mean)
+//! accumulate sequentially in `f64` with Neumaier compensation and cast once
+//! at the end, so the `f32` running sum cannot stall at `2^24` or overflow on
+//! a finite true total, and a small term is not lost to cancellation between
+//! two large ones (`[MAX, 1e20, -MAX]` sums to `1e20`).
+//! [`max_val`](crate::tensor::Tensor::max_val) ranks with `>` after an explicit
+//! NaN check, never `f32::max`.
+//!
+//! | Case | `sum` | `mean` | `max_val` |
+//! |------|-------|--------|-----------|
+//! | Empty (`numel = 0`) | `0` | NaN | `-Inf` (identity of `max`) |
+//! | Any NaN | NaN | NaN | NaN |
+//! | `+Inf` and `-Inf` both present | NaN | NaN | `+Inf` |
+//! | One signed infinity (no NaN) | That infinity | That infinity | `+Inf` if present, else the largest element (`-Inf` when every element is `-Inf`) |
+//! | Finite | `f64` total rounded to `f32`; `±Inf` only when the true total is outside the `f32` range | `f64` total `/ numel`, rounded to `f32` | The maximum, equal to `data()[argmax()]` |
+//!
 //! Behavior is sequential and therefore identical across debug/release and
 //! supported platforms for a given input bit pattern.
 //!
