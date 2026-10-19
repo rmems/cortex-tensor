@@ -22,7 +22,7 @@ pub struct ExtractTokenOptions {
 impl ExtractTokenOptions {
     /// Resample to [`EMBEDDING_DIM`] and L2-normalize — the legacy projector
     /// path used before RM-1519. Prefer native-length extract for reference
-    /// backends; call this only when feeding [`MoeRouter::forward`].
+    /// backends; call this only when feeding [`crate::moe::MoeRouter::forward`].
     pub fn for_projector_forward() -> Self {
         Self {
             target_dim: Some(EMBEDDING_DIM),
