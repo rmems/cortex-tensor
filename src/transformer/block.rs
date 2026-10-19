@@ -48,11 +48,30 @@ impl FeedForward {
     /// Fallible constructor: fails on shape/allocation overflow instead of
     /// panicking.
     pub fn try_new(dim: usize, ff_dim: usize) -> Result<Self> {
-        let scale = 1.0 / (dim as f32).sqrt();
+        Self::try_new_with_rng(dim, ff_dim, &mut rand::rng())
+    }
+
+    /// Like [`Self::try_new`] but seeded for reproducible weights.
+    pub fn try_new_seeded(dim: usize, ff_dim: usize, seed: u64) -> Result<Self> {
+        use rand::SeedableRng;
+        Self::try_new_with_rng(dim, ff_dim, &mut rand::rngs::StdRng::seed_from_u64(seed))
+    }
+
+    /// Like [`Self::try_new`] but draws weights from the caller's RNG.
+    ///
+    /// `w1` is scaled by `1/sqrt(dim)` and `w2` by `1/sqrt(ff_dim)` (each
+    /// matmul's fan-in), keeping output variance near that of the input.
+    pub fn try_new_with_rng<R: rand::Rng + ?Sized>(
+        dim: usize,
+        ff_dim: usize,
+        rng: &mut R,
+    ) -> Result<Self> {
+        let scale1 = 1.0 / (dim as f32).sqrt();
+        let scale2 = 1.0 / (ff_dim as f32).sqrt();
         Ok(Self {
-            w1: Tensor::try_randn(&[dim, ff_dim], 0.0, scale)?,
+            w1: Tensor::try_randn_with_rng(&[dim, ff_dim], 0.0, scale1, rng)?,
             b1: Tensor::try_zeros(&[1, ff_dim])?,
-            w2: Tensor::try_randn(&[ff_dim, dim], 0.0, scale)?,
+            w2: Tensor::try_randn_with_rng(&[ff_dim, dim], 0.0, scale2, rng)?,
             b2: Tensor::try_zeros(&[1, dim])?,
         })
     }
@@ -141,9 +160,30 @@ impl TransformerBlock {
     /// Fallible constructor: returns [`CortexError::InvalidConfig`] when
     /// `num_heads` is zero or does not evenly divide `dim`.
     pub fn try_new(dim: usize, num_heads: usize, ff_dim: usize) -> Result<Self> {
+        Self::try_new_with_rng(dim, num_heads, ff_dim, &mut rand::rng())
+    }
+
+    /// Like [`Self::try_new`] but seeded for reproducible weights.
+    pub fn try_new_seeded(dim: usize, num_heads: usize, ff_dim: usize, seed: u64) -> Result<Self> {
+        use rand::SeedableRng;
+        Self::try_new_with_rng(
+            dim,
+            num_heads,
+            ff_dim,
+            &mut rand::rngs::StdRng::seed_from_u64(seed),
+        )
+    }
+
+    /// Like [`Self::try_new`] but draws weights from the caller's RNG.
+    pub fn try_new_with_rng<R: rand::Rng + ?Sized>(
+        dim: usize,
+        num_heads: usize,
+        ff_dim: usize,
+        rng: &mut R,
+    ) -> Result<Self> {
         Ok(Self {
-            attn: MultiHeadAttention::try_new(dim, num_heads)?,
-            ffn: FeedForward::try_new(dim, ff_dim)?,
+            attn: MultiHeadAttention::try_new_with_rng(dim, num_heads, rng)?,
+            ffn: FeedForward::try_new_with_rng(dim, ff_dim, rng)?,
             ln1_w: Tensor::try_ones(&[dim])?,
             ln1_b: Tensor::try_zeros(&[dim])?,
             ln2_w: Tensor::try_ones(&[dim])?,
@@ -201,6 +241,24 @@ fn broadcast_row(bias: &Tensor, rows: usize) -> Result<Tensor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seeded_block_is_reproducible() {
+        let a = TransformerBlock::try_new_seeded(16, 4, 64, 1).unwrap();
+        let b = TransformerBlock::try_new_seeded(16, 4, 64, 1).unwrap();
+        assert_eq!(a.ffn.w2.data(), b.ffn.w2.data());
+        assert_eq!(a.attn.wq.data(), b.attn.wq.data());
+    }
+
+    #[test]
+    fn ffn_output_variance_is_near_input_variance() {
+        let ffn = FeedForward::try_new_seeded(64, 1024, 3).unwrap();
+        let x = Tensor::ones(&[64, 64]);
+        let y = ffn.forward(&x);
+        let n = y.numel() as f32;
+        let var = y.data().iter().map(|v| v * v).sum::<f32>() / n;
+        assert!(var < 2.0, "ffn output variance too large: {var}");
+    }
 
     #[test]
     fn test_block_shapes() {

@@ -211,22 +211,43 @@ impl Tensor {
     }
 
     /// Fallible [`Tensor::randn`]: fails on shape/stride overflow before
-    /// allocating.
+    /// allocating, and with [`CortexError::InvalidConfig`] unless `mean` is
+    /// finite and `std` is finite and non-negative. Draws from the thread
+    /// RNG; use [`Tensor::try_randn_with_rng`] for reproducible values.
     pub fn try_randn(shape: &[usize], mean: f32, std: f32) -> Result<Self> {
+        Self::try_randn_with_rng(shape, mean, std, &mut rand::rng())
+    }
+
+    /// Like [`Tensor::try_randn`] but draws from the caller's RNG, so a
+    /// seeded RNG reproduces the same tensor.
+    pub fn try_randn_with_rng<R: rand::Rng + ?Sized>(
+        shape: &[usize],
+        mean: f32,
+        std: f32,
+        rng: &mut R,
+    ) -> Result<Self> {
         use rand::RngExt;
+        if !mean.is_finite() || !std.is_finite() || std < 0.0 {
+            return Err(CortexError::InvalidConfig(format!(
+                "randn: mean ({mean}) must be finite and std ({std}) must be finite and >= 0"
+            )));
+        }
         let numel = checked_numel(shape)?;
         check_f32_alloc(numel, shape)?;
         let _ = try_compute_strides(shape)?;
-        let mut rng = rand::rng();
-        let data: Vec<f32> = (0..numel)
-            .map(|_| {
-                // Box-Muller transform
-                let u1: f32 = rng.random_range(0.0f32..1.0).max(1e-7);
-                let u2: f32 = rng.random_range(0.0f32..1.0);
-                let z = (-2.0f32 * u1.ln()).sqrt() * (2.0f32 * std::f32::consts::PI * u2).cos();
-                mean + std * z
-            })
-            .collect();
+        let mut data: Vec<f32> = Vec::with_capacity(numel);
+        // Box-Muller: each (u1, u2) pair yields two independent samples.
+        while data.len() < numel {
+            // u1 in (0, 1] so ln(u1) is finite without clamping the tails.
+            let u1: f32 = 1.0 - rng.random_range(0.0f32..1.0);
+            let u2: f32 = rng.random_range(0.0f32..1.0);
+            let r = (-2.0f32 * u1.ln()).sqrt();
+            let (sin, cos) = (2.0f32 * std::f32::consts::PI * u2).sin_cos();
+            data.push(mean + std * r * cos);
+            if data.len() < numel {
+                data.push(mean + std * r * sin);
+            }
+        }
         Self::try_from_vec(data, shape)
     }
 
@@ -694,6 +715,35 @@ impl fmt::Debug for Tensor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn try_randn_rejects_bad_params() {
+        for (m, s) in [
+            (0.0, f32::NAN),
+            (0.0, -1.0),
+            (0.0, f32::INFINITY),
+            (f32::NAN, 1.0),
+            (f32::INFINITY, 1.0),
+        ] {
+            assert!(matches!(
+                Tensor::try_randn(&[3], m, s),
+                Err(CortexError::InvalidConfig(_))
+            ));
+        }
+        assert!(Tensor::try_randn(&[3], 0.0, 0.0).is_ok());
+    }
+
+    #[test]
+    fn try_randn_with_rng_is_reproducible() {
+        use rand::SeedableRng;
+        let mk = |seed| {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            Tensor::try_randn_with_rng(&[5, 7], 0.0, 1.0, &mut rng).unwrap()
+        };
+        assert_eq!(mk(7).data(), mk(7).data());
+        assert_ne!(mk(7).data(), mk(8).data());
+        assert!(mk(7).data().iter().all(|v| v.is_finite()));
+    }
 
     #[test]
     fn test_from_vec_and_shape() {
