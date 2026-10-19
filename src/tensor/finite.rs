@@ -36,8 +36,8 @@
 //!
 //! | Case | Behavior |
 //! |----------|----------|
-//! | `eps` not finite or `eps ≤ 0` | [`CortexError::InvalidEpsilon`](crate::CortexError::InvalidEpsilon). |
-//! | Last-axis width `0` | [`CortexError::ZeroWidth`](crate::CortexError::ZeroWidth). |
+//! | `eps` not finite or `eps ≤ 0` | [`CortexError::InvalidEpsilon`]. |
+//! | Last-axis width `0` | [`CortexError::ZeroWidth`]. |
 //! | Empty batch (`rows = 0`, `dim > 0`) | Empty output with the same shape. |
 //! | Any non-finite value in a data row | That output row is all NaN. |
 //! | Finite data and finite affine parameters | Finite output. Values that overflow `f32` saturate to `±f32::MAX`. Constant rows yield the bias (LayerNorm) or `0` (RMSNorm with finite weight). |
@@ -56,12 +56,14 @@
 //!
 //! ## Integration (RM-1354)
 //!
-//! - **Call sites:** [`softmax_row`] and norm row helpers are `pub(crate)`. External
+//! - **Call sites:** `softmax_row` and norm row helpers are `pub(crate)`. External
 //!   code should use [`crate::tensor::ops::try_softmax`], [`crate::tensor::Tensor::try_softmax_last`],
 //!   [`crate::tensor::ops::try_layer_norm`], and [`crate::tensor::ops::try_rms_norm`], which
 //!   validate rank, shapes, [`validate_norm_eps`], and output size before calling the kernels.
-//! - **Sum tolerance:** [`apply_simplex_residual`] adjusts the largest `f32` mass after every
-//!   softmax branch so documented rows meet [`SOFTMAX_SUM_TOLERANCE`].
+//! - **Sum tolerance:** `apply_simplex_residual` adjusts the largest `f32` mass after every
+//!   softmax branch that produces a probability row, so those rows meet
+//!   [`SOFTMAX_SUM_TOLERANCE`]. Empty rows and rows containing NaN (filled with NaN) return
+//!   before it and are not adjusted.
 //! - **Attention:** Causal MHA softmaxes each full score row after the additive mask. An
 //!   all-`-Inf` row is uniform over the row length (see policy table); callers that need zero
 //!   mass on masked keys must ensure at least one finite logit on the attended prefix or apply
