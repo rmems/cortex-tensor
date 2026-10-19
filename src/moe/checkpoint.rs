@@ -802,6 +802,145 @@ mod tests {
         assert!(out[32..64].iter().all(|value| value.abs() <= 1e-4));
     }
 
+    /// Regression for GH#88: the retired in-tree Q5_K decoder interleaved the
+    /// low and high nibble of every `ql` byte (`[lo, hi, lo, hi, ...]`), and a
+    /// golden vector pinned that order. llama.cpp's `dequantize_row_q5_K`
+    /// writes each 64-wide group as 32 low-nibble values followed by 32
+    /// high-nibble values. This pins the correct order on the token-row path
+    /// that routing actually uses, with expectations derived by hand from the
+    /// `block_q5_K` layout: `d` f16 `[0..2]`, `dmin` f16 `[2..4]`,
+    /// `scales[12]` `[4..16]`, `qh[32]` `[16..48]`, `ql[128]` `[48..176]`.
+    #[test]
+    fn q5_k_token_row_follows_llama_cpp_low_then_high_nibble_order() {
+        const GGML_TYPE_Q5_K: u32 = 13;
+        const Q5_K_BYTES: usize = 176;
+
+        let mut block = [0u8; Q5_K_BYTES];
+        // d = 1.0, dmin = 0.5
+        block[0..2].copy_from_slice(&0x3C00u16.to_le_bytes());
+        block[2..4].copy_from_slice(&0x3800u16.to_le_bytes());
+        // get_scale_min_k4(j < 4): sc = scales[j] & 63, m = scales[j + 4] & 63.
+        // sc0 = 2, sc1 = 3, sc2 = 1, sc3 = 1; m0 = 4, m1..m3 = 0.
+        block[4..8].copy_from_slice(&[2, 3, 1, 1]);
+        block[8..12].copy_from_slice(&[4, 0, 0, 0]);
+        // get_scale_min_k4(j >= 4): sc = (scales[j+4] & 0xF) | ((scales[j-4] >> 6) << 4),
+        //                           m  = (scales[j+4] >> 4)  | ((scales[j]   >> 6) << 4).
+        // scales[8..12] = 0x11 with no high bits set above -> sc4..sc7 = 1, m4..m7 = 1.
+        for byte in &mut block[12..16] {
+            *byte = 0x11;
+        }
+        // qh: group 0 uses u1 = 0x01 (low nibble) and u2 = 0x02 (high nibble).
+        // Lanes 0..16 lift the low nibble by 16, lanes 16..32 lift the high nibble.
+        for byte in &mut block[16..32] {
+            *byte = 0x01;
+        }
+        for byte in &mut block[32..48] {
+            *byte = 0x02;
+        }
+        // Every ql byte is 0x35: low nibble 5, high nibble 3 (the GH#88 repro).
+        for byte in &mut block[48..Q5_K_BYTES] {
+            *byte = 0x35;
+        }
+
+        let mut payload = Vec::with_capacity(Q5_K_BYTES * 2);
+        payload.extend_from_slice(&block);
+        // Row 1: same block with the plain GH#88 repro (d = 1, dmin = 0, sc0 = sc1 = 1,
+        // no qh bits). Expected `[5; 32]` then `[3; 32]`, never `[5, 3, 5, 3, ...]`.
+        let mut plain = [0u8; Q5_K_BYTES];
+        plain[0..2].copy_from_slice(&0x3C00u16.to_le_bytes());
+        plain[4] = 1;
+        plain[5] = 1;
+        for byte in &mut plain[48..Q5_K_BYTES] {
+            *byte = 0x35;
+        }
+        payload.extend_from_slice(&plain);
+
+        // A gate tensor is included so the same file can also be bound the way
+        // `MoeRouter::load_with_mode` binds it (see the bound-path check below).
+        let hidden = 256usize;
+        let experts = 4usize;
+        let bytes = build_test_gguf(
+            vec![
+                (
+                    "blk.0.ffn_gate_inp.weight",
+                    vec![hidden, experts],
+                    GGML_TYPE_F32,
+                    vec![0u8; hidden * experts * std::mem::size_of::<f32>()],
+                ),
+                (
+                    "token_embd.weight",
+                    vec![hidden, 2],
+                    GGML_TYPE_Q5_K,
+                    payload,
+                ),
+            ],
+            32,
+            hidden,
+        );
+        let path = write_temp_file(&bytes, "token_q5k_gh88");
+        let path_str = path.to_str().unwrap();
+        let mut checkpoint = open_mapped_checkpoint(path_str).unwrap();
+
+        let row0 = checkpoint
+            .extract_token_embedding("token_embd.weight", path_str, 0)
+            .unwrap();
+        assert_eq!(row0.len(), 256);
+        let mut expected0 = Vec::with_capacity(256);
+        // Group 0 (ql[0..32], sc0/m0 for low, sc1/m1 for high):
+        //   low  lanes 0..16 : 1.0*2*(5+16) - 0.5*4 = 40
+        //   low  lanes 16..32: 1.0*2*5      - 0.5*4 = 8
+        //   high lanes 0..16 : 1.0*3*3      - 0      = 9
+        //   high lanes 16..32: 1.0*3*(3+16) - 0      = 57
+        expected0.extend(std::iter::repeat_n(40.0f32, 16));
+        expected0.extend(std::iter::repeat_n(8.0f32, 16));
+        expected0.extend(std::iter::repeat_n(9.0f32, 16));
+        expected0.extend(std::iter::repeat_n(57.0f32, 16));
+        // Group 1 (sc2 = sc3 = 1, m2 = m3 = 0, u1 = 0x04 / u2 = 0x08 unset): 5 then 3.
+        expected0.extend(std::iter::repeat_n(5.0f32, 32));
+        expected0.extend(std::iter::repeat_n(3.0f32, 32));
+        // Groups 2 and 3 (sc = 1, m = 1 -> minus 0.5): 4.5 then 2.5.
+        for _ in 0..2 {
+            expected0.extend(std::iter::repeat_n(4.5f32, 32));
+            expected0.extend(std::iter::repeat_n(2.5f32, 32));
+        }
+        assert_eq!(expected0.len(), row0.len());
+        for (idx, (got, want)) in row0.iter().zip(&expected0).enumerate() {
+            assert!(
+                (got - want).abs() <= 1e-4,
+                "row 0 lane {idx}: got {got}, want {want}"
+            );
+        }
+
+        let row1 = checkpoint
+            .extract_token_embedding("token_embd.weight", path_str, 1)
+            .unwrap();
+        assert_eq!(row1.len(), 256);
+        assert!(row1[..32].iter().all(|value| (value - 5.0).abs() <= 1e-4));
+        assert!(row1[32..64].iter().all(|value| (value - 3.0).abs() <= 1e-4));
+        // The interleaved order the retired decoder produced must not reappear.
+        assert_ne!(row1[1], 3.0);
+        assert_eq!(
+            packed_row_size(DType::Q5_K.ggml_type(), 256).unwrap(),
+            Q5_K_BYTES
+        );
+
+        // Bound-router path: `bind_router_weights` copies the token payload and
+        // drops the parser; `MoeRouter::extract_token_embedding` then reads that
+        // copy. The rows must be identical to the pre-bind extraction.
+        checkpoint
+            .bind_router_weights("token_embd.weight", "blk.0.ffn_gate_inp.weight", path_str)
+            .unwrap();
+        let bound0 = checkpoint
+            .extract_token_embedding("token_embd.weight", path_str, 0)
+            .unwrap();
+        let bound1 = checkpoint
+            .extract_token_embedding("token_embd.weight", path_str, 1)
+            .unwrap();
+        assert_eq!(bound0, row0);
+        assert_eq!(bound1, row1);
+        let _ = std::fs::remove_file(path);
+    }
+
     fn build_token_file(ggml_type: u32, vocab: usize, payload: Vec<u8>) -> Vec<u8> {
         build_native_tensor(
             "token_embd.weight",
