@@ -87,16 +87,21 @@ fn test_real_checkpoint_probe_via_env() {
 
 #[test]
 fn test_q5k_dequant_follows_engram_group_order() {
+    // GH#88 repro: d = 1, sc0 = sc1 = 1, ql = 0x35 (low nibble 5, high nibble 3).
+    // llama.cpp emits `[5; 32]` then `[3; 32]`; the retired in-tree decoder
+    // interleaved them as `[5, 3, 5, 3, ...]`.
     let mut block = [0u8; 176];
     block[0..2].copy_from_slice(&0x3C00u16.to_le_bytes());
     block[4] = 1;
+    block[5] = 1;
     for byte in block[48..80].iter_mut() {
-        *byte = 0x05;
+        *byte = 0x35;
     }
     let out = engram_parser::dequantize_q5_k(&block, &[256]).expect("Q5_K row should dequantize");
     assert_eq!(out.len(), 256);
     assert!(out[..32].iter().all(|value| (value - 5.0).abs() <= 1e-4));
-    assert!(out[32..64].iter().all(|value| value.abs() <= 1e-4));
+    assert!(out[32..64].iter().all(|value| (value - 3.0).abs() <= 1e-4));
+    assert!(out[64..].iter().all(|value| value.abs() <= 1e-4));
 }
 
 fn adapter_probe(bytes: &[u8], label: &str) -> (PathBuf, super::checkpoint::MappedCheckpoint) {
