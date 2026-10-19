@@ -64,10 +64,12 @@
 //!   softmax branch that produces a probability row, so those rows meet
 //!   [`SOFTMAX_SUM_TOLERANCE`]. Empty rows and rows containing NaN (filled with NaN) return
 //!   before it and are not adjusted.
-//! - **Attention:** Causal MHA softmaxes each full score row after the additive mask. An
-//!   all-`-Inf` row is uniform over the row length (see policy table); callers that need zero
-//!   mass on masked keys must ensure at least one finite logit on the attended prefix or apply
-//!   a mask after softmax (see `transformer::attention` module docs).
+//! - **Attention:** Causal MHA softmaxes only the visible prefix `0..=r` of each score row and
+//!   writes exact `0.0` for the future slots, so no score value (including an all-`-Inf`
+//!   prefix, which is uniform over the prefix per the policy table) can put mass on a masked
+//!   key. The `attn × V` product likewise accumulates only value rows `0..=r`, so a non-finite
+//!   future `V` row cannot reach earlier tokens through `0.0 * NaN` (see `transformer::attention`
+//!   module docs).
 //! - **MoE:** Routing softmax shares this kernel; top-k uses raw-score ordering and NaN rejection
 //!   outside this module (RM-1355).
 
