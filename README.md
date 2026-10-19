@@ -46,7 +46,7 @@ src/
 │   ├── mod.rs        # row-major Tensor { data, shape } (strides recomputed from shape)
 │   └── ops.rs        # matmul, batched_matmul, causal_mask, softmax, layer_norm, rms_norm
 ├── transformer/
-│   ├── attention.rs  # MultiHeadAttention (scaled dot-product, causal mask)
+│   ├── attention.rs  # MultiHeadAttention (scaled dot-product, causal prefix softmax)
 │   ├── block.rs      # TransformerBlock (attn + MLP + LayerNorm)
 │   ├── model.rs      # TransformerConfig + TransformerLM (decoder-only)
 │   └── mod.rs
@@ -71,7 +71,7 @@ src/
 | `ops::try_embedding` | Embedding lookup that returns `CortexError::TokenIndex` for OOV ids. |
 | `ops::try_layer_norm` / `try_rms_norm` | Normalization that rejects zero-width axes and non-positive/non-finite `eps`. |
 | `ops::matmul` / `batched_matmul` | Pre-1.0 panic-style wrappers around the `try_*` ops. |
-| `ops::causal_mask` | Additive mask for auto-regressive attention. |
+| `ops::causal_mask` | Additive mask for auto-regressive attention (kept for callers and golden tests; `MultiHeadAttention` no longer uses it). |
 | `ops::softmax` / `Tensor::softmax_last` | Numerically stable softmax under the [finite-value policy](#finite-value-policy); `try_softmax` / `try_softmax_last` reject rank `> 2`. |
 | `ops::layer_norm` / `rms_norm` | Finite-value LayerNorm / RMSNorm (`try_*` for typed errors). |
 | `tensor::finite` | Policy docs and public constants (`SOFTMAX_SUM_TOLERANCE`, `L2_NORM_FLOOR`). |
@@ -88,7 +88,7 @@ Unversioned pre-1.0 JSON and the older `strides` field must be migrated explicit
 
 | Item | Purpose |
 |---|---|
-| `MultiHeadAttention` | Multi-head scaled dot-product attention with causal masking. Weights are dense `Tensor`s; no external framework needed. |
+| `MultiHeadAttention` | Multi-head scaled dot-product attention; each query row is normalised over its causal prefix only (no additive mask). Weights are dense `Tensor`s; no external framework needed. |
 | `TransformerBlock` | Attention → residual → MLP → residual, with pre-LayerNorm. |
 | `TransformerLM` / `TransformerConfig` | Decoder-only transformer LM: token + positional embedding → N × block → LayerNorm → LM head. |
 
@@ -352,7 +352,7 @@ a documented semantic reason and independent arithmetic review.
 
 - **Public API:** Prefer `ops::try_softmax`, `Tensor::try_softmax_last`, `try_layer_norm`, and `try_rms_norm` for rank, shape, `eps`, and allocation checks. Row kernels in `tensor::finite` are crate-internal; they assume valid buffer lengths and (for norms) an `eps` already accepted by `validate_norm_eps`.
 - **Softmax sum tolerance:** After the `f64` partition, an `f32` residual is folded onto the largest mass so finite rows of length `≤ 4096` meet `SOFTMAX_SUM_TOLERANCE` (`1e-5`), including uniform branches (all `-Inf`, degenerate partition).
-- **Causal attention:** `MultiHeadAttention` applies an additive causal mask, then row-wise `softmax_row` over the full `[seq]` logits for each query position. The policy’s all-`-Inf` case is uniform `1/seq` over **every** index in that row. In normal use at least one causal-prefix logit stays finite after masking, so future (masked) slots do not receive mass. If every logit in the row is `-Inf` (for example pathological scores on the whole prefix), uniform softmax can assign probability to masked future positions; fixing that belongs at the attention/mask layer, not in the shared row kernel.
+- **Causal attention:** `MultiHeadAttention` runs `softmax_row` over the visible prefix `0..=r` of each query row and writes exact zeros for future slots `r+1..seq` (no additive mask). Future scores are never read, so no score value can leak mass onto a future token. If every visible logit is `-Inf` (for example an overflowing prefix), the shared row policy yields uniform `1/(r+1)` over the visible prefix only. The `attn × V` product also accumulates only value rows `0..=r`, so a NaN/`±Inf` value row at a future position cannot reach earlier tokens through `0.0 * NaN`.
 - **MoE routing:** Gate softmax uses the same row policy. Expert selection ranks **raw** scores before softmax (RM-1355); NaN gate scores return `NanRoutingScore` instead of routing with NaN weights.
 
 Building a transformer block:
