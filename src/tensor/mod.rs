@@ -58,7 +58,7 @@ use std::fmt;
 ///   `[usize::MAX, 0, 2]`).
 /// - Constructors and [`Deserialize`] reject shapes whose element count or
 ///   row-major stride product is not representable in `usize` (see
-///   [`checked_numel`] and [`try_compute_strides`]).
+///   `checked_numel` and `try_compute_strides`).
 /// - [`Self::mean`] on a zero-element tensor is `0.0 / 0.0`, which is `NaN`.
 #[derive(Clone)]
 pub struct Tensor {
