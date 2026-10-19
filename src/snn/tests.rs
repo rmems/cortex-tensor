@@ -101,6 +101,41 @@ fn spiking_forward_routes_and_steps_backend() {
     assert_eq!(model.backend().steps, 1);
 }
 
+/// Issue #89: `SpikingMoeRouter` shares `MoeRouter::gate_scores`, so a
+/// checkpoint gate written in GGUF `ne` order must route the same way through
+/// the spiking path. Expert 5's row is all ones; input `e_0` selects expert 5.
+#[test]
+fn spiking_forward_selects_expert_by_gguf_ne_order_row() {
+    use crate::moe::test_fixtures::{build_real_size_checkpoint, write_temp_file};
+
+    let experts = 64usize;
+    let mut gate = vec![0.0f32; EMBEDDING_DIM * experts];
+    gate[5 * EMBEDDING_DIM..6 * EMBEDDING_DIM].fill(1.0);
+    let gate_bytes: Vec<u8> = gate.iter().flat_map(|value| value.to_le_bytes()).collect();
+    let path = write_temp_file(&build_real_size_checkpoint(gate_bytes), "spiking-row-order");
+
+    let router = MoeRouter::load_with_mode(
+        path.to_str().unwrap(),
+        8,
+        1,
+        crate::moe::RoutingMode::DenseSim,
+    )
+    .unwrap();
+    let mut model = SpikingMoeRouter::new(
+        router,
+        MockBackend::new(8, 0.5),
+        RateEncoder::default(),
+        SpikeCountDecoder,
+    )
+    .unwrap();
+    let mut embedding = vec![0.0f32; EMBEDDING_DIM];
+    embedding[0] = 1.0;
+    let out = model.forward(&embedding).unwrap();
+    assert_eq!(out.selected_experts, vec![5]);
+
+    let _ = std::fs::remove_file(path);
+}
+
 #[test]
 fn spiking_forward_rejects_nan_before_backend_step() {
     let backend = MockBackend::new(8, 0.0);
