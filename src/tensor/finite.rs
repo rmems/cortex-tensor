@@ -61,7 +61,9 @@
 //!   [`crate::tensor::ops::try_layer_norm`], and [`crate::tensor::ops::try_rms_norm`], which
 //!   validate rank, shapes, [`validate_norm_eps`], and output size before calling the kernels.
 //! - **Sum tolerance:** `apply_simplex_residual` adjusts the largest `f32` mass after every
-//!   softmax branch so documented rows meet [`SOFTMAX_SUM_TOLERANCE`].
+//!   softmax branch that produces a probability row, so those rows meet
+//!   [`SOFTMAX_SUM_TOLERANCE`]. Empty rows and rows containing NaN (filled with NaN) return
+//!   before it and are not adjusted.
 //! - **Attention:** Causal MHA softmaxes each full score row after the additive mask. An
 //!   all-`-Inf` row is uniform over the row length (see policy table); callers that need zero
 //!   mass on masked keys must ensure at least one finite logit on the attended prefix or apply
