@@ -39,13 +39,14 @@ impl FeedForward {
     }
     /// # Panics
     ///
-    /// Panics if a shape allocation overflows. Prefer
-    /// [`FeedForward::try_new`].
+    /// Panics if `dim` or `ff_dim` is zero or a shape allocation overflows.
+    /// Prefer [`FeedForward::try_new`].
     pub fn new(dim: usize, ff_dim: usize) -> Self {
         unwrap_compat(Self::try_new(dim, ff_dim), "FeedForward::new")
     }
 
-    /// Fallible constructor: fails on shape/allocation overflow instead of
+    /// Fallible constructor: returns [`CortexError::InvalidConfig`] when `dim`
+    /// or `ff_dim` is zero, and fails on shape/allocation overflow instead of
     /// panicking.
     pub fn try_new(dim: usize, ff_dim: usize) -> Result<Self> {
         Self::try_new_with_rng(dim, ff_dim, &mut rand::rng())
@@ -152,7 +153,7 @@ impl TransformerBlock {
     }
     /// # Panics
     ///
-    /// Panics if `num_heads` is invalid for `dim`. Prefer
+    /// Panics if `num_heads` is invalid for `dim` or `ff_dim` is zero. Prefer
     /// [`TransformerBlock::try_new`].
     pub fn new(dim: usize, num_heads: usize, ff_dim: usize) -> Self {
         unwrap_compat(
@@ -162,7 +163,8 @@ impl TransformerBlock {
     }
 
     /// Fallible constructor: returns [`CortexError::InvalidConfig`] when
-    /// `num_heads` is zero or does not evenly divide `dim`.
+    /// `num_heads` is zero or does not evenly divide `dim`, or when `ff_dim`
+    /// is zero.
     pub fn try_new(dim: usize, num_heads: usize, ff_dim: usize) -> Result<Self> {
         Self::try_new_with_rng(dim, num_heads, ff_dim, &mut rand::rng())
     }

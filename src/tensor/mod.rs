@@ -213,7 +213,9 @@ impl Tensor {
     ///
     /// # Panics
     ///
-    /// Panics if the shape product or stride arithmetic overflows `usize`.
+    /// Panics if the shape product or stride arithmetic overflows `usize`,
+    /// if `mean` is not finite, if `std` is not finite or is negative, or if
+    /// a sample overflows `f32`. Prefer [`Tensor::try_randn`] in new code.
     /// See [`Tensor::from_vec`] for the pre-1.0 compatibility policy.
     pub fn randn(shape: &[usize], mean: f32, std: f32) -> Self {
         unwrap_compat(Self::try_randn(shape, mean, std), "Tensor::randn")
