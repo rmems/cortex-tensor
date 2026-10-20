@@ -257,6 +257,12 @@ impl Tensor {
                 data.push(mean + std * r * sin);
             }
         }
+        // A finite but huge `std` (or `mean`) can still overflow to inf/NaN.
+        if data.iter().any(|v| !v.is_finite()) {
+            return Err(CortexError::InvalidConfig(format!(
+                "randn: mean ({mean}) and std ({std}) overflow f32 while sampling"
+            )));
+        }
         Self::try_from_vec(data, shape)
     }
 
@@ -724,6 +730,14 @@ impl fmt::Debug for Tensor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn try_randn_rejects_overflowing_std() {
+        assert!(matches!(
+            Tensor::try_randn(&[64], 0.0, f32::MAX),
+            Err(CortexError::InvalidConfig(_))
+        ));
+    }
 
     #[test]
     fn try_randn_rejects_bad_params() {

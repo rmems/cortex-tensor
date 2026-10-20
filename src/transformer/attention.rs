@@ -316,6 +316,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn seeded_attention_is_reproducible() {
+        let a = MultiHeadAttention::try_new_seeded(16, 4, 5).unwrap();
+        let b = MultiHeadAttention::try_new_seeded(16, 4, 5).unwrap();
+        let c = MultiHeadAttention::try_new_seeded(16, 4, 6).unwrap();
+        assert_eq!(a.wq.data(), b.wq.data());
+        assert_eq!(a.wo.data(), b.wo.data());
+        assert_ne!(a.wq.data(), c.wq.data());
+    }
+
+    #[test]
     fn test_attention_shapes() {
         let attn = MultiHeadAttention::new(64, 4);
         let x = Tensor::randn(&[8, 64], 0.0, 0.1);

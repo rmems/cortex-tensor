@@ -241,6 +241,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ffn_rejects_zero_dims() {
+        assert!(matches!(
+            FeedForward::try_new_seeded(0, 8, 0),
+            Err(CortexError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            FeedForward::try_new_seeded(8, 0, 0),
+            Err(CortexError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
     fn seeded_stream_is_pinned() {
         let ffn = FeedForward::try_new_seeded(4, 8, 0).unwrap();
         let want = [-0.185_433_52_f32, -0.705_181_54, -0.790_492, 0.171_895_62];
