@@ -66,6 +66,11 @@ impl FeedForward {
         ff_dim: usize,
         rng: &mut R,
     ) -> Result<Self> {
+        if dim == 0 || ff_dim == 0 {
+            return Err(CortexError::InvalidConfig(format!(
+                "FeedForward: dim ({dim}) and ff_dim ({ff_dim}) must be nonzero"
+            )));
+        }
         let scale1 = 1.0 / (dim as f32).sqrt();
         let scale2 = 1.0 / (ff_dim as f32).sqrt();
         Ok(Self {
@@ -256,7 +261,13 @@ mod tests {
         let x = Tensor::ones(&[64, 64]);
         let y = ffn.forward(&x);
         let n = y.numel() as f32;
-        let var = y.data().iter().map(|v| v * v).sum::<f32>() / n;
+        let mean = y.data().iter().copied().sum::<f32>() / n;
+        let var = y
+            .data()
+            .iter()
+            .map(|v| (v - mean) * (v - mean))
+            .sum::<f32>()
+            / n;
         assert!(var < 2.0, "ffn output variance too large: {var}");
     }
 
