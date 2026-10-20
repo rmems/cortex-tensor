@@ -78,8 +78,7 @@ impl MultiHeadAttention {
     /// Like [`Self::try_new`] but seeded: the same `(dim, num_heads, seed)`
     /// always yields the same weights.
     pub fn try_new_seeded(dim: usize, num_heads: usize, seed: u64) -> Result<Self> {
-        use rand::SeedableRng;
-        Self::try_new_with_rng(dim, num_heads, &mut rand::rngs::StdRng::seed_from_u64(seed))
+        Self::try_new_with_rng(dim, num_heads, &mut crate::tensor::seeded_rng(seed))
     }
 
     /// Like [`Self::try_new`] but draws weights from the caller's RNG.

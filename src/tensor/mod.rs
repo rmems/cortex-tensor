@@ -112,6 +112,15 @@ impl<'de> Deserialize<'de> for Tensor {
     }
 }
 
+/// Portable RNG behind every `*_seeded` constructor. ChaCha8 is a fixed,
+/// documented algorithm, unlike `StdRng`, whose stream may change between
+/// `rand` releases, so a `(config, seed)` pair keeps rebuilding the same
+/// weights. A golden test pins the stream.
+pub(crate) fn seeded_rng(seed: u64) -> rand_chacha::ChaCha8Rng {
+    use rand::SeedableRng;
+    rand_chacha::ChaCha8Rng::seed_from_u64(seed)
+}
+
 impl Tensor {
     // ── Constructors ─────────────────────────────────────────────────
 
@@ -735,9 +744,8 @@ mod tests {
 
     #[test]
     fn try_randn_with_rng_is_reproducible() {
-        use rand::SeedableRng;
         let mk = |seed| {
-            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            let mut rng = seeded_rng(seed);
             Tensor::try_randn_with_rng(&[5, 7], 0.0, 1.0, &mut rng).unwrap()
         };
         assert_eq!(mk(7).data(), mk(7).data());

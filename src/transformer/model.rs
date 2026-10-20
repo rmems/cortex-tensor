@@ -147,8 +147,7 @@ impl TransformerLM {
     /// Like [`Self::try_new`] but seeded: the same config and seed always
     /// rebuild the same model.
     pub fn try_new_seeded(cfg: TransformerConfig, seed: u64) -> Result<Self> {
-        use rand::SeedableRng;
-        Self::try_new_with_rng(cfg, &mut rand::rngs::StdRng::seed_from_u64(seed))
+        Self::try_new_with_rng(cfg, &mut crate::tensor::seeded_rng(seed))
     }
 
     /// Like [`Self::try_new`] but draws all weights from the caller's RNG.

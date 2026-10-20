@@ -53,8 +53,7 @@ impl FeedForward {
 
     /// Like [`Self::try_new`] but seeded for reproducible weights.
     pub fn try_new_seeded(dim: usize, ff_dim: usize, seed: u64) -> Result<Self> {
-        use rand::SeedableRng;
-        Self::try_new_with_rng(dim, ff_dim, &mut rand::rngs::StdRng::seed_from_u64(seed))
+        Self::try_new_with_rng(dim, ff_dim, &mut crate::tensor::seeded_rng(seed))
     }
 
     /// Like [`Self::try_new`] but draws weights from the caller's RNG.
@@ -170,13 +169,7 @@ impl TransformerBlock {
 
     /// Like [`Self::try_new`] but seeded for reproducible weights.
     pub fn try_new_seeded(dim: usize, num_heads: usize, ff_dim: usize, seed: u64) -> Result<Self> {
-        use rand::SeedableRng;
-        Self::try_new_with_rng(
-            dim,
-            num_heads,
-            ff_dim,
-            &mut rand::rngs::StdRng::seed_from_u64(seed),
-        )
+        Self::try_new_with_rng(dim, num_heads, ff_dim, &mut crate::tensor::seeded_rng(seed))
     }
 
     /// Like [`Self::try_new`] but draws weights from the caller's RNG.
@@ -246,6 +239,15 @@ fn broadcast_row(bias: &Tensor, rows: usize) -> Result<Tensor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seeded_stream_is_pinned() {
+        let ffn = FeedForward::try_new_seeded(4, 8, 0).unwrap();
+        let want = [-0.185_433_52_f32, -0.705_181_54, -0.790_492, 0.171_895_62];
+        for (got, want) in ffn.w1.data()[..4].iter().zip(want) {
+            assert!((got - want).abs() < 1e-5, "{got} != {want}");
+        }
+    }
 
     #[test]
     fn seeded_block_is_reproducible() {
