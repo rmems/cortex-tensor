@@ -141,6 +141,20 @@ impl TransformerLM {
     /// [`CortexError::SizeOverflow`] when a configured shape is not
     /// representable.
     pub fn try_new(cfg: TransformerConfig) -> Result<Self> {
+        Self::try_new_with_rng(cfg, &mut rand::rng())
+    }
+
+    /// Like [`Self::try_new`] but seeded: the same config and seed always
+    /// rebuild the same model.
+    pub fn try_new_seeded(cfg: TransformerConfig, seed: u64) -> Result<Self> {
+        Self::try_new_with_rng(cfg, &mut crate::tensor::seeded_rng(seed))
+    }
+
+    /// Like [`Self::try_new`] but draws all weights from the caller's RNG.
+    pub fn try_new_with_rng<R: rand::Rng + ?Sized>(
+        cfg: TransformerConfig,
+        rng: &mut R,
+    ) -> Result<Self> {
         // Validate the head config up front: with num_layers == 0 the block
         // iterator below never runs, so per-block validation alone would
         // accept invalid configs.
@@ -153,16 +167,16 @@ impl TransformerLM {
         cfg.validate_wire()?;
         let scale = 0.02;
         let blocks: Vec<TransformerBlock> = (0..cfg.num_layers)
-            .map(|_| TransformerBlock::try_new(cfg.dim, cfg.num_heads, cfg.ff_dim))
+            .map(|_| TransformerBlock::try_new_with_rng(cfg.dim, cfg.num_heads, cfg.ff_dim, rng))
             .collect::<Result<_>>()?;
 
         Ok(Self {
-            tok_embed: Tensor::try_randn(&[cfg.vocab_size, cfg.dim], 0.0, scale)?,
-            pos_embed: Tensor::try_randn(&[cfg.max_seq_len, cfg.dim], 0.0, scale)?,
+            tok_embed: Tensor::try_randn_with_rng(&[cfg.vocab_size, cfg.dim], 0.0, scale, rng)?,
+            pos_embed: Tensor::try_randn_with_rng(&[cfg.max_seq_len, cfg.dim], 0.0, scale, rng)?,
             blocks,
             final_ln_w: Tensor::try_ones(&[cfg.dim])?,
             final_ln_b: Tensor::try_zeros(&[cfg.dim])?,
-            lm_head: Tensor::try_randn(&[cfg.dim, cfg.vocab_size], 0.0, scale)?,
+            lm_head: Tensor::try_randn_with_rng(&[cfg.dim, cfg.vocab_size], 0.0, scale, rng)?,
             config: cfg,
         })
     }
@@ -259,6 +273,14 @@ impl TransformerLM {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seeded_model_is_reproducible() {
+        let cfg = TransformerConfig::tiny();
+        let a = TransformerLM::try_new_seeded(cfg.clone(), 42).unwrap();
+        let b = TransformerLM::try_new_seeded(cfg, 42).unwrap();
+        assert_eq!(a.forward(&[1, 2, 3]).data(), b.forward(&[1, 2, 3]).data());
+    }
 
     #[test]
     fn test_tiny_forward() {
