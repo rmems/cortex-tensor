@@ -83,8 +83,23 @@ pub enum CortexError {
     SnnNan { stage: &'static str },
 
     /// A spike addressed a channel the backend width cannot represent.
-    #[error("SNN encoder emitted spike at channel {channel}, outside backend width {channels}")]
+    #[error("SNN spike at channel {channel} is outside backend width {channels}")]
     SnnSpikeOutOfRange { channel: usize, channels: usize },
+
+    /// A backend reported the same channel more than once in one tick,
+    /// violating the at-most-once contract of `SnnStepOutput::spikes`.
+    #[error("SNN backend reported channel {channel} more than once in one tick")]
+    SnnDuplicateSpike { channel: usize },
+
+    /// A decoder returned a readout whose length differs from the backend
+    /// channel count.
+    #[error("SNN decoder returned {got} readout values for {expected} channels")]
+    SnnReadoutLength { expected: usize, got: usize },
+
+    /// A decoder readout was negative or infinite; spike activity must be a
+    /// finite, non-negative quantity (NaN is reported as `SnnNan`).
+    #[error("SNN decoder readout at channel {channel} is {value}; expected finite and >= 0")]
+    SnnInvalidReadout { channel: usize, value: f32 },
 
     /// NaN is rejected before ranking so it never participates in `partial_cmp`.
     #[error("NaN routing score at expert {expert_id}")]

@@ -72,6 +72,21 @@ impl MultiHeadAttention {
     /// Fallible constructor: returns [`CortexError::InvalidConfig`] when
     /// `num_heads` is zero or does not evenly divide `dim`.
     pub fn try_new(dim: usize, num_heads: usize) -> Result<Self> {
+        Self::try_new_with_rng(dim, num_heads, &mut rand::rng())
+    }
+
+    /// Like [`Self::try_new`] but seeded: the same `(dim, num_heads, seed)`
+    /// always yields the same weights.
+    pub fn try_new_seeded(dim: usize, num_heads: usize, seed: u64) -> Result<Self> {
+        Self::try_new_with_rng(dim, num_heads, &mut crate::tensor::seeded_rng(seed))
+    }
+
+    /// Like [`Self::try_new`] but draws weights from the caller's RNG.
+    pub fn try_new_with_rng<R: rand::Rng + ?Sized>(
+        dim: usize,
+        num_heads: usize,
+        rng: &mut R,
+    ) -> Result<Self> {
         if dim == 0 || num_heads == 0 || !dim.is_multiple_of(num_heads) {
             return Err(CortexError::InvalidConfig(format!(
                 "MultiHeadAttention: dim ({dim}) and num_heads ({num_heads}) must be nonzero, and num_heads must divide dim"
@@ -83,13 +98,13 @@ impl MultiHeadAttention {
             num_heads,
             head_dim,
             dim,
-            wq: Tensor::try_randn(&[dim, dim], 0.0, scale)?,
+            wq: Tensor::try_randn_with_rng(&[dim, dim], 0.0, scale, rng)?,
             wb_q: Tensor::try_zeros(&[1, dim])?,
-            wk: Tensor::try_randn(&[dim, dim], 0.0, scale)?,
+            wk: Tensor::try_randn_with_rng(&[dim, dim], 0.0, scale, rng)?,
             wb_k: Tensor::try_zeros(&[1, dim])?,
-            wv: Tensor::try_randn(&[dim, dim], 0.0, scale)?,
+            wv: Tensor::try_randn_with_rng(&[dim, dim], 0.0, scale, rng)?,
             wb_v: Tensor::try_zeros(&[1, dim])?,
-            wo: Tensor::try_randn(&[dim, dim], 0.0, scale)?,
+            wo: Tensor::try_randn_with_rng(&[dim, dim], 0.0, scale, rng)?,
             wb_o: Tensor::try_zeros(&[1, dim])?,
         })
     }
@@ -355,6 +370,16 @@ mod tests {
         attn.wv = identity(2, 1.0);
         attn.wo = identity(2, 1.0);
         attn
+    }
+
+    #[test]
+    fn seeded_attention_is_reproducible() {
+        let a = MultiHeadAttention::try_new_seeded(16, 4, 5).unwrap();
+        let b = MultiHeadAttention::try_new_seeded(16, 4, 5).unwrap();
+        let c = MultiHeadAttention::try_new_seeded(16, 4, 6).unwrap();
+        assert_eq!(a.wq.data(), b.wq.data());
+        assert_eq!(a.wo.data(), b.wo.data());
+        assert_ne!(a.wq.data(), c.wq.data());
     }
 
     #[test]
