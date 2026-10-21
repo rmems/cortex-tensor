@@ -1010,19 +1010,54 @@ fn neuromod_adapter_seeded_rng_replays_bit_for_bit() {
 #[cfg(feature = "neuromod")]
 #[test]
 fn neuromod_adapter_drives_spiking_router_on_every_expert() {
-    // End to end: the router's `hidden` is `embedding * spiking_mass`, so a
-    // backend that never spikes degrades to DenseSim with `hidden == 0` (#91).
+    // End to end: a backend that never spikes leaves `SpikingMoeRouter` with
+    // no spike signal at all, so routing degrades to the bare ANN gate (#91).
+    // Since #93 the hidden gain is bounded and a silent tick falls back to the
+    // dense selected mass, so `hidden` can no longer tell "every channel
+    // fired" from "nothing fired". Record the spikes the router's own
+    // `forward` path draws from the backend instead.
+    struct Recording {
+        inner: NeuromodNetwork,
+        counts: Vec<usize>,
+    }
+    impl SnnBackend for Recording {
+        fn channels(&self) -> usize {
+            self.inner.channels()
+        }
+        fn step(&mut self, stimulus: &[f32]) -> Result<SnnStepOutput> {
+            let out = self.inner.step(stimulus)?;
+            for &idx in &out.spikes {
+                self.counts[idx] += 1;
+            }
+            Ok(out)
+        }
+        fn step_frozen(&mut self, stimulus: &[f32]) -> Result<SnnStepOutput> {
+            self.inner.step_frozen(stimulus)
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn capabilities(&self) -> SnnCapabilities {
+            self.inner.capabilities()
+        }
+    }
+
     let router = MoeRouter::load_with_mode("", 8, 8, crate::moe::RoutingMode::DenseSim).unwrap();
-    let backend = NeuromodNetwork::new(8, 0, 8).unwrap();
+    let backend = Recording {
+        inner: NeuromodNetwork::new(8, 0, 8).unwrap(),
+        counts: vec![0; 8],
+    };
     let mut model =
         SpikingMoeRouter::new(router, backend, RateEncoder::default(), SpikeCountDecoder).unwrap();
-    // With `top_k == num_experts`, `spiking_mass` is the number of expert
-    // channels that fired this tick; a uniform gate drives all eight, so the
-    // hidden state must reach `embedding * 8.0` on some tick.
-    let mut max_mass = 0.0f32;
+    // A uniform gate with `top_k == num_experts` stimulates all eight expert
+    // channels, so each one must fire at least once through `forward`.
     for _ in 0..200 {
         let out = model.forward(&[1.0; EMBEDDING_DIM]).unwrap();
-        max_mass = max_mass.max(out.hidden[0]);
+        assert!(out.hidden.iter().all(|v| v.is_finite()));
     }
-    assert_eq!(max_mass, 8.0, "not every expert channel spiked");
+    let counts = &model.backend().counts;
+    assert!(
+        counts.iter().all(|&c| c > 0),
+        "not every expert channel spiked: {counts:?}"
+    );
 }
