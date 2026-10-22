@@ -99,8 +99,11 @@ pub(crate) fn build_test_gguf_with_expert_count(
     push_kv_u32(&mut out, "reference_moe.expert_count", expert_count);
     push_kv_u32(&mut out, "reference_moe.expert_used_count", 8);
 
-    let mut data_offset = 0usize;
-    let mut tensor_payloads = Vec::new();
+    // GGUF requires every tensor's relative offset to be a multiple of
+    // `general.alignment`, so each payload is padded up to the next boundary
+    // (issue #86 noted the fixture used to pack payloads back to back).
+    let alignment = alignment as usize;
+    let mut data = Vec::new();
     for (name, dims, ggml_type, payload) in tensors {
         push_string(&mut out, name);
         push_u32(&mut out, dims.len() as u32);
@@ -108,19 +111,22 @@ pub(crate) fn build_test_gguf_with_expert_count(
             push_u64(&mut out, *dim as u64);
         }
         push_u32(&mut out, ggml_type);
-        push_u64(&mut out, data_offset as u64);
-        data_offset += payload.len();
-        tensor_payloads.push(payload);
+        push_u64(&mut out, data.len() as u64);
+        data.extend_from_slice(&payload);
+        pad_to_alignment(&mut data, alignment);
     }
 
-    while out.len() % alignment as usize != 0 {
-        out.push(0);
-    }
-    for payload in tensor_payloads {
-        out.extend_from_slice(&payload);
-    }
-
+    pad_to_alignment(&mut out, alignment);
+    out.extend_from_slice(&data);
     out
+}
+
+fn pad_to_alignment(out: &mut Vec<u8>, alignment: usize) {
+    if alignment > 1 {
+        while !out.len().is_multiple_of(alignment) {
+            out.push(0);
+        }
+    }
 }
 
 pub(crate) fn build_real_size_checkpoint(gate_payload: Vec<u8>) -> Vec<u8> {
