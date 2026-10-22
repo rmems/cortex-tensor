@@ -127,7 +127,7 @@ cortex-tensor = { git = "https://github.com/rmems/cortex-tensor", branch = "main
 use cortex_tensor::moe::{MoeRouter, RoutingMode};
 use cortex_tensor::snn::{NeuromodNetwork, RateEncoder, SpikingMoeRouter, SpikeCountDecoder};
 
-let router = MoeRouter::load("model.gguf", 0, 2)?;
+let router = MoeRouter::load("model.gguf", 0, 2)?; // RoutingMode::default() == DenseSim
 let backend = NeuromodNetwork::new(/* lif */ 8, /* izh */ 0, /* channels */ 8)?;
 let mut hybrid = SpikingMoeRouter::new(router, backend, RateEncoder::default(), SpikeCountDecoder)?;
 let out = hybrid.forward(&embedding)?; // or forward_frozen for held-out eval
