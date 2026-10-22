@@ -143,6 +143,21 @@ pub enum CortexError {
     #[error("stage '{stage_id}' is missing required parameters")]
     MissingStageParams { stage_id: String },
 
+    /// Parameters are bound for the stage, but for a different stage kind
+    /// (`expected` / `got` are [`crate::stage::StageKindTag`] tokens).
+    #[error("stage '{stage_id}' has parameters for kind {got}, expected {expected}")]
+    StageParamsMismatch {
+        stage_id: String,
+        expected: String,
+        got: String,
+    },
+
+    /// Parameters are bound for the right stage kind but are internally
+    /// inconsistent with it (e.g. a LayerNorm without a bias, or an RMSNorm
+    /// with one).
+    #[error("stage '{stage_id}' has invalid parameters: {reason}")]
+    InvalidStageParams { stage_id: String, reason: String },
+
     /// A stage received the wrong number of inputs.
     #[error("stage '{stage_id}' expected {expected} input(s), got {got}")]
     StageInputArity {
@@ -170,6 +185,12 @@ pub enum CortexError {
     /// [`std::error::Error`], but here it is just the external ingress name.
     #[error("missing binding for external stage source '{name}'")]
     MissingStageBinding { name: String },
+
+    /// A binding name was supplied twice (for example as both token ids and a
+    /// tensor), or a bound stage output names a stage the topology itself
+    /// produces. Rejected at bind / run time instead of shadowing silently.
+    #[error("conflicting binding for stage source '{name}': {reason}")]
+    ConflictingStageBinding { name: String, reason: String },
 
     /// A stage's execution failed; the wrapped error carries the cause.
     #[error("stage '{stage_id}' failed: {source}")]
