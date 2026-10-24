@@ -695,7 +695,9 @@ fn topology_keeps_hidden_state_inside_candle() {
     };
     let topology = AnnTopology::new(vec![norm_stage, add_stage]).unwrap();
     let hidden = import_reference(&x).unwrap();
-    let bindings = ExternalBindings::new().with_tensor("x", &hidden);
+    let bindings = ExternalBindings::new()
+        .with_tensor("x", &hidden)
+        .expect("bind x");
     let outputs = run_topology(&mut exec, &topology, &bindings).unwrap();
     let add = outputs.get(&stage_id("add")).unwrap();
     assert_eq!(add.meta().dtype, DType::F32);

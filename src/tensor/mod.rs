@@ -414,12 +414,18 @@ impl Tensor {
             });
         }
         let (rows, cols) = (self.shape[0], self.shape[1]);
-        let out_len = checked_numel(&[rows, cols])?;
-        let mut out = vec![0.0f32; out_len];
-        for r in 0..rows {
-            for c in 0..cols {
-                out[c * rows + r] = self.data[r * cols + c];
-            }
+        if rows == 0 || cols == 0 {
+            // Nothing to copy. Returning here matters: `[usize::MAX, 0]` has
+            // numel 0 but would otherwise iterate the huge axis.
+            return Self::try_from_vec(Vec::new(), &[cols, rows]);
+        }
+        let out_len = checked_numel(&[cols, rows])?;
+        let mut out = Vec::with_capacity(out_len);
+        // Output row `c` is input column `c`: elements `c, c + cols, ...`.
+        // Striding the iterator avoids computing `c * rows + r` offsets, so
+        // no index arithmetic can overflow.
+        for c in 0..cols {
+            out.extend(self.data.iter().skip(c).step_by(cols));
         }
         Self::try_from_vec(out, &[cols, rows])
     }
@@ -884,6 +890,23 @@ mod tests {
         let tt = t.transpose();
         assert_eq!(tt.shape(), &[3, 2]);
         assert_eq!(tt.data(), &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    #[test]
+    fn try_transpose_zero_axis_returns_without_iterating_huge_extent() {
+        // numel is 0 but one axis is enormous: the loops must not run.
+        for shape in [
+            [0usize, 1 << 40],
+            [1 << 40, 0],
+            [usize::MAX, 0],
+            [0, usize::MAX],
+            [0, 0],
+        ] {
+            let t = Tensor::try_from_vec(vec![], &shape).unwrap();
+            let tt = t.try_transpose().unwrap();
+            assert_eq!(tt.shape(), &[shape[1], shape[0]]);
+            assert_eq!(tt.numel(), 0);
+        }
     }
 
     #[test]

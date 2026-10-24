@@ -71,8 +71,14 @@ pub struct MoeOutput {
 }
 
 impl MoeRouter {
+    /// Load a checkpoint and route through its gate weights.
+    ///
+    /// Uses [`RoutingMode::default()`] (`DenseSim`), so `forward` scores the
+    /// bound routing tensor. Pass [`RoutingMode::StubUniform`] to
+    /// [`Self::load_with_mode`] explicitly when uniform stub output is wanted;
+    /// `load` never selects the stub for a loaded checkpoint.
     pub fn load(model_path: &str, num_experts: usize, top_k: usize) -> Result<Self> {
-        Self::load_with_mode(model_path, num_experts, top_k, RoutingMode::StubUniform)
+        Self::load_with_mode(model_path, num_experts, top_k, RoutingMode::default())
     }
 
     pub fn load_with_mode(

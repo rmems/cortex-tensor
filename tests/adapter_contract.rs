@@ -224,7 +224,9 @@ fn run_topology_uses_imported_hidden_state_without_reembedding() {
     let outputs = run_topology(
         &mut full,
         &topology,
-        &ExternalBindings::new().with_tokens("tokens", &tokens),
+        &ExternalBindings::new()
+            .with_tokens("tokens", &tokens)
+            .expect("bind tokens"),
     )
     .expect("full");
     let residual_id = StageId::new("blocks.0.residual2").expect("id");
@@ -247,7 +249,9 @@ fn run_topology_uses_imported_hidden_state_without_reembedding() {
     let tail_out = run_topology(
         &mut tail_exec,
         &tail,
-        &ExternalBindings::new().with_tensor("hidden", &imported),
+        &ExternalBindings::new()
+            .with_tensor("hidden", &imported)
+            .expect("bind hidden"),
     )
     .expect("tail");
     let readout = StageId::new("readout").expect("id");

@@ -67,17 +67,57 @@ impl TransformerConfig {
         }
     }
 
+    /// Parameter count implied by this config, saturating at `usize::MAX`
+    /// when the arithmetic overflows.
+    ///
+    /// Counts every tensor [`TransformerLM::try_new`] allocates: token and
+    /// positional embeddings, each block's attention (`4·dim² + 4·dim`,
+    /// matching [`MultiHeadAttention::param_count`]), feed-forward
+    /// (`2·dim·ff_dim + dim + ff_dim`), and two LayerNorms (`4·dim`), plus
+    /// the final LayerNorm (`2·dim`) and the LM head (`dim·vocab_size`).
+    /// For a constructed model this equals [`TransformerLM::param_count`].
+    /// Prefer [`Self::try_estimated_params`] when an overflow must be
+    /// reported instead of saturated.
+    ///
+    /// [`MultiHeadAttention::param_count`]: super::MultiHeadAttention::param_count
     pub fn estimated_params(&self) -> usize {
-        let embed = self.vocab_size * self.dim;
-        let per_block = {
-            let attn = 4 * self.dim * self.dim + 4 * self.dim;
-            let ffn = 2 * self.dim * self.ff_dim + self.dim + self.ff_dim;
-            let ln = 4 * self.dim;
-            attn + ffn + ln
+        self.try_estimated_params().unwrap_or(usize::MAX)
+    }
+
+    /// Checked variant of [`Self::estimated_params`]: returns
+    /// [`CortexError::InvalidConfig`] when the parameter count does not fit in
+    /// `usize`. The config fields are public, so no field combination is
+    /// assumed to be representable.
+    pub fn try_estimated_params(&self) -> Result<usize> {
+        let overflow =
+            || CortexError::InvalidConfig("transformer parameter count overflows usize".into());
+        let mul = |a: usize, b: usize| a.checked_mul(b).ok_or_else(overflow);
+        let add = |a: usize, b: usize| a.checked_add(b).ok_or_else(overflow);
+
+        let tok_embed = mul(self.vocab_size, self.dim)?;
+        let pos_embed = mul(self.max_seq_len, self.dim)?;
+        // With no layers there are no block tensors, so a per-block product
+        // that would overflow on its own must not fail the estimate.
+        let blocks = if self.num_layers == 0 {
+            0
+        } else {
+            // MultiHeadAttention: wq/wk/wv/wo [dim, dim] + four [1, dim] biases.
+            let attn = add(mul(mul(4, self.dim)?, self.dim)?, mul(4, self.dim)?)?;
+            // FeedForward: w1 [dim, ff_dim], b1 [1, ff_dim], w2 [ff_dim, dim], b2 [1, dim].
+            let ffn = add(
+                add(mul(mul(2, self.dim)?, self.ff_dim)?, self.dim)?,
+                self.ff_dim,
+            )?;
+            // Two LayerNorms, each with weight and bias of [dim].
+            let ln = mul(4, self.dim)?;
+            mul(self.num_layers, add(add(attn, ffn)?, ln)?)?
         };
-        let final_ln = 2 * self.dim;
-        let lm_head = self.dim * self.vocab_size;
-        embed + self.num_layers * per_block + final_ln + lm_head
+        let final_ln = mul(2, self.dim)?;
+        let lm_head = mul(self.dim, self.vocab_size)?;
+        add(
+            add(add(add(tok_embed, pos_embed)?, blocks)?, final_ln)?,
+            lm_head,
+        )
     }
 }
 
@@ -265,9 +305,47 @@ impl TransformerLM {
         tok.try_add(&pos)
     }
 
+    /// Total number of stored parameters, summed from the `numel()` of every
+    /// tensor the model holds (blocks included), so it tracks edits to the
+    /// public weight fields. Equals [`TransformerConfig::estimated_params`]
+    /// for a model built from its config.
     pub fn param_count(&self) -> usize {
-        self.config.estimated_params()
+        self.tok_embed.numel()
+            + self.pos_embed.numel()
+            + self.blocks.iter().map(stored_block_params).sum::<usize>()
+            + self.final_ln_w.numel()
+            + self.final_ln_b.numel()
+            + self.lm_head.numel()
     }
+}
+
+/// `numel()` of every tensor stored in one block. Unlike
+/// [`TransformerBlock::param_count`], which derives its count from `dim`,
+/// this observes the tensors as they are.
+fn stored_block_params(block: &TransformerBlock) -> usize {
+    let attn = &block.attn;
+    let ffn = &block.ffn;
+    [
+        &attn.wq,
+        &attn.wk,
+        &attn.wv,
+        &attn.wo,
+        &attn.wb_q,
+        &attn.wb_k,
+        &attn.wb_v,
+        &attn.wb_o,
+        &ffn.w1,
+        &ffn.b1,
+        &ffn.w2,
+        &ffn.b2,
+        &block.ln1_w,
+        &block.ln1_b,
+        &block.ln2_w,
+        &block.ln2_b,
+    ]
+    .iter()
+    .map(|t| t.numel())
+    .sum()
 }
 
 #[cfg(test)]
@@ -370,6 +448,75 @@ mod tests {
             TransformerLM::try_new(cfg),
             Err(CortexError::InvalidConfig(_))
         ));
+    }
+
+    #[test]
+    fn estimated_params_matches_allocated_tensors() {
+        // tiny() allocates 1,874,688 f32 values; the old estimate returned
+        // 1,841,920 because it omitted pos_embed (256 * 128 = 32,768).
+        let cfg = TransformerConfig::tiny();
+        let model = TransformerLM::try_new(cfg.clone()).unwrap();
+        // Per-layer formula check against the layers' own accounting.
+        for block in &model.blocks {
+            assert_eq!(stored_block_params(block), block.param_count());
+        }
+        let actual = model.param_count();
+        assert_eq!(actual, 1_874_688);
+        assert_eq!(cfg.estimated_params(), actual);
+        assert_eq!(cfg.try_estimated_params().unwrap(), actual);
+    }
+
+    #[test]
+    fn param_count_tracks_edited_block_tensors() {
+        let mut model = TransformerLM::try_new(TransformerConfig::tiny()).unwrap();
+        let before = model.param_count();
+        // Public field: shrink ln1_w from [128] to [1].
+        model.blocks[0].ln1_w = Tensor::try_ones(&[1]).unwrap();
+        assert_eq!(model.param_count(), before - 127);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn estimated_params_zero_layers_skips_block_term() {
+        // 4 * dim * dim overflows, but with no layers that tensor never
+        // exists; the remaining terms fit comfortably.
+        let dim = 1usize << 32;
+        let cfg = TransformerConfig {
+            vocab_size: 1,
+            dim,
+            num_heads: 1,
+            num_layers: 0,
+            ff_dim: 1,
+            max_seq_len: 1,
+        };
+        // tok_embed + pos_embed + final_ln (2*dim) + lm_head = 5 * dim.
+        assert_eq!(cfg.try_estimated_params().unwrap(), 5 * dim);
+        assert_eq!(cfg.estimated_params(), 5 * dim);
+    }
+
+    #[test]
+    fn estimated_params_uses_checked_arithmetic() {
+        // vocab_size * dim overflows usize. The unchecked formula panicked
+        // in debug builds and wrapped to 136 in release.
+        let mut cfg = micro_cfg();
+        cfg.vocab_size = usize::MAX / 2;
+        assert!(matches!(
+            cfg.try_estimated_params(),
+            Err(CortexError::InvalidConfig(_))
+        ));
+        assert_eq!(cfg.estimated_params(), usize::MAX);
+
+        // Products fit but the final sum does not.
+        let cfg = TransformerConfig {
+            vocab_size: usize::MAX / 2,
+            dim: 1,
+            num_heads: 1,
+            num_layers: 0,
+            ff_dim: 1,
+            max_seq_len: usize::MAX / 2,
+        };
+        assert!(cfg.try_estimated_params().is_err());
+        assert_eq!(cfg.estimated_params(), usize::MAX);
     }
 
     #[test]
