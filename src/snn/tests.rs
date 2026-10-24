@@ -5,6 +5,9 @@ use crate::error::HybridError;
 use crate::moe::MoeRouter;
 use crate::types::EMBEDDING_DIM;
 
+#[cfg(feature = "axon-encoder")]
+use axon_encoder::Encoder;
+
 /// Deterministic in-tree backend for contract tests. Spikes every channel
 /// whose stimulus exceeds `threshold`; tracks step count to prove state
 /// advances and reset works. Not neuron dynamics — the test boundary.
@@ -626,6 +629,74 @@ fn axon_encoder_streams_phase_across_calls() {
     SnnEncoder::reset(&mut adapter);
     // Clean epoch: accumulated phase is gone, next call accumulates again.
     assert_eq!(adapter.encode(&[1.0], 1).unwrap()[0], 0.0);
+}
+
+#[cfg(feature = "axon-encoder")]
+#[test]
+fn population_encoder_keeps_one_population_per_input_inside_u16_ids() {
+    // Endpoint preferences fire with probability 1, on channels
+    // `input_index * num_neurons + neuron` (0 and 3). axon-encoder 0.5 would
+    // have encoded only the first input.
+    let enc = axon_encoder::prelude::PopulationEncoder::try_new(2, (0.0, 100.0), f32::MIN_POSITIVE)
+        .unwrap();
+    let mut adapter = AxonEncoder::new(enc);
+    let stimulus = adapter.encode(&[0.0, 100.0], 4).unwrap();
+    assert_eq!(stimulus, vec![1.0, 0.0, 0.0, 1.0]);
+}
+
+#[cfg(feature = "axon-encoder")]
+#[test]
+fn population_encoder_width_over_u16_is_an_error_not_a_panic() {
+    // 8 × 8,193 = 65,544 > 65,536. `try_new` allows 8,193 neurons; 0.6
+    // `encode_step` asserts on the product with the gate-score slice.
+    let enc = axon_encoder::prelude::PopulationEncoder::try_new(8_193, (0.0, 1.0), 0.2).unwrap();
+    let mut bare = enc.clone();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        bare.encode_step(&[0.0; 8]);
+    }));
+    assert!(
+        panicked.is_err(),
+        "axon-encoder 0.6 PopulationEncoder::encode_step panics above the u16 id space"
+    );
+
+    let mut adapter = AxonEncoder::new(enc);
+    match adapter.encode(&[0.0; 8], 8) {
+        Err(HybridError::InvalidConfig(message)) => {
+            assert!(message.contains("65544"));
+            assert!(message.contains("65536"));
+        }
+        other => panic!("expected InvalidConfig, got {other:?}"),
+    }
+
+    // Same guard when `new` is called through a generic wrapper: the check
+    // reads the concrete encoder at encode time.
+    fn wrap<E: axon_encoder::Encoder + 'static>(encoder: E) -> AxonEncoder<E> {
+        AxonEncoder::new(encoder)
+    }
+    let enc = axon_encoder::prelude::PopulationEncoder::try_new(8_193, (0.0, 1.0), 0.2).unwrap();
+    assert!(matches!(
+        wrap(enc).encode(&[0.0; 8], 8),
+        Err(HybridError::InvalidConfig(_))
+    ));
+}
+
+#[cfg(feature = "axon-encoder")]
+#[test]
+fn population_encoder_over_u16_fails_closed_before_the_backend_steps() {
+    let enc = axon_encoder::prelude::PopulationEncoder::try_new(8_193, (0.0, 1.0), 0.2).unwrap();
+    let router = MoeRouter::load_with_mode("", 8, 1, crate::moe::RoutingMode::DenseSim).unwrap();
+    let mut model = SpikingMoeRouter::new(
+        router,
+        MockBackend::new(8, 0.0),
+        AxonEncoder::new(enc),
+        SpikeCountDecoder,
+    )
+    .unwrap();
+    assert!(matches!(
+        model.forward(&[1.0; EMBEDDING_DIM]),
+        Err(HybridError::InvalidConfig(_))
+    ));
+    assert_eq!(model.backend().steps, 0);
 }
 
 #[cfg(feature = "axon-encoder")]
