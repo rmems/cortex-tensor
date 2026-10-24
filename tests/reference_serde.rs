@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use cortex_tensor::transformer::{
     MultiHeadAttention, TransformerBlock, TransformerConfig, TransformerLM,
 };

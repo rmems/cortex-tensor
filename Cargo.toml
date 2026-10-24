@@ -10,21 +10,18 @@ authors = ["Raul Cardenas Montoya"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rmems/cortex-tensor"
 homepage = "https://github.com/rmems/cortex-tensor"
-# crates.io surface: keep licenses, README, CHANGELOG, sources, and tests.
-# Drop agent/CI/dev-only paths. Hidden git-tracked files still pack unless
-# listed here (e.g. .gitignore). `rust-toolchain.toml` stays in the git repo
-# so local and CI builds use the pinned toolchain; MSRV for dependents is
+documentation = "https://docs.rs/cortex-tensor"
+keywords = ["tensor", "transformer", "mixture-of-experts", "snn", "neural-network"]
+categories = ["science", "algorithms"]
+# Not released yet. Remove when a crates.io release is intended (#116).
+publish = false
+# crates.io surface: sources, licenses, README and CHANGELOG only. An allow
+# list, so new repo-only files (agent/CI config, tests, fixtures, compat/)
+# stay out without editing an exclude list. Cargo adds Cargo.toml and
+# Cargo.lock itself. `rust-toolchain.toml` stays in the git repo so local
+# and CI builds use the pinned toolchain; MSRV for dependents is
 # `rust-version` above.
-exclude = [
-    "/.agents/",
-    "/.coderabbit.yaml",
-    "/.github/",
-    "/.gitignore",
-    "/AGENTS.md",
-    "/CLAUDE.md",
-    "/codecov.yml",
-    "/rust-toolchain.toml",
-]
+include = ["src/**", "LICENSE-*", "README.md", "CHANGELOG.md"]
 
 [lib]
 name = "cortex_tensor"
@@ -64,10 +61,6 @@ axon-encoder = { version = "0.5", optional = true }
 engram-parser = { version = "0.3.0", default-features = false, features = ["safetensors"] }
 candle-core = { version = "0.11", optional = true, default-features = false }
 candle-nn = { version = "0.11", optional = true, default-features = false }
-
-[profile.release]
-opt-level = 3
-lto = "fat"
 
 [workspace]
 # Standalone: detach from any parent Cargo workspace.
