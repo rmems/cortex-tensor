@@ -33,6 +33,14 @@ impl FeedForward {
                 got: self.w1.ndim(),
             });
         };
+        // Same invariant as `try_new_with_rng`: a zero extent is not a shape
+        // error (the tensors are mutually consistent) but it makes the FFN
+        // collapse to `x + b2` without any signal, so reject it here too.
+        if *dim == 0 || *ff_dim == 0 {
+            return Err(CortexError::InvalidConfig(format!(
+                "FeedForward: dim ({dim}) and ff_dim ({ff_dim}) must be nonzero"
+            )));
+        }
         expect_shape(&self.b1, &[1, *ff_dim])?;
         expect_shape(&self.w2, &[*ff_dim, *dim])?;
         expect_shape(&self.b2, &[1, *dim])
