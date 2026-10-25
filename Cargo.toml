@@ -11,7 +11,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/rmems/cortex-tensor"
 homepage = "https://github.com/rmems/cortex-tensor"
 documentation = "https://docs.rs/cortex-tensor"
-keywords = ["tensor", "transformer", "mixture-of-experts", "snn", "neural-network"]
+keywords = ["tensor", "transformer", "mixture-of-experts", "ann", "neural-network"]
 categories = ["science", "algorithms"]
 # Not released yet. Remove when a crates.io release is intended (#116).
 publish = false
@@ -29,12 +29,6 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# SNN backend adapter: `neuromod::SpikingNetwork` behind `snn::SnnBackend`.
-# Optional so the core contract stays dependency-light; other backend crates
-# are evaluated individually, not added wholesale.
-neuromod = ["dep:neuromod"]
-# SNN encoder adapter: `axon-encoder` spike encoders behind `snn::SnnEncoder`.
-axon-encoder = ["dep:axon-encoder"]
 # ANN execution adapter: Candle CPU modules behind `adapter::CandleExecutor`.
 # CUDA, cuDNN, MKL, Accelerate, and Metal stay off — this crate does not ship
 # GPU kernels. Default features of both crates are empty; disable them
@@ -53,8 +47,6 @@ thiserror = "2"
 rand = "0.10"
 # Portable, version-stable stream for the `*_seeded` constructors (StdRng is not).
 rand_chacha = "0.10"
-neuromod = { version = "0.7", optional = true }
-axon-encoder = { version = "0.6", optional = true }
 # Checkpoint substrate. Validated against engram-parser 0.3.0.
 # `safetensors` is required so GGUF and Safetensors share one open path.
 # `mmap` stays off: this crate does not own checkpoint mmap policy (RM-1265).

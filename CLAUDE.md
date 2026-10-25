@@ -31,7 +31,6 @@ Run the fmt and clippy gates before committing; CI fails on either.
 - `src/adapter.rs` + `src/adapter/`: `ExternalAdapter` capability contract. `candle.rs` (`CandleExecutor`, feature `candle`) and `burn_adapter.rs` (policy stub, feature `burn`).
 - `src/tensor/`: row-major `Vec<f32>` `Tensor`, ops, and the finite-value policy in `finite.rs`.
 - `src/transformer/`, `src/moe/`: reference transformer and dense MoE routing. `moe/checkpoint.rs` binds `engram-parser` output.
-- `src/snn/`: `SnnBackend`/`SnnEncoder`/`SnnDecoder` contract; `neuromod_adapter.rs` and `axon_adapter.rs` sit behind features.
 - `src/reference_json.rs`: size-limited loading (`from_slice_with_limit`) and the object-shape check for reference JSON fixtures. The `schema_version: 1` check and `deny_unknown_fields` live in `src/tensor/mod.rs` and `src/transformer/mod.rs`. Goldens live in `tests/fixtures/` (see `tests/fixtures/REFERENCE_GOLDENS.md`).
 - `compat/zip/`: local facade crate wired in through `[patch.crates-io]` in `Cargo.toml`. It is not part of the library API.
 
@@ -40,7 +39,7 @@ Run the fmt and clippy gates before committing; CI fails on either.
 - No GPU code, no autodiff, no tokenizer, no embedded SNN runtime. Do not add GPU backends or make Candle/Burn/`tch`/`ort` a required dependency.
 - `candle` feature: `candle-core`/`candle-nn` with default features off (no CUDA, MKL, Metal). `burn` feature must not depend on the `burn` crate.
 - Public stage contracts (`AnnStage`, `AnnExecutor`) must not name `Tensor` or `Vec<f32>`. Native Candle/Burn types stay out of the `ExternalAdapter` contract.
-- Checkpoint parsing belongs to `engram-parser`; ANN/SNN placement belongs to `hybrid-fusion`. Do not add parsers, mmap policy, or orchestration here.
+- Checkpoint parsing belongs to `engram-parser`. ANN/SNN placement and the ANN↔SNN step contract (`SpikingNetwork`, encoders, decoders, `SpikingExpertRouter`, the neuromod adapter) belong to `hybrid-fusion`. Do not add parsers, mmap policy, SNN step traits, or orchestration here. Hidden-state ingress and egress stay at `HiddenStateBuffer`.
 - Reference JSON is a fixture format for the CPU reference backend, not a cross-backend tensor wire format. Unknown versions and fields are rejected.
 - Finite-value policy: softmax and norms accumulate in `f64`; NaN scores are rejected in routing (`NanRoutingScore`). Kernels are sequential so results stay deterministic.
 - Prefer `try_*` ops over the panic-style wrappers for new code.

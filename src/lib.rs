@@ -16,7 +16,6 @@
 //! | [`tensor`] | Reference-backend `Tensor`, fallible construction, core ops |
 //! | [`transformer`] | Reference-backend transformer blocks |
 //! | [`moe`] | Reference-backend MoE routing; checkpoints come from `engram-parser` 0.3.0 |
-//! | [`snn`] | SNN execution contract + optional crate-backed adapters |
 //! | [`types`] | Shared types used by `moe` |
 //! | [`error`] | `CortexError` unified error type |
 //!
@@ -28,7 +27,6 @@ pub mod adapter;
 pub mod error;
 pub mod moe;
 pub mod reference_json;
-pub mod snn;
 pub mod stage;
 pub mod tensor;
 pub mod transformer;

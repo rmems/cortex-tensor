@@ -33,10 +33,10 @@ impl ExtractTokenOptions {
 
 /// Execution mode used by the router.
 ///
-/// Spiking routing is no longer a mode of this enum: it is provided by
-/// `snn::SpikingMoeRouter`, which composes an `MoeRouter` with an external
-/// [`crate::snn::SnnBackend`] (e.g. `neuromod`). `DenseSim` is the default
-/// for backward-compatible default routing semantics.
+/// Spiking routing is not a mode of this enum. The ANN↔SNN step contract
+/// (`SpikingNetwork`, `SpikeEncoder`, `SpikeDecoder`, `SpikingExpertRouter`)
+/// lives in `hybrid-fusion`. This router stays on dense or stub ANN routing.
+/// `DenseSim` is the default.
 ///
 /// Serializes as the canonical slug wire form (`stub_uniform`, `dense_sim`);
 /// the legacy PascalCase names remain accepted on deserialize.

@@ -114,9 +114,9 @@ pub(super) fn top_k_indices(scores: &[f32], top_k: usize) -> Result<Vec<usize>> 
         .collect())
 }
 
-/// Reject NaN routing scores without ranking. Used to fail closed before
-/// mutating any SNN backend state.
-pub(crate) fn reject_nan_routing_scores(scores: &[f32]) -> Result<()> {
+/// Reject NaN routing scores before ranking so NaN never participates in
+/// `partial_cmp`.
+fn reject_nan_routing_scores(scores: &[f32]) -> Result<()> {
     if let Some(expert_id) = scores.iter().position(|score| score.is_nan()) {
         return Err(HybridError::NanRoutingScore { expert_id });
     }

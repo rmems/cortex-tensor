@@ -31,13 +31,11 @@ use self::adapter::{ModelAdapter, resolve_adapter};
 use self::checkpoint::{BoundGate, MappedCheckpoint, open_mapped_checkpoint};
 use self::routing::{
     apply_extract_token_options, checkpoint_gate_scores, normalize_l2, resample_embedding,
-    synthetic_gate_scores,
+    route_top_k, synthetic_gate_scores,
 };
 use crate::error::{HybridError, Result};
 pub use crate::types::RoutingMode;
 pub use crate::types::{EMBEDDING_DIM, ExtractTokenOptions};
-
-pub(crate) use self::routing::{reject_nan_routing_scores, route_top_k};
 
 pub struct MoeRouter {
     model_path: String,
@@ -239,9 +237,8 @@ impl MoeRouter {
     }
 
     /// Gate scores for `embedding` under this router's checkpoint or synthetic
-    /// policy. Exposed crate-wide so `snn::SpikingMoeRouter` can compose
-    /// routing with an external [`crate::snn::SnnBackend`].
-    pub(crate) fn gate_scores(&self, embedding: &[f32]) -> Result<Vec<f32>> {
+    /// policy.
+    fn gate_scores(&self, embedding: &[f32]) -> Result<Vec<f32>> {
         if let (Some(gate), Some(adapter)) = (&self.bound_gate, &self.adapter) {
             let mut routed_embedding = resample_embedding(embedding, adapter.hidden_size);
             normalize_l2(&mut routed_embedding);

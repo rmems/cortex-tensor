@@ -244,8 +244,10 @@ impl TransformerLM {
         try_matmul(&x, &self.lm_head)
     }
 
-    /// Get the hidden state after all transformer blocks (before LM head).
-    /// Used by the SNN/LLM fusion layer.
+    /// Hidden state after all transformer blocks, before the LM head.
+    ///
+    /// ANN output only. Hybrid ANN→SNN placement reads it from outside this
+    /// crate; this method does not step a spiking network.
     ///
     /// # Panics
     ///

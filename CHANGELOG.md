@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking:** the ANN↔SNN step contract has left this crate (RM-2206, #137). Removed the `snn` module (`SnnBackend`, `SnnEncoder`, `SnnDecoder`, `SnnStepOutput`, `SnnCapabilities`, `RateEncoder`, `SpikeCountDecoder`, `SpikingMoeRouter`, `DEFAULT_SPIKE_BOOST`), the `neuromod` feature and `snn::NeuromodNetwork`, and the `axon-encoder` feature and `snn::AxonEncoder`. The `neuromod` and `axon-encoder` dependencies are gone. `CortexError` no longer has `SnnBackend`, `SnnChannelMismatch`, `SnnNan`, `SnnSpikeOutOfRange`, `SnnDuplicateSpike`, `SnnReadoutLength`, or `SnnInvalidReadout`; exhaustive matches must drop those arms. ANN hidden-state ingress and egress stay (`HiddenStateBuffer`, `ExternalAdapterMarker::{import_hidden, export_hidden}`). This crate defines no spiking types.
+
+  **Migration:** the single step contract is [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion)'s, landed in [hybrid-fusion#65](https://github.com/rmems/hybrid-fusion/pull/65) (`3c9acf5`, RM-2205, closes hybrid-fusion#61). Map `SnnBackend` to `hybrid_fusion::SpikingNetwork`, `SnnEncoder` / `RateEncoder` to `SpikeEncoder` / `RateEncoder`, `SnnDecoder` / `SpikeCountDecoder` to `SpikeDecoder` / `SpikeCountDecoder`, `SpikingMoeRouter` to `SpikingExpertRouter`, and `NeuromodNetwork` to `NeuromodSnn` (`features = ["neuromod"]`). `AxonEncoder` was not re-homed as a type; implement `hybrid_fusion::SpikeEncoder` over the `axon-encoder` crate when that spike stream is still required. This crate does not depend on `hybrid-fusion`. Earlier unreleased notes below that mention the `snn` module describe the surface this removal deletes.
+
 ### Fixed
 
 - `snn::AxonEncoder<PopulationEncoder>` returns `InvalidConfig` when `inputs × neurons` exceeds the `u16` spike-id space (65,536). axon-encoder 0.6 encodes every input channel and panics on that product; 0.5 encoded only the first value. `SpikingMoeRouter` passes the full gate-score slice, so a population that fit in 0.5 could panic during `forward`. Widths that fit in `u16` are unchanged, including spikes that still return `SnnSpikeOutOfRange` when they fall outside the backend width (#133).

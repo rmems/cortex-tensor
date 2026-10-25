@@ -10,7 +10,7 @@ Backend-neutral ANN stage layer and deterministic reference backend for hybrid A
 
 `cortex-tensor` makes ANN engines usable as interchangeable stage executors inside heterogeneous ANN/SNN plans. It does not compete on generic tensor frameworks, attention kernels, training stacks, or GPU backends.
 
-Core owns the stage vocabulary, execution contract, hidden-state ingress/egress, and capability facts. The reference backend is `f32`, CPU-only, and dense. Candle and Burn are optional adapters; their native tensor and device types do not appear in core. Neuron dynamics stay in focused SNN crates behind the `snn` contract.
+Core owns the stage vocabulary, execution contract, hidden-state ingress/egress, and capability facts. The reference backend is `f32`, CPU-only, and dense. Candle and Burn are optional adapters; their native tensor and device types do not appear in core. The ANN↔SNN step contract and neuron dynamics stay in [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion) and [`neuromod`](https://github.com/rmems/neuromod).
 
 ```text
 engram-parser          checkpoint + topology (not this crate)
@@ -21,7 +21,7 @@ hybrid-fusion          placement + orchestration (not merged here)
         v
 cortex-tensor          ANN stage contracts + reference backend
    |        |        |
-reference  candle    burn     + SNN backend contract
+reference  candle    burn
 ```
 
 The `candle` feature is `adapter::CandleExecutor` (RM-1828), a CPU `f32` `AnnExecutor` with its own hidden-state copy. That copy is not the `ExternalAdapter` contract. The `burn` feature is a policy stub on that contract and does not depend on the `burn` crate. Neither engine is a core dependency.
@@ -97,41 +97,12 @@ Unversioned pre-1.0 JSON and the older `strides` field must be migrated explicit
 | Item | Purpose |
 |---|---|
 | `MoeRouter` | MoE router. Opens a GGUF or Safetensors checkpoint through engram-parser and produces top-k expert selections. |
-| `RoutingMode` | `StubUniform`, `DenseSim` (default). Spiking routing moved to `snn::SpikingMoeRouter` + an `SnnBackend` adapter. |
+| `RoutingMode` | `StubUniform`, `DenseSim` (default). Spiking routing is not a mode here; it lives in `hybrid-fusion`'s `SpikingExpertRouter`. |
 | `ExtractTokenOptions` | Optional resample / L2 when extracting token rows (`for_projector_forward()` matches legacy 2048 + L2). |
 
 Top-k selection ranks finite scores descending and breaks ties by ascending expert ID. NaN scores are rejected (`NanRoutingScore`); `+Inf` ranks above all finite values and `-Inf` below them. The helper is pure: the same `(scores, top_k)` pair always produces the same expert IDs.
 
 Supported token-row dtypes, dequantized by engram-parser: `F32`, `F16`, `Q8_0`, `Q5_K`, `Q6_K`. `IQ3_S` is detected and rejected for token embeddings with a clear error so callers can fall back to `llama.cpp` prompt embeddings. Other IQ3 wire types (`IQ3_XXS` and the rest) fail the same way as any dtype engram-parser 0.3.0 does not decode. Shapes are outermost-first (`[vocab, hidden]` for token rows). Gate weights use that same row-major layout.
-
-### `snn`
-
-Hybrid execution/interchange contract — cortex stays ANN/SNN-capable without
-embedding neuron dynamics.
-
-| Item | Purpose |
-|---|---|
-| `SnnBackend` | Execution contract: `step`, `step_frozen` (held-out eval), `reset`, `capabilities`, `channels`. Failure-atomic by contract. |
-| `SnnEncoder` / `SnnDecoder` | ANN→SNN stimulus encoding and SNN→ANN readout (`RateEncoder`, `SpikeCountDecoder` defaults). |
-| `SnnStepOutput` / `SnnCapabilities` | Per-tick spike output and backend capability reporting for orchestrators (e.g. `hybrid-fusion`). |
-| `SpikingMoeRouter` | Composes `MoeRouter` gate scores with an `SnnBackend`: encode → step → decode → deterministic top-k. Replaces the removed embedded `RoutingMode::SpikingSim`. |
-| `NeuromodNetwork` | `neuromod`-feature adapter over `neuromod::SpikingNetwork` (LIF + Izhikevich, R-STDP). One LIF neuron per channel; `new` seeds identity wiring so every channel can spike. Frozen eval uses neuromod 0.7's `step_frozen`; `with_seed` routes stepping through `step_with_rng` / `step_frozen_with_rng` for deterministic replay (`capabilities().caller_rng` is `true` only then). |
-| `AxonEncoder` | `axon-encoder`-feature adapter over any `axon_encoder::Encoder` (rate, latency, delta, predictive, population). Spikes net to `+1.0`/`-1.0` per channel per tick. |
-
-```toml
-[dependencies]
-cortex-tensor = { git = "https://github.com/rmems/cortex-tensor", branch = "main", features = ["neuromod"] }
-```
-
-```rust
-use cortex_tensor::moe::{MoeRouter, RoutingMode};
-use cortex_tensor::snn::{NeuromodNetwork, RateEncoder, SpikingMoeRouter, SpikeCountDecoder};
-
-let router = MoeRouter::load("model.gguf", 0, 2)?; // RoutingMode::default() == DenseSim
-let backend = NeuromodNetwork::new(/* lif */ 8, /* izh */ 0, /* channels */ 8)?;
-let mut hybrid = SpikingMoeRouter::new(router, backend, RateEncoder::default(), SpikeCountDecoder)?;
-let out = hybrid.forward(&embedding)?; // or forward_frozen for held-out eval
-```
 
 ### `stage`
 
@@ -142,7 +113,7 @@ an ordered graph of stages, then run it through a swappable backend.
 |---|---|
 | `StageKind` / `StageKindTag` | What a stage computes (embedding, attention, layer/RMS norm, dense/gated MLP, MoE router/expert, add, readout, custom) and its fieldless tag for capability checks. |
 | `AnnStage` / `StageId` / `AnnTopology` | A stage (validated dotted-path id + kind + input wiring) and a validated, topologically-ordered graph of them, with `sub_span` extraction and `SubSpan::to_topology` to run a span against externally supplied stage outputs. |
-| `AnnExecutor` / `AnnCapabilities` | The execution contract (generic over the backend's tensor type — it never names `Tensor`) plus capability reporting, mirroring `snn::SnnBackend`. |
+| `AnnExecutor` / `AnnCapabilities` | The execution contract (generic over the backend's tensor type — it never names `Tensor`) plus capability reporting. |
 | `run_topology` / `ExternalBindings` | Composition driver that runs an executor over a topology, resolving external ingress (tokens or hidden-state tensors; one name, one binding) and, for a sub-span topology, the earlier-stage outputs bound with `with_stage_output`. |
 | `ReferenceExecutor` | The reference backend (see below) and `from_transformer`, which emits a block-ordered topology for a `TransformerLM`. |
 
@@ -160,10 +131,11 @@ describe only identity, kind, and wiring.
 
 `ReferenceExecutor` implements `ExternalAdapter`. `HiddenStateBuffer` is that
 contract's import/export boundary. It is not a checkpoint format and not a
-universal tensor wire. `NegotiationDocument` is the cortex-owned fact list
-hybrid-fusion can translate once its `BackendCapabilities` type lands
-([hybrid-fusion#41](https://github.com/rmems/hybrid-fusion/issues/41)).
-This crate does not select, rank, or place backends.
+universal tensor wire. `NegotiationDocument` is the cortex-owned fact list hybrid-fusion
+translates into `BackendCapabilities`
+([hybrid-fusion#41](https://github.com/rmems/hybrid-fusion/issues/41), landed).
+This crate does not select, rank, or place backends, and it does not depend
+on `hybrid-fusion`.
 
 `CandleExecutor` (`features = ["candle"]`, module `adapter`) is an
 `AnnExecutor`, not an `ExternalAdapter`. Its tensor type is a Candle CPU
@@ -180,11 +152,21 @@ execution and hidden-state transfer.
 
 ### Migration notes
 
-- `RoutingMode::SpikingSim` → `snn::SpikingMoeRouter` + an `SnnBackend`
-  (`NeuromodNetwork` via `features = ["neuromod"]`). `RoutingMode::default()`
-  is now `DenseSim` (was `SpikingSim`).
-- `MoeRouter::reset_state` removed — call `SpikingMoeRouter::reset` or the
-  backend's `reset`.
+- Spiking routing left this crate. `RoutingMode::SpikingSim`, then
+  `snn::SpikingMoeRouter` with `SnnBackend` / `SnnEncoder` / `SnnDecoder`,
+  `NeuromodNetwork`, and `AxonEncoder`, now live in
+  [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion) as
+  `SpikingNetwork`, `SpikeEncoder` / `SpikeDecoder` (`RateEncoder`,
+  `SpikeCountDecoder`), `SpikingExpertRouter`, and `NeuromodSnn`
+  (`features = ["neuromod"]`). That contract landed in
+  [hybrid-fusion#65](https://github.com/rmems/hybrid-fusion/pull/65)
+  (`3c9acf5`, RM-2205). `AxonEncoder` was not re-homed as a type; implement
+  `hybrid_fusion::SpikeEncoder` over the `axon-encoder` crate when that
+  stream is still required. `RoutingMode::default()` is `DenseSim`.
+  This crate keeps ANN hidden-state ingress and egress at
+  `HiddenStateBuffer` and defines no spiking types.
+- `MoeRouter::reset_state` removed. Reset `hybrid_fusion::SpikingNetwork`
+  or `SpikingExpertRouter`; this router has no spike epoch.
 - `preferred_gpu_synapse_tensor_name()`, `real_gpu_synapse_tensor_name()`,
   `synapse_source()`, `RouterMetadata.preferred_gpu_synapse_tensor_name`,
   `RouterMetadata.synapse_source` removed. SAAQ/GPU synapse-source policy now
@@ -221,34 +203,30 @@ This crate **owns**:
   decoder-only transformer blocks, and dense MoE routing math. Kept for CI,
   golden vectors, fuzzing, and backend-semantic comparisons. Not a second
   product surface.
-- The ANN↔SNN execution/interchange contract (`snn` module): `SnnBackend`,
-  `SnnEncoder`/`SnnDecoder` boundary types, `SnnCapabilities`, and
-  `SpikingMoeRouter` composing the MoE router with an external SNN backend.
 - Checkpoint adapter and tensor selection on engram-parser's normalized inventory.
 - Reference-backend binding of F32/F16/Q8_0/Q5_K/Q6_K token rows. Packed dequantization is engram-parser's.
 
 This crate **does not own**:
 
 - Checkpoint parsing, GGUF mmap policy, or Safetensors parsing — [`engram-parser`](https://github.com/rmems/engram-parser) 0.3.0 (`safetensors` feature). Issue 47 is the consume that landed here. Model topology / tensor-role discovery remains engram-parser v0.4 and is not an acceptance gate for this binding.
-- ANN↔SNN placement and session orchestration — [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion).
+- ANN↔SNN placement, session orchestration, and the step contract
+  (`SpikingNetwork`, `SpikeEncoder`, `SpikeDecoder`, `SpikingExpertRouter`,
+  `NeuromodSnn`) — [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion)
+  ([#65](https://github.com/rmems/hybrid-fusion/pull/65), `3c9acf5`, RM-2205).
   Issue 35, the decision not to merge hybrid-fusion into this repo, is closed and stands.
-- SNN neuron dynamics.
+- SNN neuron dynamics — [`neuromod`](https://github.com/rmems/neuromod), consumed by hybrid-fusion's `neuromod` feature, not by this crate.
 - Generic CUDA/GPU kernels — existing ML backends, or `myelin-accelerator` for specialized hybrid kernels.
 - GOZ1 / SAAQ experiment policy.
 - A universal Rust tensor framework.
 - Canonical GGUF v3 deserialization and Safetensors manifests — engram-parser, not this crate.
 - CUDA / GPU / SIMD execution, and any GPU host registration.
-- SNN neuron dynamics — delegated to reusable crates behind `snn::SnnBackend`
-  ([`neuromod`](https://github.com/rmems/neuromod) via the optional `neuromod`
-  feature) — and ANN→SNN orchestration
-  ([`hybrid-fusion`](https://github.com/rmems/hybrid-fusion)).
 - SAAQ experimental policy: GPU synapse-source selection and tensor-source
   preference live in the downstream experimental repos (`corinth-canal` /
   `grok-ozempic`), not in the reusable execution core.
 - Specialized SNN/hybrid GPU kernels — `myelin-accelerator`.
 - Tokenization and automatic differentiation (see [Non-goals](#non-goals)).
 
-**Allowed dependencies:** `serde`, `serde_json`, `thiserror`, `rand`, and `engram-parser` 0.3.0 with the `safetensors` feature — plus optional feature-gated adapters (`neuromod`, `axon-encoder`, and the `candle` feature's `candle-core` and `candle-nn`, CPU only; CUDA, MKL, and Metal stay off), evaluated individually.
+**Allowed dependencies:** `serde`, `serde_json`, `thiserror`, `rand`, and `engram-parser` 0.3.0 with the `safetensors` feature — plus the optional `candle` feature's `candle-core` and `candle-nn` (CPU only; CUDA, MKL, and Metal stay off). `neuromod` and `axon-encoder` are not dependencies of this crate.
 
 **Forbidden dependencies:** GPU backends (`cust`) as core dependencies,
 making an inference framework (`candle`, `burn`, `tch`, `ort`) a required
@@ -264,8 +242,8 @@ the `ExternalAdapter` contract. Extraction from corinth-canal is a
 |-------|------|
 | [`engram-parser`](https://github.com/rmems/engram-parser) | Checkpoint parsing and topology discovery |
 | `cortex-tensor` (this crate) | ANN stage contracts + deterministic reference backend |
-| [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion) | Placement and session orchestration (separate repo; not merged) |
-| [`neuromod`](https://github.com/rmems/neuromod) | SNN neuron dynamics, behind the optional `neuromod` feature |
+| [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion) | Placement, session orchestration, and the ANN↔SNN step contract (separate repo; not merged) |
+| [`neuromod`](https://github.com/rmems/neuromod) | SNN neuron dynamics, behind hybrid-fusion's `neuromod` feature |
 
 See [LIM-9](https://linear.app/saaq-spiking-adaptive-activity/issue/LIM-9/plan-rust-runtime-and-deployment-repo-boundary-matrix)
 for the full Rust runtime/deployment boundary matrix, and issues #5 (boundary
@@ -304,8 +282,6 @@ Features (all off by default):
 
 | Feature | Effect |
 |---|---|
-| `neuromod` | Enables `snn::NeuromodNetwork` — `neuromod::SpikingNetwork` behind `snn::SnnBackend`. Pulls the optional `neuromod` crate dependency. |
-| `axon-encoder` | Enables `snn::AxonEncoder` — any `axon_encoder::Encoder` behind `snn::SnnEncoder` (streaming `encode_step` per forward tick). Pulls the optional `axon-encoder` crate dependency. |
 | `candle` | Enables `adapter::CandleExecutor` — Candle CPU `f32` modules behind `AnnExecutor`. Values cross that executor at `import_hidden_state` / `export_hidden_state` (`HiddenState`), not through `ExternalAdapter` / `HiddenStateBuffer`. Does not enable Candle's CUDA, MKL, or Metal features. |
 | `burn` | Enables `stage::BurnAdapter` as a structured policy stub on `ExternalAdapter`. Does not depend on the `burn` crate. Hidden-state import/export returns `UnsupportedOperation` (category `policy`) and `execute` returns `UnsupportedStage`. `burn` 0.21's rustc 1.92 requirement is a minimum and is compatible with this crate's 1.99.0 pin. |
 
@@ -394,9 +370,10 @@ fn main() -> cortex_tensor::Result<()> {
 - No GPU backend. Ever. If you need CUDA, consume this crate's `Tensor` into your own kernels.
 - No automatic differentiation. This is an inference and forward-pass library.
 - No tokenizer. Pair it with `tokenizers` or `llama.cpp`'s tokenizer of choice.
-- No embedded SNN runtime. SNN execution goes through `snn::SnnBackend`
-  adapters over focused crates (`neuromod` feature); orchestration lives in
-  `hybrid-fusion`, neuron dynamics in `neuromod`.
+- No embedded SNN runtime and no ANN↔SNN step contract. Stepping, encoding,
+  decoding, spiking MoE routing, and the neuromod adapter live in
+  `hybrid-fusion`. Neuron dynamics live in `neuromod`. This crate's ANN
+  boundary is `HiddenStateBuffer` ingress and egress.
 
 ## Status
 

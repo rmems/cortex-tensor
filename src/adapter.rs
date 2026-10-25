@@ -12,11 +12,12 @@
 //!
 //! Capability reports are facts an orchestrator can translate. This module
 //! does not select a backend, rank engines, or place ANN stages against SNN
-//! stages — that negotiation belongs to `hybrid-fusion` (see
-//! [hybrid-fusion#41](https://github.com/rmems/hybrid-fusion/issues/41)).
+//! stages — that negotiation belongs to `hybrid-fusion`.
 //! [`NegotiationDocument`] is the cortex-owned document that translation
-//! consumes. It is not `hybrid-fusion`'s `BackendCapabilities` type, which
-//! has not landed.
+//! consumes. It is not `hybrid-fusion`'s `BackendCapabilities` type.
+//! That type has landed
+//! ([hybrid-fusion#41](https://github.com/rmems/hybrid-fusion/issues/41));
+//! this crate still does not depend on `hybrid-fusion`.
 
 use crate::error::{CortexError, Result};
 use crate::stage::{
@@ -113,8 +114,8 @@ pub struct AdapterCapabilities {
 /// Cortex-owned facts an orchestrator translates into its own negotiation type.
 ///
 /// Field names here are stable for that translation. They are not
-/// `hybrid-fusion`'s future `BackendCapabilities` struct: that type has not
-/// landed (hybrid-fusion#41), and this crate does not depend on `hybrid-fusion`.
+/// `hybrid-fusion`'s `BackendCapabilities` struct. That type has landed
+/// (hybrid-fusion#41); this crate does not depend on `hybrid-fusion`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NegotiationDocument {
     /// [`AnnCapabilities::backend_name`].

@@ -9,8 +9,7 @@
 //!   binds an identity ([`StageId`]) and input wiring ([`StageSource`]) to a
 //!   kind, and [`AnnTopology`] is a validated ordered list of stages.
 //! * **Capabilities:** [`AnnCapabilities`] reports which stage kinds
-//!   ([`StageKindTag`]) and [`DType`]s a backend can execute, mirroring the
-//!   `snn` module's `SnnCapabilities` contract.
+//!   ([`StageKindTag`]) and [`DType`]s a backend can execute.
 //! * **Execute:** the [`AnnExecutor`] trait runs one stage at a time against
 //!   backend-owned tensors, and [`run_topology`] composes an executor over a
 //!   topology using an [`ExternalBindings`] source for ingress.
@@ -611,7 +610,7 @@ impl AnnTopology {
     }
 }
 
-/// What a backend can execute, mirroring the `snn` module's capabilities style.
+/// What a backend can execute.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnCapabilities {
     /// Human-readable backend identity, e.g. `"cortex::ReferenceExecutor"`.
@@ -648,7 +647,7 @@ pub enum StageInput<'a, T> {
 /// The contract is deliberately generic: it names only the associated
 /// [`AnnExecutor::Tensor`] type, never [`crate::Tensor`] or `Vec<f32>`.
 ///
-/// Implementations must, mirroring `snn::SnnBackend`:
+/// Implementations must:
 ///
 /// * **Be failure-atomic:** a rejected input (wrong arity, kind, dtype, or an
 ///   internal error) must leave executor state unmodified, so a caller can fail
