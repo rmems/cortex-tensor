@@ -386,7 +386,11 @@ mod tests {
             try_matmul(&a, &b),
             Err(CortexError::AllocationFailed { .. })
         ));
-        // embedding with a zero-row table still has to allocate seq_len*dim.
+        // The zero-numel short-circuit must survive the change: an empty id
+        // slice against a zero-row table with an unbackable width allocates
+        // nothing and succeeds. (A genuinely unbackable embedding output
+        // needs a table whose row is itself unbackable, so that branch is
+        // covered through `alloc_zeros` by the matmul case above.)
         let table = Tensor::try_from_vec(vec![], &[0, UNBACKABLE_NUMEL]).unwrap();
         assert!(matches!(
             try_embedding(&table, &[]),

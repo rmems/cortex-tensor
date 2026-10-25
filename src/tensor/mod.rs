@@ -811,8 +811,15 @@ pub(crate) fn try_compute_strides(shape: &[usize]) -> Result<Vec<usize>> {
 /// the `isize::MAX` layout check (see [`check_f32_alloc`]) can therefore
 /// still take the whole process down instead of surfacing an `Err`. Every
 /// fresh output buffer sized by a shape goes through this helper so the
-/// failure stays a value. Buffers sized by an existing tensor's storage are
-/// bounded by an allocation that already succeeded and keep using `vec!`.
+/// failure stays a value.
+///
+/// Limitation: buffers sized by an existing tensor's storage (`scale`,
+/// elementwise ops, transpose, softmax, the attention head reshapes) still
+/// use `vec!`/`collect`. Their source is alive while they allocate, so peak
+/// memory doubles and a second allocation of the same size can still abort.
+/// In practice this means the *first* `nh·seq²` buffer of
+/// `MultiHeadAttention::try_forward` is fallible and the later ones are not;
+/// closing that gap is tracked under issue #103.
 pub(crate) fn try_reserve_f32(numel: usize, shape: &[usize]) -> Result<Vec<f32>> {
     let mut data: Vec<f32> = Vec::new();
     data.try_reserve_exact(numel)
