@@ -814,7 +814,7 @@ fn bind_rejects_incompatible_weights() {
 }
 
 #[test]
-fn params_kind_mismatch_is_missing_params() {
+fn params_kind_mismatch_is_reported_as_mismatch_not_missing() {
     let mut exec = CandleExecutor::new();
     let weight = [1.0f32, 0.0, 0.0, 1.0];
     exec.bind_readout(
@@ -839,7 +839,27 @@ fn params_kind_mismatch_is_missing_params() {
             &[StageInput::Tensor(&hidden)],
         )
         .unwrap_err();
-    assert!(matches!(err, CortexError::MissingStageParams { .. }));
+    // Mirrors `ReferenceExecutor` (#97): bound-but-wrong-kind is
+    // `StageParamsMismatch`, so a wiring bug is not mistaken for an unbound
+    // stage. An id with no binding at all stays `MissingStageParams`.
+    assert!(
+        matches!(
+            &err,
+            CortexError::StageParamsMismatch { stage_id, expected, got }
+                if stage_id == "shared" && expected == "layer_norm" && got == "readout"
+        ),
+        "{err}"
+    );
+    let err = exec
+        .execute(
+            &descriptor("unbound", StageKind::Readout),
+            &[StageInput::Tensor(&hidden)],
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, CortexError::MissingStageParams { .. }),
+        "{err}"
+    );
 }
 
 #[test]
