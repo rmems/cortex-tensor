@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use cortex_tensor::transformer::block::FeedForward;
 use cortex_tensor::transformer::{
     MultiHeadAttention, TransformerBlock, TransformerConfig, TransformerLM,
 };
@@ -168,6 +169,33 @@ fn standalone_transformer_parts_reject_inconsistent_weights() {
     let mut block = serde_json::to_value(TransformerBlock::new(4, 2, 6)).unwrap();
     block["ln1_w"]["shape"] = json!([1, 4]);
     assert!(serde_json::from_value::<TransformerBlock>(block).is_err());
+}
+
+#[test]
+fn standalone_ffn_and_block_wire_reject_zero_extents() {
+    // The constructors reject `dim == 0 || ff_dim == 0`; the wire path must
+    // too, or a payload with an empty hidden layer deserializes into a block
+    // whose FFN silently collapses to `x + b2`.
+    for (dim, ff_dim) in [(4usize, 0usize), (0, 6)] {
+        let mut ffn = serde_json::to_value(FeedForward::new(4, 6)).unwrap();
+        ffn["w1"] = json!({"schema_version": 1, "shape": [dim, ff_dim], "data": []});
+        ffn["b1"] = json!({"schema_version": 1, "shape": [1, ff_dim], "data": vec![0.0; ff_dim]});
+        ffn["w2"] = json!({"schema_version": 1, "shape": [ff_dim, dim], "data": []});
+        ffn["b2"] = json!({"schema_version": 1, "shape": [1, dim], "data": vec![0.0; dim]});
+        let err = serde_json::from_value::<FeedForward>(ffn)
+            .err()
+            .unwrap_or_else(|| panic!("accepted FeedForward wire with dim={dim}, ff_dim={ff_dim}"));
+        assert!(err.to_string().contains("nonzero"), "{err}");
+    }
+
+    let mut block = serde_json::to_value(TransformerBlock::new(4, 2, 6)).unwrap();
+    block["ffn"]["w1"] = json!({"schema_version": 1, "shape": [4, 0], "data": []});
+    block["ffn"]["b1"] = json!({"schema_version": 1, "shape": [1, 0], "data": []});
+    block["ffn"]["w2"] = json!({"schema_version": 1, "shape": [0, 4], "data": []});
+    assert!(
+        serde_json::from_value::<TransformerBlock>(block).is_err(),
+        "accepted TransformerBlock wire with ff_dim = 0"
+    );
 }
 
 #[test]
