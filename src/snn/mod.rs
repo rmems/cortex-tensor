@@ -310,7 +310,20 @@ where
         // Encoders may inject NaN stimuli; validate before the backend
         // consumes a tick so the whole forward stays fail-closed. ±Inf is
         // rankable per the finite-value policy and passes through.
-        let stimulus = self.encoder.encode(&gate_scores, self.backend.channels())?;
+        // The one-channel-per-expert invariant is checked in `new`, but
+        // `channels()` is re-read every tick (a backend may be resized through
+        // `backend_mut`, and user backends need not be constant-width).
+        // Re-check it before the tick so `decoded[expert_id]` below cannot
+        // index past the readout, and fail closed without consuming a step.
+        let channels = self.backend.channels();
+        let num_experts = self.router.num_experts();
+        if channels < num_experts {
+            return Err(CortexError::SnnChannelMismatch {
+                experts: num_experts,
+                channels,
+            });
+        }
+        let stimulus = self.encoder.encode(&gate_scores, channels)?;
         if stimulus.iter().any(|v| v.is_nan()) {
             return Err(CortexError::SnnNan {
                 stage: "encoder stimulus",
@@ -322,8 +335,9 @@ where
             self.backend.step(&stimulus)?
         };
         // Failures past this point have consumed a backend tick; callers that
-        // need a clean epoch should `reset()` after such an error.
-        let channels = self.backend.channels();
+        // need a clean epoch should `reset()` after such an error. The
+        // pre-tick width is reused so encode and decode agree even if the
+        // backend changed shape during the step.
         validate_spikes(&step_out, channels)?;
         let decoded = self.decoder.decode(&step_out, channels);
         validate_readout(&decoded, channels)?;
@@ -333,7 +347,6 @@ where
         // product is capped; a finite gate plus that bonus is then saturated
         // at f32::MAX so it can never become +Inf, while a ±Inf gate keeps its
         // sign (bonus >= 0, so -Inf + bonus cannot be NaN).
-        let num_experts = self.router.num_experts();
         let routing_scores: Vec<f32> = (0..num_experts)
             .map(|expert_id| {
                 let gate = gate_scores[expert_id];

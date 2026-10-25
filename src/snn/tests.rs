@@ -172,6 +172,51 @@ fn constructor_rejects_fewer_channels_than_experts() {
 }
 
 #[test]
+fn forward_rechecks_channel_width_every_tick() {
+    // `new` enforces channels >= experts, but the backend is reachable through
+    // `backend_mut` and user backends need not be constant-width. A width that
+    // drops below the expert count must be a typed error on the next forward,
+    // not an index panic on `decoded[expert_id]`, and must not consume a tick.
+    let router = MoeRouter::load_with_mode("", 8, 2, crate::moe::RoutingMode::DenseSim).unwrap();
+    let mut model = SpikingMoeRouter::new(
+        router,
+        MockBackend::new(8, 0.0),
+        RateEncoder::default(),
+        SpikeCountDecoder,
+    )
+    .unwrap();
+    let embedding = vec![0.1f32; EMBEDDING_DIM];
+    model.forward(&embedding).unwrap();
+    assert_eq!(model.backend().steps, 1);
+
+    model.backend_mut().channels = 4;
+    for frozen in [false, true] {
+        let err = if frozen {
+            model.forward_frozen(&embedding).unwrap_err()
+        } else {
+            model.forward(&embedding).unwrap_err()
+        };
+        assert!(
+            matches!(
+                err,
+                HybridError::SnnChannelMismatch {
+                    experts: 8,
+                    channels: 4
+                }
+            ),
+            "{err}"
+        );
+    }
+    assert_eq!(model.backend().steps, 1);
+    assert_eq!(model.backend().frozen_steps, 0);
+
+    // Restoring the width makes the router usable again without a reset.
+    model.backend_mut().channels = 8;
+    model.forward(&embedding).unwrap();
+    assert_eq!(model.backend().steps, 2);
+}
+
+#[test]
 fn nan_stimulus_rejected_before_backend_step() {
     let router = MoeRouter::load_with_mode("", 8, 2, crate::moe::RoutingMode::DenseSim).unwrap();
     let mut model = SpikingMoeRouter::new(
