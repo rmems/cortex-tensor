@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::finite::{layer_norm_row, rms_norm_row};
-use super::{Tensor, check_f32_alloc, checked_numel, try_compute_strides};
+use super::{Tensor, try_alloc_filled};
 use crate::error::{CortexError, Result, unwrap_compat};
 
 /// Matrix multiply: [M×K] × [K×N] → [M×N]
@@ -306,11 +306,10 @@ pub fn causal_mask(seq_len: usize) -> Tensor {
 }
 
 /// Fallible causal mask: returns [`CortexError::SizeOverflow`] when
-/// `seq_len * seq_len` is not representable.
+/// `seq_len * seq_len` is not representable and
+/// [`CortexError::AllocationFailed`] when the allocator refuses the buffer.
 pub fn try_causal_mask(seq_len: usize) -> Result<Tensor> {
-    let out_len = checked_numel(&[seq_len, seq_len])?;
-    check_f32_alloc(out_len, &[seq_len, seq_len])?;
-    let mut data = vec![0.0f32; out_len];
+    let mut data = alloc_zeros(&[seq_len, seq_len])?;
     for i in 0..seq_len {
         for j in (i + 1)..seq_len {
             data[i * seq_len + j] = f32::NEG_INFINITY;
@@ -353,10 +352,7 @@ fn check_eps(eps: f32) -> Result<()> {
 
 /// Allocate an output buffer only after numel and strides are representable.
 fn alloc_zeros(shape: &[usize]) -> Result<Vec<f32>> {
-    let numel = checked_numel(shape)?;
-    check_f32_alloc(numel, shape)?;
-    let _ = try_compute_strides(shape)?;
-    Ok(vec![0.0; numel])
+    try_alloc_filled(shape, 0.0)
 }
 
 fn checked_mul3(a: usize, b: usize, c: usize, err_shape: &[usize]) -> Result<usize> {
@@ -370,6 +366,33 @@ fn checked_mul3(a: usize, b: usize, c: usize, err_shape: &[usize]) -> Result<usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Largest `f32` count that passes the layout check; see the matching
+    /// test in `tensor/mod.rs`.
+    const UNBACKABLE_NUMEL: usize = isize::MAX as usize / std::mem::size_of::<f32>();
+
+    #[test]
+    fn unbackable_output_shapes_are_errors_not_aborts() {
+        // causal_mask(n) allocates n*n: pick n so n*n passes the layout check.
+        let n = UNBACKABLE_NUMEL.isqrt();
+        assert!(matches!(
+            try_causal_mask(n),
+            Err(CortexError::AllocationFailed { .. })
+        ));
+        // matmul [1, 0] x [0, N] needs an [1, N] output it cannot back.
+        let a = Tensor::try_from_vec(vec![], &[1, 0]).unwrap();
+        let b = Tensor::try_from_vec(vec![], &[0, UNBACKABLE_NUMEL]).unwrap();
+        assert!(matches!(
+            try_matmul(&a, &b),
+            Err(CortexError::AllocationFailed { .. })
+        ));
+        // embedding with a zero-row table still has to allocate seq_len*dim.
+        let table = Tensor::try_from_vec(vec![], &[0, UNBACKABLE_NUMEL]).unwrap();
+        assert!(matches!(
+            try_embedding(&table, &[]),
+            Ok(ref t) if t.shape() == [0, UNBACKABLE_NUMEL]
+        ));
+    }
 
     #[test]
     fn test_matmul_2x2() {
