@@ -473,9 +473,13 @@ impl CandleExecutor {
             .ok_or_else(|| CortexError::MissingStageParams {
                 stage_id: stage_id.to_string(),
             })?;
+        // Same split as `ReferenceExecutor` (#97): a binding of the wrong
+        // kind is a wiring bug, not an unbound stage, and is reported as such.
         if params.tag() != expected {
-            return Err(CortexError::MissingStageParams {
+            return Err(CortexError::StageParamsMismatch {
                 stage_id: stage_id.to_string(),
+                expected: expected.as_str().to_string(),
+                got: params.tag().as_str().to_string(),
             });
         }
         Ok(params)

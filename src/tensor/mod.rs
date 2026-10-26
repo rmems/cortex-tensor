@@ -173,6 +173,18 @@ impl Tensor {
     }
 
     /// Fallible [`Tensor::zeros`].
+    ///
+    /// Returns [`CortexError::SizeOverflow`] when the element count or strides
+    /// are not representable and [`CortexError::AllocationFailed`] when the
+    /// allocator refuses the reservation, instead of aborting through
+    /// `handle_alloc_error`. The same holds for `try_ones`, `try_full`,
+    /// `try_randn*`, and the ops that allocate a fresh output buffer from a
+    /// shape (`try_matmul`, `try_batched_matmul`, `try_layer_norm`,
+    /// `try_rms_norm`, `try_embedding`, `try_causal_mask`). Ops that copy an
+    /// existing tensor (`try_transpose`, `try_softmax_last`, elementwise and
+    /// activation methods) still allocate infallibly; see
+    /// the crate-private `try_reserve_f32` helper for that limitation and for
+    /// the overcommit caveat.
     pub fn try_zeros(shape: &[usize]) -> Result<Self> {
         try_filled(shape, 0.0)
     }
@@ -246,7 +258,7 @@ impl Tensor {
         let numel = checked_numel(shape)?;
         check_f32_alloc(numel, shape)?;
         let _ = try_compute_strides(shape)?;
-        let mut data: Vec<f32> = Vec::with_capacity(numel);
+        let mut data = try_reserve_f32(numel, shape)?;
         // Box-Muller: each (u1, u2) pair yields two independent samples.
         while data.len() < numel {
             // u1 in (0, 1] so ln(u1) is finite without clamping the tails.
@@ -797,14 +809,56 @@ pub(crate) fn try_compute_strides(shape: &[usize]) -> Result<Vec<usize>> {
     Ok(strides)
 }
 
-/// Allocates a filled buffer only after numel and row-major strides are
-/// representable.
-fn try_filled(shape: &[usize], val: f32) -> Result<Tensor> {
+/// Reserves exactly `numel` elements of `f32` storage for `shape`, or returns
+/// [`CortexError::AllocationFailed`] when the allocator refuses.
+///
+/// `vec![x; n]` and `Vec::with_capacity(n)` call `handle_alloc_error` on
+/// failure, which aborts the process. A caller-controlled shape that passes
+/// the `isize::MAX` layout check (see [`check_f32_alloc`]) can therefore
+/// still take the whole process down instead of surfacing an `Err`. Every
+/// fresh output buffer sized by a shape goes through this helper so the
+/// failure stays a value.
+///
+/// This guards the *reservation*. On systems with memory overcommit (Linux
+/// default) the reservation can succeed and the kernel may still kill the
+/// process when the pages are first touched; that is outside what a library
+/// can turn into an `Err`.
+///
+/// Limitation: buffers sized by an existing tensor's storage (`scale`,
+/// elementwise ops, transpose, softmax, the attention head reshapes) still
+/// use `vec!`/`collect`. Their source is alive while they allocate, so peak
+/// memory doubles and a second allocation of the same size can still abort.
+/// In practice this means the *first* `nh·seq²` buffer of
+/// `MultiHeadAttention::try_forward` is fallible and the later ones are not;
+/// closing that gap is tracked under issue #103.
+pub(crate) fn try_reserve_f32(numel: usize, shape: &[usize]) -> Result<Vec<f32>> {
+    let mut data: Vec<f32> = Vec::new();
+    data.try_reserve_exact(numel)
+        .map_err(|_| CortexError::AllocationFailed {
+            shape: shape.to_vec(),
+            bytes: numel.saturating_mul(std::mem::size_of::<f32>()),
+        })?;
+    Ok(data)
+}
+
+/// Checks numel, layout and row-major strides for `shape`, then allocates a
+/// zero-initialised buffer fallibly. Shared by the constructors and the ops
+/// that produce a fresh output tensor.
+pub(crate) fn try_alloc_filled(shape: &[usize], val: f32) -> Result<Vec<f32>> {
     let numel = checked_numel(shape)?;
     check_f32_alloc(numel, shape)?;
     let _ = try_compute_strides(shape)?;
+    let mut data = try_reserve_f32(numel, shape)?;
+    data.resize(numel, val);
+    Ok(data)
+}
+
+/// Allocates a filled buffer only after numel and row-major strides are
+/// representable and the allocation itself succeeds.
+fn try_filled(shape: &[usize], val: f32) -> Result<Tensor> {
+    let data = try_alloc_filled(shape, val)?;
     Ok(Tensor {
-        data: vec![val; numel],
+        data,
         shape: shape.to_vec(),
     })
 }
@@ -829,6 +883,45 @@ impl fmt::Debug for Tensor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Largest `f32` count that passes the `isize::MAX` layout check, so the
+    /// failure must come from the allocator, not from `SizeOverflow`.
+    const UNBACKABLE_NUMEL: usize = isize::MAX as usize / std::mem::size_of::<f32>();
+
+    #[test]
+    fn unbackable_shape_is_an_error_not_an_abort() {
+        let shape = [UNBACKABLE_NUMEL];
+        for result in [
+            Tensor::try_zeros(&shape),
+            Tensor::try_ones(&shape),
+            Tensor::try_full(&shape, 2.5),
+            Tensor::try_randn(&shape, 0.0, 1.0),
+            Tensor::try_randn_with_rng(&shape, 0.0, 1.0, &mut seeded_rng(7)),
+        ] {
+            match result {
+                Err(CortexError::AllocationFailed { shape: got, bytes }) => {
+                    assert_eq!(got, shape);
+                    assert_eq!(bytes, UNBACKABLE_NUMEL * std::mem::size_of::<f32>());
+                }
+                Err(other) => panic!("expected AllocationFailed, got {other}"),
+                Ok(t) => panic!("allocated {} elements", t.numel()),
+            }
+        }
+        // The two guards stay distinct: one past the layout limit is still
+        // `SizeOverflow`, not an allocator failure.
+        assert!(matches!(
+            Tensor::try_zeros(&[UNBACKABLE_NUMEL + 1]),
+            Err(CortexError::SizeOverflow { .. })
+        ));
+    }
+
+    #[test]
+    fn allocation_failed_message_names_shape_and_bytes() {
+        let err = Tensor::try_zeros(&[UNBACKABLE_NUMEL]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("allocation of"), "{msg}");
+        assert!(msg.contains(&UNBACKABLE_NUMEL.to_string()), "{msg}");
+    }
 
     #[test]
     fn try_randn_rejects_overflowing_std() {

@@ -49,6 +49,14 @@ pub enum CortexError {
     #[error("size overflow computing elements or strides for shape {shape:?}")]
     SizeOverflow { shape: Vec<usize> },
 
+    /// The allocator refused the buffer for `shape` (`bytes` requested).
+    ///
+    /// Distinct from [`SizeOverflow`](Self::SizeOverflow): the shape is
+    /// representable, the machine just cannot back it. Returned instead of
+    /// letting `vec![0.0; n]` abort the process through `handle_alloc_error`.
+    #[error("allocation of {bytes} bytes failed for tensor shape {shape:?}")]
+    AllocationFailed { shape: Vec<usize>, bytes: usize },
+
     // ── Configuration errors ──────────────────────────────────────────────
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
