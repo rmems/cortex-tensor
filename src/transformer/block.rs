@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use super::attention::MultiHeadAttention;
-use super::expect_shape;
+use super::{add_row_bias, expect_shape};
 use crate::error::{CortexError, Result, unwrap_compat};
 use crate::tensor::Tensor;
 use crate::tensor::ops::{try_layer_norm, try_matmul};
@@ -105,13 +105,15 @@ impl FeedForward {
                 got: x.ndim(),
             });
         }
-        let seq_len = x.shape()[0];
         // x @ w1 + b1
-        let h = try_matmul(x, &self.w1)?.try_add(&broadcast_row(&self.b1, seq_len)?)?;
+        let mut h = try_matmul(x, &self.w1)?;
+        add_row_bias(&mut h, &self.b1)?;
         // GELU activation
         let h = h.gelu();
         // h @ w2 + b2
-        try_matmul(&h, &self.w2)?.try_add(&broadcast_row(&self.b2, seq_len)?)
+        let mut out = try_matmul(&h, &self.w2)?;
+        add_row_bias(&mut out, &self.b2)?;
+        Ok(out)
     }
 
     pub fn param_count(&self) -> usize {
@@ -229,21 +231,6 @@ impl TransformerBlock {
     pub fn param_count(&self) -> usize {
         self.attn.param_count() + self.ffn.param_count() + 4 * self.dim
     }
-}
-
-fn broadcast_row(bias: &Tensor, rows: usize) -> Result<Tensor> {
-    let cols = bias.numel();
-    let out_len = rows
-        .checked_mul(cols)
-        .ok_or_else(|| CortexError::SizeOverflow {
-            shape: vec![rows, cols],
-        })?;
-    let bd = bias.data();
-    let mut out = vec![0.0f32; out_len];
-    for r in 0..rows {
-        out[r * cols..(r + 1) * cols].copy_from_slice(bd);
-    }
-    Tensor::try_from_vec(out, &[rows, cols])
 }
 
 #[cfg(test)]

@@ -56,6 +56,34 @@ fn expect_shape(tensor: &crate::tensor::Tensor, expected: &[usize]) -> crate::er
     Ok(())
 }
 
+/// Adds the `[1, cols]` (or `[cols]`) `bias` to every row of the 2-D `out`
+/// in place. Replaces tiling the bias into a `[rows, cols]` tensor plus a third
+/// buffer for `try_add`; each element still gets the same single `a + b`.
+pub(crate) fn add_row_bias(
+    out: &mut crate::tensor::Tensor,
+    bias: &crate::tensor::Tensor,
+) -> crate::error::Result<()> {
+    let cols = match out.shape() {
+        [_, cols] if *cols == bias.numel() => *cols,
+        shape => {
+            return Err(crate::error::CortexError::ShapeMismatch {
+                expected: vec![shape.first().copied().unwrap_or(0), bias.numel()],
+                got: shape.to_vec(),
+            });
+        }
+    };
+    if cols == 0 {
+        return Ok(());
+    }
+    let b = bias.data();
+    for row in out.data_mut().chunks_exact_mut(cols) {
+        for (x, &bv) in row.iter_mut().zip(b) {
+            *x += bv;
+        }
+    }
+    Ok(())
+}
+
 pub mod attention;
 pub mod block;
 pub mod model;
