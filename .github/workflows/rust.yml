@@ -60,7 +60,7 @@ jobs:
       with:
         tool: cargo-llvm-cov
     - name: Generate coverage report
-      run: cargo llvm-cov --lib --no-default-features --locked --lcov --output-path lcov.info
+      run: cargo llvm-cov --lib --no-default-features --lcov --output-path lcov.info
     # Codecov upload (#38). With CODECOV_TOKEN the upload is strict (a failed
     # upload fails the job). Without it (fork PRs, or the secret not yet added)
     # the upload is attempted tokenless where Codecov allows it and can never
@@ -76,6 +76,10 @@ jobs:
         files: lcov.info
         fail_ci_if_error: ${{ env.CODECOV_TOKEN != '' }}
         verbose: true
+
+    # Compile-only: benches must keep building, timings never gate CI (RM-1491).
+    - name: Build benches
+      run: cargo bench --no-run --all-features
 
     - name: Format check
       run: cargo fmt --all -- --check
