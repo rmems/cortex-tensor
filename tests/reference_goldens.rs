@@ -553,7 +553,7 @@ fn dense_moe_selection_weights_and_hidden_combination() {
     input[512] = 1.;
     input[1024] = 1.;
     input[1536] = -1.;
-    let mut router = MoeRouter::load_with_mode("", 4, 2, RoutingMode::DenseSim).unwrap();
+    let router = MoeRouter::load_with_mode("", 4, 2, RoutingMode::DenseSim).unwrap();
     let expected_weights =
         Golden::approximate(&[4], &[0.14696279, 0.3994863, 0.3994863, 0.05406459]);
     let mut expected_hidden = vec![0.; 2048];

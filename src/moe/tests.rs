@@ -21,7 +21,7 @@ fn test_stub_mode_loads() {
 
 #[test]
 fn test_stub_forward_uniform_weights() {
-    let mut model = stub();
+    let model = stub();
     let out = model.forward(&vec![0.1; EMBEDDING_DIM]).unwrap();
     for weight in &out.expert_weights {
         assert!((*weight - 0.125).abs() < 1e-5);
@@ -37,7 +37,7 @@ fn test_dense_sim_uses_real_gate_weights() {
     let gate_bytes: Vec<u8> = gate.iter().flat_map(|value| value.to_le_bytes()).collect();
     let path = write_temp_file(&build_real_size_checkpoint(gate_bytes), "dense-real");
 
-    let mut model =
+    let model =
         MoeRouter::load_with_mode(path.to_str().unwrap(), 8, 2, RoutingMode::DenseSim).unwrap();
     let mut embedding = vec![0.0f32; EMBEDDING_DIM];
     embedding[0] = 1.0;
@@ -60,7 +60,7 @@ fn dense_sim_selects_expert_by_gguf_ne_order_row() {
     let gate_bytes: Vec<u8> = gate.iter().flat_map(|value| value.to_le_bytes()).collect();
     let path = write_temp_file(&build_real_size_checkpoint(gate_bytes), "dense-row-order");
 
-    let mut model =
+    let model =
         MoeRouter::load_with_mode(path.to_str().unwrap(), 8, 1, RoutingMode::DenseSim).unwrap();
     let mut embedding = vec![0.0f32; EMBEDDING_DIM];
     embedding[0] = 1.0;
@@ -113,7 +113,7 @@ fn load_routes_through_checkpoint_gate_weights_not_stub() {
     let gate_bytes: Vec<u8> = gate.iter().flat_map(|value| value.to_le_bytes()).collect();
     let path = write_temp_file(&build_real_size_checkpoint(gate_bytes), "load-default-mode");
 
-    let mut model = MoeRouter::load(path.to_str().unwrap(), 8, 2).unwrap();
+    let model = MoeRouter::load(path.to_str().unwrap(), 8, 2).unwrap();
     assert!(model.is_loaded());
     assert_eq!(model.routing_mode(), RoutingMode::default());
     assert_eq!(model.routing_mode(), RoutingMode::DenseSim);
@@ -154,7 +154,7 @@ fn load_with_empty_path_still_defaults_to_dense_sim_stub_router() {
 
 #[test]
 fn dense_sim_ranks_raw_gate_scores_before_softmax() {
-    let mut model =
+    let model =
         MoeRouter::load_with_mode("", 8, 2, RoutingMode::DenseSim).expect("stub dense load");
     let mut embedding = vec![0.0f32; EMBEDDING_DIM];
     let chunk = (EMBEDDING_DIM / 8).max(1);
@@ -165,7 +165,7 @@ fn dense_sim_ranks_raw_gate_scores_before_softmax() {
 
 #[test]
 fn dense_sim_rejects_nan_gate_score() {
-    let mut model =
+    let model =
         MoeRouter::load_with_mode("", 8, 2, RoutingMode::DenseSim).expect("stub dense load");
     let mut embedding = vec![0.0f32; EMBEDDING_DIM];
     let chunk = (EMBEDDING_DIM / 8).max(1);
@@ -319,7 +319,7 @@ fn extract_token_embedding_returns_native_hidden_size() {
         HIDDEN,
     );
     let path = write_temp_file(&checkpoint, "native-hidden-32");
-    let mut router =
+    let router =
         MoeRouter::load_with_mode(path.to_str().unwrap(), 8, 2, RoutingMode::StubUniform).unwrap();
     assert_eq!(router.hidden_size(), HIDDEN);
 
@@ -374,7 +374,7 @@ fn extract_f16_neg_zero_keeps_sign_bit_at_native_length() {
         HIDDEN,
     );
     let path = write_temp_file(&checkpoint, "f16-neg-zero");
-    let mut router =
+    let router =
         MoeRouter::load_with_mode(path.to_str().unwrap(), 8, 1, RoutingMode::StubUniform).unwrap();
     let embedding = router.extract_token_embedding(0).unwrap();
     assert_eq!(embedding.len(), HIDDEN);
@@ -455,10 +455,10 @@ fn gguf_and_safetensors_bind_the_same_normalized_weights() {
 
     let gguf_path = write_temp_file(&gguf, "equiv-gguf");
     let st_path = write_temp_file_with_extension(&safetensors, "equiv-st", "safetensors");
-    let mut gguf_router =
+    let gguf_router =
         MoeRouter::load_with_mode(gguf_path.to_str().unwrap(), 0, 1, RoutingMode::DenseSim)
             .unwrap();
-    let mut st_router =
+    let st_router =
         MoeRouter::load_with_mode(st_path.to_str().unwrap(), 0, 1, RoutingMode::DenseSim).unwrap();
 
     assert_eq!(gguf_router.architecture(), st_router.architecture());
@@ -682,7 +682,7 @@ fn bound_safetensors_router_ignores_later_file_rewrites() {
         ],
     );
     let path = write_temp_file_with_extension(&bytes, "bound-st", "safetensors");
-    let mut router =
+    let router =
         MoeRouter::load_with_mode(path.to_str().unwrap(), 0, 1, RoutingMode::DenseSim).unwrap();
     let row = router.extract_token_embedding(1).unwrap();
     let mut embedding = vec![0.0f32; hidden];
