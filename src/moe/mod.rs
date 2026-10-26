@@ -92,22 +92,24 @@ impl MoeRouter {
         }
 
         let (metadata, mut checkpoint, adapter) = Self::probe_and_map(model_path)?;
-        let bound_gate = checkpoint.bind_router_weights(
-            &adapter.token_embedding_tensor,
-            &adapter.routing_tensor,
-            model_path,
-        )?;
         let effective_num_experts = if num_experts == 0 {
             metadata.num_experts
         } else {
             num_experts
         };
+        // Reject before `bind_router_weights`, which decodes the gate and
+        // copies the whole token-embedding payload.
         if effective_num_experts > metadata.num_experts {
             return Err(HybridError::InvalidConfig(format!(
                 "num_experts ({effective_num_experts}) exceeds checkpoint expert_count ({})",
                 metadata.num_experts
             )));
         }
+        let bound_gate = checkpoint.bind_router_weights(
+            &adapter.token_embedding_tensor,
+            &adapter.routing_tensor,
+            model_path,
+        )?;
 
         let effective_top_k = if top_k == 0 {
             metadata.expert_used_count.max(1).min(effective_num_experts)

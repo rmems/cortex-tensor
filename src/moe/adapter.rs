@@ -30,6 +30,11 @@ pub(super) fn resolve_adapter(checkpoint: &MappedCheckpoint, path: &str) -> Resu
                 "missing '{architecture}.embedding_length' in '{path}'"
             ))
         })?;
+    if hidden_size == 0 {
+        return Err(HybridError::UnsupportedFormat(format!(
+            "{architecture}.embedding_length in '{path}' must be greater than 0"
+        )));
+    }
     let num_layers = checkpoint
         .numeric(&format!("{architecture}.block_count"))
         .ok_or_else(|| {

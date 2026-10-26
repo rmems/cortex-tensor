@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (breaking: error variants)
+
+- **Breaking (error variants, RM-2365 / #150):** the same failure class now returns one stable variant across layers. Callers matching the old variants must update:
+  - Hidden width != `dim`: `FeedForward::try_forward` returns `DimMismatch { op: "FeedForward::try_forward", axis: 1, .. }` (was `MatmulDim`); `TransformerBlock::try_forward` returns `DimMismatch { op: "TransformerBlock::try_forward", axis: 1, .. }` (was `DimMismatch { op: "layer_norm" }`). `MultiHeadAttention::try_forward` is unchanged.
+  - Zero extents: `MultiHeadAttention`, `FeedForward`, `TransformerBlock` and `TransformerLM` constructors and wire validation return `ZeroWidth { op, axis }` (was `InvalidConfig`). `axis` is the argument position (`dim` 0, `num_heads` 1, `ff_dim` 1 for `FeedForward` / 2 for `TransformerBlock`), or the field declaration index for `TransformerConfig` (`vocab_size` 0, `dim` 1, `num_heads` 2, `ff_dim` 4, `max_seq_len` 5). A `num_heads` that does not divide `dim` stays `InvalidConfig`, now with one message shared by every constructor and the wire path.
+  - New public `TransformerConfig::validate()`, used by `TransformerLM::try_new` and deserialization, replaces the two diverging checks.
+  - `TransformerLM` position bound is `min(pos_embed.shape()[0], config.max_seq_len)`, so raising the `pub` `config.max_seq_len` past the table reports `InputLengthMismatch` instead of `TokenIndex`.
+  - `MappedCheckpoint::extract_token_embedding` (and `MoeRouter::extract_token_embedding*`) return `TokenIndex { index, vocab_size }` for an out-of-vocabulary id (was `InputLengthMismatch`).
+  - engram-parser `LimitExceeded`, `HostSizeOverflow`, `DuplicateTensorOwnership` and `MissingShard` surface as `ModelLoad { path, reason }` (were `UnsupportedFormat(String)` without the path).
+  - A checkpoint with `embedding_length == 0` is rejected by adapter resolution with `UnsupportedFormat`, like `expert_count == 0`.
+
+### Fixed
+
+- `MultiHeadAttention::param_count`, `FeedForward::param_count`, `TransformerBlock::param_count` and `TransformerLM::param_count` sum tensor `numel()` with saturating adds, so no combination of `pub` fields can panic (debug) or wrap (release).
+- `MoeRouter::load_with_mode` rejects `num_experts > expert_count` before decoding the gate and copying the token-embedding payload.
+
 ### Fixed
 
 - `NeuromodNetwork` no longer flattens every `neuromod::StepError` to `SnnBackend(String)`: `InputLenMismatch` maps to `InputLengthMismatch` and `NonFiniteStimulus` to the new `CortexError::SnnInvalidStimulus { channel, value }`; other errors stay `SnnBackend`. **Breaking (policy):** `SpikingMoeRouter::forward` / `forward_frozen` now reject a ±Inf gate score, or a ±Inf encoded stimulus sample, with `SnnInvalidStimulus` before the encoder or backend runs (NaN keeps `NanRoutingScore` / `SnnNan`). Previously ±Inf passed the router and neuromod rejected it after the encoder state had advanced; plain `MoeRouter` still ranks ±Inf (RM-2364, #149).

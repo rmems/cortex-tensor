@@ -45,10 +45,13 @@ reference_serde!(
 
 impl MultiHeadAttention {
     pub(super) fn validate_wire(&self) -> Result<()> {
-        if self.dim == 0
-            || self.num_heads == 0
-            || self.num_heads.checked_mul(self.head_dim) != Some(self.dim)
-        {
+        if self.dim == 0 {
+            return Err(CortexError::ZeroWidth {
+                op: "MultiHeadAttention::validate_wire",
+                axis: 0,
+            });
+        }
+        if self.num_heads == 0 || self.num_heads.checked_mul(self.head_dim) != Some(self.dim) {
             return Err(CortexError::InvalidConfig(
                 "attention head dimensions disagree".into(),
             ));
@@ -87,11 +90,7 @@ impl MultiHeadAttention {
         num_heads: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        if dim == 0 || num_heads == 0 || !dim.is_multiple_of(num_heads) {
-            return Err(CortexError::InvalidConfig(format!(
-                "MultiHeadAttention: dim ({dim}) and num_heads ({num_heads}) must be nonzero, and num_heads must divide dim"
-            )));
-        }
+        super::check_head_config("MultiHeadAttention::try_new", dim, num_heads, 0, 1)?;
         let head_dim = dim / num_heads;
         let scale = 1.0 / (dim as f32).sqrt();
         Ok(Self {
@@ -198,8 +197,13 @@ impl MultiHeadAttention {
     }
 
     /// Returns flattened parameter count for this layer.
+    ///
+    /// Summed from the `numel()` of the stored tensors (saturating), so it
+    /// tracks the `pub` weight fields and cannot overflow.
     pub fn param_count(&self) -> usize {
-        4 * self.dim * self.dim + 4 * self.dim
+        super::sum_numel([
+            &self.wq, &self.wb_q, &self.wk, &self.wb_k, &self.wv, &self.wb_v, &self.wo, &self.wb_o,
+        ])
     }
 }
 

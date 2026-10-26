@@ -185,7 +185,7 @@ fn standalone_ffn_and_block_wire_reject_zero_extents() {
         let err = serde_json::from_value::<FeedForward>(ffn)
             .err()
             .unwrap_or_else(|| panic!("accepted FeedForward wire with dim={dim}, ff_dim={ff_dim}"));
-        assert!(err.to_string().contains("nonzero"), "{err}");
+        assert!(err.to_string().contains("zero-width axis"), "{err}");
     }
 
     let mut block = serde_json::to_value(TransformerBlock::new(4, 2, 6)).unwrap();
