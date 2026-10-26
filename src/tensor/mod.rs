@@ -183,7 +183,8 @@ impl Tensor {
     /// `try_rms_norm`, `try_embedding`, `try_causal_mask`). Ops that copy an
     /// existing tensor (`try_transpose`, `try_softmax_last`, elementwise and
     /// activation methods) still allocate infallibly; see
-    /// [`try_reserve_f32`] for that limitation and for the overcommit caveat.
+    /// the crate-private `try_reserve_f32` helper for that limitation and for
+    /// the overcommit caveat.
     pub fn try_zeros(shape: &[usize]) -> Result<Self> {
         try_filled(shape, 0.0)
     }
