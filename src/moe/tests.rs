@@ -836,7 +836,7 @@ fn same_failure_class_yields_one_variant_across_layers() {
     cfg.vocab_size = 4;
     let lm = TransformerLM::try_new(cfg).unwrap();
     let oov_path = small_checkpoint("oov", 32, 64);
-    let mut router =
+    let router =
         MoeRouter::load_with_mode(oov_path.to_str().unwrap(), 8, 2, RoutingMode::StubUniform)
             .unwrap();
     for err in [
