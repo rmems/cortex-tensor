@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use super::expect_shape;
+use super::{add_row_bias, expect_shape};
 use crate::error::{CortexError, Result, unwrap_compat};
 use crate::tensor::Tensor;
 use crate::tensor::finite::softmax_row;
@@ -158,9 +158,14 @@ impl MultiHeadAttention {
         }
 
         // Project Q, K, V: [seq_len, dim] × [dim, dim] → [seq_len, dim]
-        let q = try_matmul(x, &self.wq)?.try_add(&broadcast_bias(&self.wb_q, seq_len)?)?;
-        let k = try_matmul(x, &self.wk)?.try_add(&broadcast_bias(&self.wb_k, seq_len)?)?;
-        let v = try_matmul(x, &self.wv)?.try_add(&broadcast_bias(&self.wb_v, seq_len)?)?;
+        let project = |w: &Tensor, b: &Tensor| -> Result<Tensor> {
+            let mut out = try_matmul(x, w)?;
+            add_row_bias(&mut out, b)?;
+            Ok(out)
+        };
+        let q = project(&self.wq, &self.wb_q)?;
+        let k = project(&self.wk, &self.wb_k)?;
+        let v = project(&self.wv, &self.wb_v)?;
 
         // Reshape to [num_heads, seq_len, head_dim] for batched attention
         let q = reshape_heads(&q, seq_len, nh, hd);
@@ -171,11 +176,13 @@ impl MultiHeadAttention {
         // scores = Q × K^T / sqrt(head_dim)  → [nh, seq_len, seq_len]
         let kt = transpose_last_two(&k); // [nh, hd, seq_len]
         let scale = 1.0 / (hd as f32).sqrt();
-        let scores = try_batched_matmul(&q, &kt)?.scale(scale);
+        let mut scores = try_batched_matmul(&q, &kt)?;
 
-        // Causal softmax per row: only the visible prefix 0..=r is normalized;
-        // future slots are exactly zero (no additive mask needed).
-        let attn = causal_batched_softmax(&scores, nh, seq_len);
+        // Scale + causal softmax per row, in place on the matmul output: only
+        // the visible prefix 0..=r is scaled and normalized; future slots are
+        // exactly zero (no mask tensor needed).
+        causal_scale_softmax_in_place(&mut scores, scale, nh, seq_len);
+        let attn = scores;
 
         // attn × V → [nh, seq_len, hd], accumulated over the visible prefix only
         // so a non-finite future V row cannot reach earlier rows via 0 × NaN.
@@ -185,7 +192,9 @@ impl MultiHeadAttention {
         let ctx = merge_heads(&ctx, seq_len, nh, hd);
 
         // Output projection
-        try_matmul(&ctx, &self.wo)?.try_add(&broadcast_bias(&self.wb_o, seq_len)?)
+        let mut out = try_matmul(&ctx, &self.wo)?;
+        add_row_bias(&mut out, &self.wb_o)?;
+        Ok(out)
     }
 
     /// Returns flattened parameter count for this layer.
@@ -195,28 +204,6 @@ impl MultiHeadAttention {
 }
 
 // ── Helper functions ─────────────────────────────────────────────────
-
-fn broadcast_bias(bias: &Tensor, seq_len: usize) -> Result<Tensor> {
-    // bias is [1, dim], tile to [seq_len, dim]
-    let dim = bias.shape()[1];
-    let out_len = seq_len
-        .checked_mul(dim)
-        .ok_or_else(|| CortexError::SizeOverflow {
-            shape: vec![seq_len, dim],
-        })?;
-    let bd = bias.data();
-    if bd.len() != dim {
-        return Err(CortexError::ShapeMismatch {
-            expected: vec![1, dim],
-            got: vec![bd.len()],
-        });
-    }
-    let mut out = vec![0.0f32; out_len];
-    for r in 0..seq_len {
-        out[r * dim..(r + 1) * dim].copy_from_slice(bd);
-    }
-    Tensor::try_from_vec(out, &[seq_len, dim])
-}
 
 /// [seq_len, dim] → [num_heads, seq_len, head_dim]
 fn reshape_heads(t: &Tensor, seq_len: usize, nh: usize, hd: usize) -> Tensor {
@@ -267,7 +254,13 @@ fn transpose_last_two(t: &Tensor) -> Tensor {
     Tensor::from_vec(out, &[b, n, m])
 }
 
-/// Causal row-wise softmax on each [seq, seq] slice of a [nh, seq, seq] tensor.
+/// Fused in-place scale + causal row-wise softmax on each [seq, seq] slice of a
+/// [nh, seq, seq] tensor.
+///
+/// Each visible score is multiplied by `scale` (the same single `x * scale` the
+/// separate `Tensor::scale` pass did) and then softmaxed, so results are
+/// bit-identical to scale-then-softmax while using one buffer plus an O(seq)
+/// scratch row instead of three `[nh, seq, seq]` copies.
 ///
 /// For query row `r`, softmax is taken over the visible prefix `0..=r` only
 /// (via [`crate::tensor::finite::softmax_row`], RM-1354 policy: NaN poisons the
@@ -275,24 +268,26 @@ fn transpose_last_two(t: &Tensor) -> Tensor {
 /// `1/(r+1)`). Future slots `r+1..seq` are written as exactly `0.0` and their
 /// scores are never read, so no score value (including `-Inf` overflow of the
 /// whole prefix) can move probability mass onto a future token (issue #94).
-fn causal_batched_softmax(t: &Tensor, nh: usize, seq: usize) -> Tensor {
+fn causal_scale_softmax_in_place(t: &mut Tensor, scale: f32, nh: usize, seq: usize) {
     assert_eq!(
         t.shape(),
         &[nh, seq, seq],
         "scores must be [heads, seq, seq]"
     );
-    let d = t.data();
-    let mut out = vec![0.0f32; t.numel()];
     if seq == 0 {
-        return Tensor::from_vec(out, t.shape());
+        return;
     }
-    for h in 0..nh {
-        for r in 0..seq {
-            let off = h * seq * seq + r * seq;
-            softmax_row(&d[off..off + r + 1], &mut out[off..off + r + 1]);
+    let mut scratch = vec![0.0f32; seq];
+    for slice in t.data_mut().chunks_exact_mut(seq * seq) {
+        for (r, row) in slice.chunks_exact_mut(seq).enumerate() {
+            let (visible, future) = row.split_at_mut(r + 1);
+            for (s, x) in scratch.iter_mut().zip(visible.iter()) {
+                *s = *x * scale;
+            }
+            softmax_row(&scratch[..=r], visible);
+            future.fill(0.0);
         }
     }
-    Tensor::from_vec(out, t.shape())
 }
 
 /// Causal `attn × V`: `[nh, seq, seq] × [nh, seq, hd] → [nh, seq, hd]`.
@@ -360,6 +355,40 @@ mod tests {
             })
             .collect();
         Tensor::from_vec(data, shape)
+    }
+
+    /// Unscaled causal softmax returning a fresh tensor (scale `1.0` is exact).
+    fn causal_batched_softmax(t: &Tensor, nh: usize, seq: usize) -> Tensor {
+        let mut out = t.clone();
+        causal_scale_softmax_in_place(&mut out, 1.0, nh, seq);
+        out
+    }
+
+    #[test]
+    fn fused_scale_softmax_matches_scale_then_softmax() {
+        let (nh, seq) = (3, 7);
+        let scores = pseudo_random(&[nh, seq, seq], 9, 4.0);
+        let scale = 1.0 / 5.0f32.sqrt();
+        let mut fused = scores.clone();
+        causal_scale_softmax_in_place(&mut fused, scale, nh, seq);
+        let reference = causal_batched_softmax(&scores.scale(scale), nh, seq);
+        assert_eq!(fused.data(), reference.data());
+    }
+
+    #[test]
+    fn add_row_bias_matches_tiled_add() {
+        let out = pseudo_random(&[5, 4], 11, 1.0);
+        let bias = pseudo_random(&[1, 4], 12, 1.0);
+        let mut tiled = Vec::new();
+        for _ in 0..5 {
+            tiled.extend_from_slice(bias.data());
+        }
+        let expect = out.try_add(&Tensor::from_vec(tiled, &[5, 4])).unwrap();
+        let mut got = out.clone();
+        add_row_bias(&mut got, &bias).unwrap();
+        assert_eq!(got.data(), expect.data());
+        let bad = pseudo_random(&[1, 3], 13, 1.0);
+        assert!(add_row_bias(&mut got, &bad).is_err());
     }
 
     /// `dim=2, heads=1`, `wq=-I`, `wk=wv=wo=I`, zero biases (issue #94).
