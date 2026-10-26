@@ -805,19 +805,15 @@ fn same_failure_class_yields_one_variant_across_layers() {
     // Class 2: zero extent -> ZeroWidth.
     let mut zero_cfg = TransformerConfig::tiny();
     zero_cfg.ff_dim = 0;
+    let zero_path = small_checkpoint("zero-hidden", 0, 64);
     let zero_errors = [
         MultiHeadAttention::try_new(0, 1).err().unwrap(),
         FeedForward::try_new(0, 4).err().unwrap(),
         TransformerBlock::try_new(8, 2, 0).err().unwrap(),
         TransformerLM::try_new(zero_cfg).err().unwrap(),
-        MoeRouter::load_with_mode(
-            small_checkpoint("zero-hidden", 0, 64).to_str().unwrap(),
-            8,
-            2,
-            RoutingMode::DenseSim,
-        )
-        .err()
-        .unwrap(),
+        MoeRouter::load_with_mode(zero_path.to_str().unwrap(), 8, 2, RoutingMode::DenseSim)
+            .err()
+            .unwrap(),
     ];
     for (i, err) in zero_errors.iter().enumerate() {
         // The MoE row reports the checkpoint-side equivalent (the metadata
@@ -839,13 +835,10 @@ fn same_failure_class_yields_one_variant_across_layers() {
     let mut cfg = TransformerConfig::tiny();
     cfg.vocab_size = 4;
     let lm = TransformerLM::try_new(cfg).unwrap();
-    let mut router = MoeRouter::load_with_mode(
-        small_checkpoint("oov", 32, 64).to_str().unwrap(),
-        8,
-        2,
-        RoutingMode::StubUniform,
-    )
-    .unwrap();
+    let oov_path = small_checkpoint("oov", 32, 64);
+    let mut router =
+        MoeRouter::load_with_mode(oov_path.to_str().unwrap(), 8, 2, RoutingMode::StubUniform)
+            .unwrap();
     for err in [
         lm.try_forward(&[4]).unwrap_err(),
         router.extract_token_embedding(4).unwrap_err(),
@@ -861,6 +854,8 @@ fn same_failure_class_yields_one_variant_across_layers() {
             "{err:?}"
         );
     }
+    let _ = remove_file(&zero_path);
+    let _ = remove_file(&oov_path);
 }
 
 #[test]
@@ -872,4 +867,21 @@ fn num_experts_over_checkpoint_is_rejected_with_invalid_config() {
         .err()
         .unwrap();
     assert!(matches!(err, HybridError::InvalidConfig(_)), "{err:?}");
+    let _ = remove_file(&path);
+}
+
+#[test]
+fn expert_count_is_checked_before_binding() {
+    // A binder that would fail with ModelLoad must never run when the count
+    // is over the checkpoint; binding-first order would surface ModelLoad.
+    let bind_fail = || -> Result<()> {
+        Err(HybridError::ModelLoad {
+            path: "p".into(),
+            reason: "bind ran".into(),
+        })
+    };
+    let err = bind_after_expert_count_check(5, 4, bind_fail).unwrap_err();
+    assert!(matches!(err, HybridError::InvalidConfig(_)), "{err:?}");
+    let err = bind_after_expert_count_check(4, 4, bind_fail).unwrap_err();
+    assert!(matches!(err, HybridError::ModelLoad { .. }), "{err:?}");
 }

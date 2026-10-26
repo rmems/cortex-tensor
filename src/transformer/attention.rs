@@ -45,13 +45,14 @@ reference_serde!(
 
 impl MultiHeadAttention {
     pub(super) fn validate_wire(&self) -> Result<()> {
-        if self.dim == 0 {
-            return Err(CortexError::ZeroWidth {
-                op: "MultiHeadAttention::validate_wire",
-                axis: 0,
-            });
-        }
-        if self.num_heads == 0 || self.num_heads.checked_mul(self.head_dim) != Some(self.dim) {
+        super::check_head_config(
+            "MultiHeadAttention::validate_wire",
+            self.dim,
+            self.num_heads,
+            0,
+            1,
+        )?;
+        if self.num_heads.checked_mul(self.head_dim) != Some(self.dim) {
             return Err(CortexError::InvalidConfig(
                 "attention head dimensions disagree".into(),
             ));
@@ -72,8 +73,9 @@ impl MultiHeadAttention {
         unwrap_compat(Self::try_new(dim, num_heads), "MultiHeadAttention::new")
     }
 
-    /// Fallible constructor: returns [`CortexError::InvalidConfig`] when
-    /// `num_heads` is zero or does not evenly divide `dim`.
+    /// Fallible constructor: returns [`CortexError::ZeroWidth`] when `dim`
+    /// or `num_heads` is zero, and [`CortexError::InvalidConfig`] when
+    /// `num_heads` does not evenly divide `dim`.
     pub fn try_new(dim: usize, num_heads: usize) -> Result<Self> {
         Self::try_new_with_rng(dim, num_heads, &mut rand::rng())
     }

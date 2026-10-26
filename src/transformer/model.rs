@@ -190,8 +190,9 @@ impl TransformerLM {
         unwrap_compat(Self::try_new(cfg), "TransformerLM::new")
     }
 
-    /// Fallible constructor: returns [`CortexError::InvalidConfig`] when
-    /// any model extent is zero or `cfg.num_heads` does not divide `cfg.dim`, and
+    /// Fallible constructor: returns [`CortexError::ZeroWidth`] when
+    /// any model extent is zero, [`CortexError::InvalidConfig`] when
+    /// `cfg.num_heads` does not divide `cfg.dim`, and
     /// [`CortexError::SizeOverflow`] when a configured shape is not
     /// representable.
     pub fn try_new(cfg: TransformerConfig) -> Result<Self> {
@@ -603,6 +604,16 @@ mod error_consistency_tests {
                 "axis {axis}"
             );
         }
+    }
+
+    #[test]
+    fn attention_wire_zero_heads_is_zero_width_like_the_constructor() {
+        let mut attn = MultiHeadAttention::try_new(8, 2).unwrap();
+        attn.num_heads = 0;
+        assert!(matches!(
+            attn.validate_wire(),
+            Err(CortexError::ZeroWidth { axis: 1, .. })
+        ));
     }
 
     #[test]

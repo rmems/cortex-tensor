@@ -59,7 +59,7 @@ impl FeedForward {
         unwrap_compat(Self::try_new(dim, ff_dim), "FeedForward::new")
     }
 
-    /// Fallible constructor: returns [`CortexError::InvalidConfig`] when `dim`
+    /// Fallible constructor: returns [`CortexError::ZeroWidth`] when `dim`
     /// or `ff_dim` is zero, and fails on shape/allocation overflow instead of
     /// panicking.
     pub fn try_new(dim: usize, ff_dim: usize) -> Result<Self> {
@@ -191,9 +191,9 @@ impl TransformerBlock {
         )
     }
 
-    /// Fallible constructor: returns [`CortexError::InvalidConfig`] when
-    /// `num_heads` is zero or does not evenly divide `dim`, or when `ff_dim`
-    /// is zero.
+    /// Fallible constructor: returns [`CortexError::ZeroWidth`] when `dim`,
+    /// `num_heads` or `ff_dim` is zero, and [`CortexError::InvalidConfig`]
+    /// when `num_heads` does not evenly divide `dim`.
     pub fn try_new(dim: usize, num_heads: usize, ff_dim: usize) -> Result<Self> {
         Self::try_new_with_rng(dim, num_heads, ff_dim, &mut rand::rng())
     }
