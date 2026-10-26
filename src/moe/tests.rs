@@ -824,7 +824,7 @@ fn same_failure_class_yields_one_variant_across_layers() {
             assert!(
                 matches!(
                     err,
-                    HybridError::UnsupportedFormat(_) | HybridError::ModelLoad { .. }
+                    HybridError::UnsupportedFormat(msg) if msg.contains("must be greater than 0")
                 ),
                 "{err:?}"
             );
