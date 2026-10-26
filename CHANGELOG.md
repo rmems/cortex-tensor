@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+
+- **SNN step-contract mapping with hybrid-fusion** (RM-2360): new
+  `docs/snn-contract-mapping.md` records the direction decision — each crate
+  keeps its own traits (this crate stays ANN+SNN capable, decision RM-2206;
+  the plan to fold `src/snn` into hybrid-fusion was abandoned unmerged) — the
+  full trait-set mapping (`SnnBackend` ↔ `SpikingNetwork`,
+  `SnnEncoder`/`SnnDecoder` ↔ `SpikeEncoder`/`SpikeDecoder`,
+  `SpikingMoeRouter` ↔ `SpikingExpertRouter`, `NeuromodNetwork` ↔
+  `NeuromodSnn`), every intentional difference (width axes, decoder
+  fallibility and sizing, reset/replay semantics, output shape, adapter
+  boundary), and the #91–#93 fix-parity table. The twin document is
+  hybrid-fusion's ADR 0002; cross-crate parity tests in hybrid-fusion's
+  `smoke/cortex-neuromod` package (which pins this crate past the fix series,
+  RM-2208) run the same seeded inputs through both trait sets in CI. The
+  `snn` module docs and README now point at the mapping. No behavior changes:
+  the #91–#93 fixes (additive spike boost, bounded hidden gain, `step_frozen`
+  parity, never-spiking neuron rejection) were already present on this side.
+
 ### Fixed
 
 - `SpikingMoeRouter::forward` / `forward_frozen` re-check `backend.channels() >= num_experts` on every tick and return `SnnChannelMismatch` before the backend steps. The invariant was only enforced in `new`, but the width is re-read each tick (the backend is reachable through `backend_mut`, and user `SnnBackend` impls need not be constant-width), so a narrowed backend made `decoded[expert_id]` panic with an index out of bounds after consuming a tick. The width is re-read after the step as well, so a backend that shrinks during `step` is rejected with the same error instead of indexing past its readout (RM-1418).

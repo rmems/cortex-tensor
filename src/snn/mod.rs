@@ -24,6 +24,19 @@
 //! [`SpikingMoeRouter`] composes a [`MoeRouter`] (gate scores + deterministic
 //! top-k) with an `SnnBackend`, replacing the removed embedded `SpikingSim`
 //! routing mode.
+//!
+//! # Twin contract in hybrid-fusion
+//!
+//! `hybrid-fusion` owns a parallel step contract for its orchestrator role
+//! (`SpikingNetwork`, `SpikeEncoder` / `SpikeDecoder`, `SpikingExpertRouter`,
+//! `NeuromodSnn`). cortex-tensor keeps this one because the crate is meant to
+//! handle both ANN and SNN (decision RM-2206 / RM-2360; the plan to fold this
+//! surface into hybrid-fusion was abandoned unmerged). The two trait sets are
+//! held in sync by the mapping in `docs/snn-contract-mapping.md` (hybrid-fusion
+//! ADR 0002) and by the cross-crate parity tests in hybrid-fusion's
+//! `smoke/cortex-neuromod` package, which run the same seeded inputs through
+//! both routers and both neuromod adapters in CI and assert every intentional
+//! difference.
 
 use crate::error::{CortexError, Result};
 use crate::moe::MoeRouter;
