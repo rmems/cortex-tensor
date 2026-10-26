@@ -71,3 +71,10 @@ candle-nn = { version = "0.11", optional = true, default-features = false }
 # the 8.6 method names candle calls. Patches apply only when this package
 # is the Cargo root (CI and local builds).
 zip = { path = "compat/zip" }
+
+[dev-dependencies]
+criterion = { version = "0.8.2", default-features = false }
+
+[[bench]]
+name = "reference_backend"
+harness = false
