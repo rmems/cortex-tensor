@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `MoeRouter::forward`, `extract_token_embedding` and `extract_token_embedding_with_options` take `&self` instead of `&mut self`. None of them mutated the router, so existing callers keep compiling and a loaded router can now be shared by reference (RM-2098).
+
 - `MultiHeadAttention::try_forward` scales and causal-softmaxes the scores in place on the `try_batched_matmul` output (one `[nh, seq, seq]` buffer instead of four, with an O(seq) scratch row), and every linear layer in attention and `FeedForward` adds its bias in place via a shared crate-private `add_row_bias` instead of tiling it into a `[seq, dim]` tensor plus a `try_add` copy. Each element sees the same operations in the same order, so outputs are bit-identical; no public API changes. This also removes the `scale`/softmax copies that could still abort on allocation failure (#103, RM-2091).
 - **Init behaviour change (issue 101):** `FeedForward` `w2` (`[ff_dim, dim]`) is now scaled by `1/sqrt(ff_dim)` instead of `1/sqrt(dim)`, so default-constructed FFN output variance stays near the input's instead of growing with `ff_dim / dim`. `Tensor::try_randn` now returns `InvalidConfig` unless `mean` is finite and `std` is finite and >= 0, and uses both Box-Muller outputs per draw without clamping the tails. Random streams differ from earlier releases.
 - `FeedForward` and `TransformerBlock` constructors now return `InvalidConfig` for zero `dim` or `ff_dim` (the panicking `new` variants panic); `Tensor::randn` now panics on non-finite/negative `std`, non-finite `mean`, or sample overflow (issue 101).

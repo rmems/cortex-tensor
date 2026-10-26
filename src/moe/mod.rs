@@ -160,7 +160,7 @@ impl MoeRouter {
         Ok(metadata)
     }
 
-    pub fn forward(&mut self, embedding: &[f32]) -> Result<MoeOutput> {
+    pub fn forward(&self, embedding: &[f32]) -> Result<MoeOutput> {
         if embedding.len() != EMBEDDING_DIM {
             return Err(HybridError::InputLengthMismatch {
                 expected: EMBEDDING_DIM,
@@ -175,13 +175,13 @@ impl MoeRouter {
     }
 
     /// Dequantize the checkpoint token row at native `hidden_size` (no resample, no L2).
-    pub fn extract_token_embedding(&mut self, token_id: usize) -> Result<Vec<f32>> {
+    pub fn extract_token_embedding(&self, token_id: usize) -> Result<Vec<f32>> {
         self.extract_token_embedding_with_options(token_id, ExtractTokenOptions::default())
     }
 
     /// Dequantize a token row, optionally resampling and/or L2-normalizing.
     pub fn extract_token_embedding_with_options(
-        &mut self,
+        &self,
         token_id: usize,
         options: ExtractTokenOptions,
     ) -> Result<Vec<f32>> {
