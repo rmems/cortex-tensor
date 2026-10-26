@@ -98,10 +98,50 @@ fn spiking_forward_routes_and_steps_backend() {
     let mut model = spiking_router(backend);
     let mut embedding = vec![0.0f32; EMBEDDING_DIM];
     let chunk = (EMBEDDING_DIM / 8).max(1);
-    embedding[3 * chunk] = f32::INFINITY;
+    embedding[3 * chunk] = 1.0e6;
     let out = model.forward(&embedding).unwrap();
     assert_eq!(out.selected_experts[0], 3);
     assert_eq!(model.backend().steps, 1);
+}
+
+/// ±Inf gate scores are rejected before the encoder or backend runs.
+#[test]
+fn spiking_forward_rejects_infinite_gate_before_backend_step() {
+    for bad in [f32::INFINITY, f32::NEG_INFINITY] {
+        let mut model = spiking_router(MockBackend::new(8, 0.0));
+        let mut embedding = vec![0.0f32; EMBEDDING_DIM];
+        let chunk = (EMBEDDING_DIM / 8).max(1);
+        embedding[3 * chunk] = bad;
+        match model.forward(&embedding).unwrap_err() {
+            HybridError::SnnInvalidStimulus { channel: 3, value } => assert_eq!(value, bad),
+            other => panic!("expected SnnInvalidStimulus, got {other:?}"),
+        }
+        assert!(matches!(
+            model.forward_frozen(&embedding),
+            Err(HybridError::SnnInvalidStimulus { .. })
+        ));
+        assert_eq!(model.backend().steps, 0);
+        assert_eq!(model.backend().frozen_steps, 0);
+    }
+}
+
+/// A finite gate can still overflow to ±Inf in the encoder (`gain` scaling).
+#[test]
+fn overflowing_encoder_stimulus_is_rejected_before_backend_step() {
+    let router = MoeRouter::load_with_mode("", 8, 2, crate::moe::RoutingMode::DenseSim).unwrap();
+    let mut model = SpikingMoeRouter::new(
+        router,
+        MockBackend::new(8, 0.0),
+        RateEncoder { gain: f32::MAX },
+        SpikeCountDecoder,
+    )
+    .unwrap();
+    let err = model.forward(&[f32::MAX; EMBEDDING_DIM]).unwrap_err();
+    assert!(
+        matches!(err, HybridError::SnnInvalidStimulus { .. }),
+        "got {err:?}"
+    );
+    assert_eq!(model.backend().steps, 0);
 }
 
 /// Issue #89: `SpikingMoeRouter` shares `MoeRouter::gate_scores`, so a
@@ -634,18 +674,19 @@ fn forward_rejects_wrong_length_decoder_readout() {
 /// after the backend tick has been consumed.
 #[test]
 fn spike_boost_saturates_instead_of_overflowing() {
-    // Expert 0 gated at -Inf, expert 1 at 0.0; both spike with activity 1e30.
+    // Expert 0 gated at f32::MIN (±Inf gates are rejected, see
+    // `spiking_forward_rejects_infinite_gate_before_backend_step`), expert 1
+    // at 0.0; both spike with activity 1e30.
     let mut logits = [0.0f32; 8];
-    logits[0] = f32::NEG_INFINITY;
+    logits[0] = f32::MIN;
     let embedding = embedding_with_gate_logits(&logits);
     let mut model = scripted_router(vec![0, 1], ScaledCountDecoder(1e30))
         .with_spike_boost(1e30)
         .unwrap();
     let out = model.forward(&embedding).unwrap();
     assert_eq!(out.selected_experts[0], 1);
-    assert!(!out.selected_experts.contains(&0));
-    assert!(out.expert_weights.iter().all(|w| !w.is_nan()));
-    assert_eq!(out.expert_weights[0], 0.0);
+    // f32::MIN + a saturated f32::MAX bonus is exactly 0.0: finite, not NaN.
+    assert!(out.expert_weights.iter().all(|w| w.is_finite()));
     assert!(out.hidden.iter().all(|h| !h.is_nan()));
 }
 
@@ -790,6 +831,31 @@ fn population_encoder_width_over_u16_is_an_error_not_a_panic() {
     ));
 }
 
+/// axon-encoder 0.6 `expect`s on a `u16` channel index in these two encoders.
+#[cfg(feature = "axon-encoder")]
+#[test]
+fn derivative_and_embedding_rate_encoders_over_u16_inputs_are_errors_not_panics() {
+    let derivative = axon_encoder::prelude::DerivativeEncoder::try_new(vec![0.0; 65_536]).unwrap();
+    let mut adapter = AxonEncoder::new(derivative);
+    let mut jump = vec![0.0f32; 70_000];
+    jump[66_000] = 1.0e6;
+    assert!(matches!(
+        adapter.encode(&jump, 8),
+        Err(HybridError::InvalidConfig(_))
+    ));
+
+    let embedding = axon_encoder::prelude::EmbeddingRateEncoder::try_new(
+        65_536,
+        axon_encoder::prelude::EmbeddingEncoderConfig { v_th: 0.1 },
+    )
+    .expect("construct EmbeddingRateEncoder");
+    let mut adapter = AxonEncoder::new(embedding);
+    assert!(matches!(
+        adapter.encode(&vec![1.0f32; 70_000], 8),
+        Err(HybridError::InvalidConfig(_))
+    ));
+}
+
 #[cfg(feature = "axon-encoder")]
 #[test]
 fn population_encoder_over_u16_fails_closed_before_the_backend_steps() {
@@ -846,7 +912,27 @@ fn neuromod_adapter_steps_and_reports_capabilities() {
     assert_eq!(net.network().global_step, 0);
 
     // Length validation is failure-atomic via neuromod's preflight.
-    assert!(net.step(&[0.5; 4]).is_err());
+    assert!(matches!(
+        net.step(&[0.5; 4]),
+        Err(CortexError::InputLengthMismatch {
+            expected: 8,
+            got: 4
+        })
+    ));
+    assert_eq!(net.network().global_step, 0);
+
+    // Non-finite stimulus maps to a typed error, not `SnnBackend(String)`.
+    let mut bad = [0.5f32; 8];
+    bad[5] = f32::INFINITY;
+    assert!(matches!(
+        net.step(&bad),
+        Err(CortexError::SnnInvalidStimulus { channel: 5, value }) if value == f32::INFINITY
+    ));
+    bad[5] = f32::NEG_INFINITY;
+    assert!(matches!(
+        net.step_frozen(&bad),
+        Err(CortexError::SnnInvalidStimulus { channel: 5, value }) if value == f32::NEG_INFINITY
+    ));
     assert_eq!(net.network().global_step, 0);
 
     // LIF count must equal channel count for the 1:1 output contract.
@@ -1241,4 +1327,25 @@ fn neuromod_adapter_drives_spiking_router_on_every_expert() {
         counts.iter().all(|&c| c > 0),
         "not every expert channel spiked: {counts:?}"
     );
+}
+
+/// RM-2364: a `NeuromodNetwork`-backed router rejects an overflowing gate with
+/// a typed error before any tick, instead of `SnnBackend(String)` afterwards.
+#[cfg(feature = "neuromod")]
+#[test]
+fn neuromod_router_rejects_overflowing_gate_pre_tick_with_typed_error() {
+    let router = MoeRouter::load_with_mode("", 8, 2, crate::moe::RoutingMode::DenseSim).unwrap();
+    let mut model = SpikingMoeRouter::new(
+        router,
+        NeuromodNetwork::new(8, 1, 8).unwrap(),
+        RateEncoder::default(),
+        SpikeCountDecoder,
+    )
+    .unwrap();
+    let err = model.forward(&[f32::MAX; EMBEDDING_DIM]).unwrap_err();
+    assert!(
+        matches!(err, HybridError::SnnInvalidStimulus { .. }),
+        "got {err:?}"
+    );
+    assert_eq!(model.backend().network().global_step, 0);
 }

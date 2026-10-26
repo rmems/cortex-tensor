@@ -25,6 +25,11 @@ use axon_encoder::prelude::PopulationEncoder;
 /// `encode_step` asserts `input.len() * num_neurons` against this same limit.
 const POPULATION_SPIKE_CHANNELS: usize = u16::MAX as usize + 1;
 
+/// Every axon-encoder 0.6 encoder tags spikes with the input index as a `u16`.
+/// `EmbeddingRateEncoder` and `DerivativeEncoder` `expect` that conversion
+/// (the others `break`), so more inputs than this can panic inside `encode_step`.
+const MAX_ENCODER_INPUTS: usize = u16::MAX as usize + 1;
+
 /// [`SnnEncoder`] over any `axon_encoder::Encoder` implementation.
 ///
 /// Generic so callers choose the encoding scheme:
@@ -46,7 +51,10 @@ const POPULATION_SPIKE_CHANNELS: usize = u16::MAX as usize + 1;
 /// checks the product first and returns [`CortexError::InvalidConfig`],
 /// because the [`Encoder`] trait does not report the width. The `'static`
 /// bound exists so that check can see a concrete `PopulationEncoder` inside
-/// this generic impl; stable Rust has no specialization.
+/// this generic impl; stable Rust has no specialization. Every encoder also
+/// gets a universal `ann_signal.len() <= 65,536` check, because
+/// `EmbeddingRateEncoder` and `DerivativeEncoder` panic on an input index past
+/// `u16::MAX`.
 pub struct AxonEncoder<E> {
     encoder: E,
 }
@@ -72,6 +80,12 @@ where
     E: Encoder + 'static,
 {
     fn encode(&mut self, ann_signal: &[f32], channels: usize) -> Result<Vec<f32>> {
+        if ann_signal.len() > MAX_ENCODER_INPUTS {
+            return Err(CortexError::InvalidConfig(format!(
+                "{} inputs exceed the {MAX_ENCODER_INPUTS}-channel u16 id space of axon-encoder spikes",
+                ann_signal.len()
+            )));
+        }
         if let Some(population) = (&self.encoder as &dyn Any).downcast_ref::<PopulationEncoder>() {
             reject_population_width(population.num_neurons(), ann_signal.len())?;
         }
