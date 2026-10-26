@@ -176,9 +176,14 @@ impl Tensor {
     ///
     /// Returns [`CortexError::SizeOverflow`] when the element count or strides
     /// are not representable and [`CortexError::AllocationFailed`] when the
-    /// allocator refuses the buffer; the process is never aborted for a
-    /// shape the machine cannot back. The same holds for every constructor
-    /// and op that allocates a fresh output buffer.
+    /// allocator refuses the reservation, instead of aborting through
+    /// `handle_alloc_error`. The same holds for `try_ones`, `try_full`,
+    /// `try_randn*`, and the ops that allocate a fresh output buffer from a
+    /// shape (`try_matmul`, `try_batched_matmul`, `try_layer_norm`,
+    /// `try_rms_norm`, `try_embedding`, `try_causal_mask`). Ops that copy an
+    /// existing tensor (`try_transpose`, `try_softmax_last`, elementwise and
+    /// activation methods) still allocate infallibly; see
+    /// [`try_reserve_f32`] for that limitation and for the overcommit caveat.
     pub fn try_zeros(shape: &[usize]) -> Result<Self> {
         try_filled(shape, 0.0)
     }
@@ -812,6 +817,11 @@ pub(crate) fn try_compute_strides(shape: &[usize]) -> Result<Vec<usize>> {
 /// still take the whole process down instead of surfacing an `Err`. Every
 /// fresh output buffer sized by a shape goes through this helper so the
 /// failure stays a value.
+///
+/// This guards the *reservation*. On systems with memory overcommit (Linux
+/// default) the reservation can succeed and the kernel may still kill the
+/// process when the pages are first touched; that is outside what a library
+/// can turn into an `Err`.
 ///
 /// Limitation: buffers sized by an existing tensor's storage (`scale`,
 /// elementwise ops, transpose, softmax, the attention head reshapes) still
