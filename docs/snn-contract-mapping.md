@@ -33,7 +33,13 @@ below is the record, and hybrid-fusion's
 runs in both of hybrid-fusion's CI jobs) drives the **same seeded inputs**
 through both trait sets. Agreement is asserted exactly where the contracts
 must agree, and every intentional difference is asserted, so a difference can
-only enter through an edited test that names it.
+only enter through an edited test that names it. **Scope of the gate:** the
+smoke package pins this crate by git rev, so the gate proves agreement with
+*that rev* — a change to this crate's side of the contract is invisible to
+the gate until the pin moves. Any change to a shared contract must therefore
+ship with a mapping-doc update, extended parity tests, and a pin bump in the
+same PR series; a green gate against a stale pin only proves agreement with
+the pinned tree.
 
 ## Mapping
 
@@ -57,7 +63,14 @@ only enter through an edited test that names it.
 | `AxonEncoder` (`axon-encoder` feature) | — | cortex-tensor-only; no counterpart, out of parity scope |
 | `CortexError::{SnnBackend, SnnChannelMismatch, SnnNan, SnnSpikeOutOfRange, SnnDuplicateSpike, SnnReadoutLength, SnnInvalidReadout}` | `HybridError::{SnnStep, ConfigMismatch, NonFinite, SnnSpikeOutOfRange, SnnDuplicateSpike, InputLengthMismatch, SnnInvalidReadout}` | same failure conditions, different vocabularies; both hosts reject NaN before the tick and validate spikes/readouts after it |
 
-## Intentional differences (each asserted by the parity tests)
+## Intentional differences
+
+Each difference below is **asserted by the parity tests where it is
+externally observable** through both crates' public APIs. The one exception
+is the hybrid-fusion half of item 5: its rejection path is `pub(crate)` and
+its public constructors cannot produce a dead network, so the tests assert
+this crate's public rejection and hybrid-fusion's in-crate tests cover its
+own side; this document records the boundary.
 
 1. **Width axes.** Here `channels()` is the whole width contract — the
    adapter requires **one LIF neuron per channel**
@@ -83,11 +96,13 @@ only enter through an edited test that names it.
    bounded gain (selected softmax mass weighted by activity normalized to the
    tick's peak; silent tick falls back to the dense selected mass).
 5. **Adapter boundary.** `NeuromodNetwork::from_network` is public, which is
-   where the never-spiking-neuron rejection (#91) is observable here.
-   hybrid-fusion's equivalent is `pub(crate)` (no `neuromod` type may cross
-   its public API) and its public constructors always seed strictly positive
-   weights. hybrid-fusion's adapter additionally enforces a 64 MiB matrix
-   budget and an exhaustive `StepError` mapping.
+   where the never-spiking-neuron rejection (#91) is observable here — and
+   what the parity tests assert. hybrid-fusion's equivalent is `pub(crate)`
+   (no `neuromod` type may cross its public API) and its public constructors
+   always seed strictly positive weights, so its rejection path and its
+   64 MiB matrix budget are covered by that crate's in-crate tests, not by
+   the cross-crate gate. Its adapter also has an exhaustive `StepError`
+   mapping.
 
 ## Fix parity (#91–#93)
 
@@ -107,9 +122,12 @@ All four fixes exist on **both** sides; the parity tests keep it that way:
   ANN↔SNN step contract or that this crate is ANN-only. cortex-tensor is
   deliberately ANN+SNN capable; that is why this module exists.
 - A change to one contract that should apply to both must now say so: edit
-  both crates, both mapping documents, and extend the parity tests — or
-  explicitly record a new intentional difference in both.
+  both crates, both mapping documents, extend the parity tests, and **bump
+  hybrid-fusion's smoke pin** when this crate's behavior changes — the gate
+  only tests the pinned rev — or explicitly record a new intentional
+  difference in both documents.
 - hybrid-fusion's `smoke/cortex-neuromod` package pins this crate by git rev
   (RM-2208 bumped it past the #91–#93 fix series) and runs the parity tests
   against that pin in CI; keep the pinned rev buildable with the `neuromod`
-  feature.
+  feature. A green gate against a stale pin only proves agreement with the
+  pinned tree, not with this crate's `main`.
