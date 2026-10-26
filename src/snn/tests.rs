@@ -217,6 +217,71 @@ fn forward_rechecks_channel_width_every_tick() {
 }
 
 #[test]
+fn forward_rejects_width_that_shrinks_during_the_step() {
+    // A backend whose width changes *inside* `step` passes the pre-tick
+    // check; the post-step re-read must still reject it with a typed error
+    // instead of indexing a readout shorter than the expert count.
+    struct Shrinking {
+        channels: usize,
+        shrink_to: usize,
+        steps: usize,
+    }
+    impl SnnBackend for Shrinking {
+        fn channels(&self) -> usize {
+            self.channels
+        }
+        fn step(&mut self, stimulus: &[f32]) -> Result<SnnStepOutput> {
+            assert_eq!(stimulus.len(), self.channels);
+            self.steps += 1;
+            self.channels = self.shrink_to;
+            Ok(SnnStepOutput { spikes: Vec::new() })
+        }
+        fn step_frozen(&mut self, stimulus: &[f32]) -> Result<SnnStepOutput> {
+            self.step(stimulus)
+        }
+        fn reset(&mut self) {}
+        fn capabilities(&self) -> SnnCapabilities {
+            SnnCapabilities {
+                backend_name: "shrinking",
+                frozen_evaluation: true,
+                plasticity: false,
+                caller_rng: false,
+                neuromodulation: false,
+            }
+        }
+    }
+
+    let router = MoeRouter::load_with_mode("", 8, 2, crate::moe::RoutingMode::DenseSim).unwrap();
+    let mut model = SpikingMoeRouter::new(
+        router,
+        Shrinking {
+            channels: 8,
+            shrink_to: 4,
+            steps: 0,
+        },
+        RateEncoder::default(),
+        SpikeCountDecoder,
+    )
+    .unwrap();
+    let err = model.forward(&vec![0.1f32; EMBEDDING_DIM]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            HybridError::SnnChannelMismatch {
+                experts: 8,
+                channels: 4
+            }
+        ),
+        "{err}"
+    );
+    // The tick was consumed (documented); the next call fails pre-tick.
+    assert_eq!(model.backend().steps, 1);
+    let err = model.forward(&vec![0.1f32; EMBEDDING_DIM]).unwrap_err();
+    assert!(matches!(err, HybridError::SnnChannelMismatch { .. }));
+    assert_eq!(model.backend().steps, 1);
+}
+
+#[test]
 fn nan_stimulus_rejected_before_backend_step() {
     let router = MoeRouter::load_with_mode("", 8, 2, crate::moe::RoutingMode::DenseSim).unwrap();
     let mut model = SpikingMoeRouter::new(

@@ -315,15 +315,15 @@ where
         // `backend_mut`, and user backends need not be constant-width).
         // Re-check it before the tick so `decoded[expert_id]` below cannot
         // index past the readout, and fail closed without consuming a step.
-        let channels = self.backend.channels();
+        let pre_step_channels = self.backend.channels();
         let num_experts = self.router.num_experts();
-        if channels < num_experts {
+        if pre_step_channels < num_experts {
             return Err(CortexError::SnnChannelMismatch {
                 experts: num_experts,
-                channels,
+                channels: pre_step_channels,
             });
         }
-        let stimulus = self.encoder.encode(&gate_scores, channels)?;
+        let stimulus = self.encoder.encode(&gate_scores, pre_step_channels)?;
         if stimulus.iter().any(|v| v.is_nan()) {
             return Err(CortexError::SnnNan {
                 stage: "encoder stimulus",
@@ -335,9 +335,19 @@ where
             self.backend.step(&stimulus)?
         };
         // Failures past this point have consumed a backend tick; callers that
-        // need a clean epoch should `reset()` after such an error. The
-        // pre-tick width is reused so encode and decode agree even if the
-        // backend changed shape during the step.
+        // need a clean epoch should `reset()` after such an error.
+        //
+        // `channels()` defines the spike-index space, so the post-step width
+        // is the one spikes and the readout must be validated against. A
+        // backend that shrank below the expert count during the step is
+        // rejected here rather than indexed past below.
+        let channels = self.backend.channels();
+        if channels < num_experts {
+            return Err(CortexError::SnnChannelMismatch {
+                experts: num_experts,
+                channels,
+            });
+        }
         validate_spikes(&step_out, channels)?;
         let decoded = self.decoder.decode(&step_out, channels);
         validate_readout(&decoded, channels)?;
