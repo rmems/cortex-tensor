@@ -90,6 +90,13 @@ pub enum CortexError {
     #[error("NaN in SNN {stage}")]
     SnnNan { stage: &'static str },
 
+    /// A gate score or encoded stimulus sample was ±Inf. NaN is reported as
+    /// `SnnNan`. Raised before the backend ticks; `channel` is the expert id
+    /// for a gate score and the backend channel for an encoded sample. Also
+    /// the mapping of `neuromod::StepError::NonFiniteStimulus`.
+    #[error("SNN stimulus at channel {channel} is {value}; expected finite")]
+    SnnInvalidStimulus { channel: usize, value: f32 },
+
     /// A spike addressed a channel the backend width cannot represent.
     #[error("SNN spike at channel {channel} is outside backend width {channels}")]
     SnnSpikeOutOfRange { channel: usize, channels: usize },

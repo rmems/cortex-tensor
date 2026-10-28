@@ -21,7 +21,7 @@ fn test_stub_mode_loads() {
 
 #[test]
 fn test_stub_forward_uniform_weights() {
-    let mut model = stub();
+    let model = stub();
     let out = model.forward(&vec![0.1; EMBEDDING_DIM]).unwrap();
     for weight in &out.expert_weights {
         assert!((*weight - 0.125).abs() < 1e-5);
@@ -37,7 +37,7 @@ fn test_dense_sim_uses_real_gate_weights() {
     let gate_bytes: Vec<u8> = gate.iter().flat_map(|value| value.to_le_bytes()).collect();
     let path = write_temp_file(&build_real_size_checkpoint(gate_bytes), "dense-real");
 
-    let mut model =
+    let model =
         MoeRouter::load_with_mode(path.to_str().unwrap(), 8, 2, RoutingMode::DenseSim).unwrap();
     let mut embedding = vec![0.0f32; EMBEDDING_DIM];
     embedding[0] = 1.0;
@@ -60,7 +60,7 @@ fn dense_sim_selects_expert_by_gguf_ne_order_row() {
     let gate_bytes: Vec<u8> = gate.iter().flat_map(|value| value.to_le_bytes()).collect();
     let path = write_temp_file(&build_real_size_checkpoint(gate_bytes), "dense-row-order");
 
-    let mut model =
+    let model =
         MoeRouter::load_with_mode(path.to_str().unwrap(), 8, 1, RoutingMode::DenseSim).unwrap();
     let mut embedding = vec![0.0f32; EMBEDDING_DIM];
     embedding[0] = 1.0;
@@ -113,7 +113,7 @@ fn load_routes_through_checkpoint_gate_weights_not_stub() {
     let gate_bytes: Vec<u8> = gate.iter().flat_map(|value| value.to_le_bytes()).collect();
     let path = write_temp_file(&build_real_size_checkpoint(gate_bytes), "load-default-mode");
 
-    let mut model = MoeRouter::load(path.to_str().unwrap(), 8, 2).unwrap();
+    let model = MoeRouter::load(path.to_str().unwrap(), 8, 2).unwrap();
     assert!(model.is_loaded());
     assert_eq!(model.routing_mode(), RoutingMode::default());
     assert_eq!(model.routing_mode(), RoutingMode::DenseSim);
@@ -154,7 +154,7 @@ fn load_with_empty_path_still_defaults_to_dense_sim_stub_router() {
 
 #[test]
 fn dense_sim_ranks_raw_gate_scores_before_softmax() {
-    let mut model =
+    let model =
         MoeRouter::load_with_mode("", 8, 2, RoutingMode::DenseSim).expect("stub dense load");
     let mut embedding = vec![0.0f32; EMBEDDING_DIM];
     let chunk = (EMBEDDING_DIM / 8).max(1);
@@ -165,7 +165,7 @@ fn dense_sim_ranks_raw_gate_scores_before_softmax() {
 
 #[test]
 fn dense_sim_rejects_nan_gate_score() {
-    let mut model =
+    let model =
         MoeRouter::load_with_mode("", 8, 2, RoutingMode::DenseSim).expect("stub dense load");
     let mut embedding = vec![0.0f32; EMBEDDING_DIM];
     let chunk = (EMBEDDING_DIM / 8).max(1);
@@ -282,16 +282,16 @@ fn test_adapter_resolve_routing_invalid_orientation() {
     let _ = remove_file(path);
 }
 
-#[test]
-fn extract_token_embedding_returns_native_hidden_size() {
+/// Minimal loaded router over a 32-wide, 4-token F32 token embedding and a
+/// 64-expert F32 gate. Returns the temp path so the caller can clean up.
+fn native_hidden_router(label: &str) -> (PathBuf, MoeRouter) {
     const HIDDEN: usize = 32;
     const VOCAB: usize = 4;
     let mut payload = Vec::with_capacity(HIDDEN * VOCAB * size_of::<f32>());
-    for token in 0..VOCAB {
+    for _token in 0..VOCAB {
         for dim in 0..HIDDEN {
             payload.extend_from_slice(&(dim as f32).to_le_bytes());
         }
-        let _ = token;
     }
     let gate_payload = vec![0u8; HIDDEN * 64 * size_of::<f32>()];
     let checkpoint = build_test_gguf(
@@ -318,10 +318,17 @@ fn extract_token_embedding_returns_native_hidden_size() {
         32,
         HIDDEN,
     );
-    let path = write_temp_file(&checkpoint, "native-hidden-32");
-    let mut router =
+    let path = write_temp_file(&checkpoint, label);
+    let router =
         MoeRouter::load_with_mode(path.to_str().unwrap(), 8, 2, RoutingMode::StubUniform).unwrap();
     assert_eq!(router.hidden_size(), HIDDEN);
+    (path, router)
+}
+
+#[test]
+fn extract_token_embedding_returns_native_hidden_size() {
+    const HIDDEN: usize = 32;
+    let (path, router) = native_hidden_router("native-hidden-32");
 
     let embedding = router.extract_token_embedding(0).unwrap();
     assert_eq!(embedding.len(), HIDDEN);
@@ -340,6 +347,103 @@ fn extract_token_embedding_returns_native_hidden_size() {
     assert!((norm - 1.0).abs() <= 1e-5);
 
     let _ = remove_file(path);
+}
+
+/// RM-2362: `num_experts` sizes the stub's expert weights and synthetic gate
+/// scores, so a value past the ceiling is a typed error instead of a
+/// `Vec::with_capacity(usize::MAX)` capacity-overflow panic (or an
+/// `handle_alloc_error` abort for a merely huge value) at first `forward`.
+#[test]
+fn stub_router_rejects_num_experts_above_cap_in_both_modes() {
+    for mode in [RoutingMode::StubUniform, RoutingMode::DenseSim] {
+        for num_experts in [MAX_STUB_EXPERTS + 1, 1 << 31, usize::MAX] {
+            let err = MoeRouter::load_with_mode("", num_experts, 1, mode)
+                .err()
+                .expect("stub router must reject num_experts above the cap");
+            assert!(
+                matches!(err, HybridError::InvalidConfig(_)),
+                "{mode:?} num_experts={num_experts}: {err:?}"
+            );
+        }
+    }
+}
+
+/// The ceiling itself stays usable, including the `DenseSim` synthetic-score
+/// loop and the `route_top_k` sort that run over the whole expert range.
+#[test]
+fn stub_router_accepts_num_experts_at_the_cap_in_both_modes() {
+    let embedding = vec![0.0f32; EMBEDDING_DIM];
+
+    let uniform =
+        MoeRouter::load_with_mode("", MAX_STUB_EXPERTS, 4, RoutingMode::StubUniform).unwrap();
+    assert_eq!(uniform.num_experts(), MAX_STUB_EXPERTS);
+    let out = uniform.forward(&embedding).unwrap();
+    assert_eq!(out.expert_weights.len(), MAX_STUB_EXPERTS);
+    assert_eq!(out.selected_experts, vec![0, 1, 2, 3]);
+
+    let dense = MoeRouter::load_with_mode("", MAX_STUB_EXPERTS, 4, RoutingMode::DenseSim).unwrap();
+    let out = dense.forward(&embedding).unwrap();
+    assert_eq!(out.expert_weights.len(), MAX_STUB_EXPERTS);
+    assert_eq!(out.selected_experts, vec![0, 1, 2, 3]);
+}
+
+/// RM-2362: resampling allocates `target_dim` values, so `Some(0)` (an empty
+/// row that only failed later as `InputLengthMismatch`) and anything past the
+/// ceiling are rejected before the allocation.
+#[test]
+fn extract_token_embedding_rejects_zero_and_unbounded_target_dim() {
+    let (path, router) = native_hidden_router("target-dim-bounds");
+
+    for target_dim in [0usize, MAX_TARGET_DIM + 1, 1 << 31, usize::MAX] {
+        let err = router
+            .extract_token_embedding_with_options(
+                0,
+                ExtractTokenOptions {
+                    target_dim: Some(target_dim),
+                    l2_normalize: true,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, HybridError::InvalidConfig(_)),
+            "target_dim={target_dim}: {err:?}"
+        );
+    }
+
+    let at_cap = router
+        .extract_token_embedding_with_options(
+            0,
+            ExtractTokenOptions {
+                target_dim: Some(MAX_TARGET_DIM),
+                l2_normalize: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(at_cap.len(), MAX_TARGET_DIM);
+
+    let _ = remove_file(path);
+}
+
+/// Options are validated before router state, so a stub router reports the
+/// bad `target_dim` as `InvalidConfig` and a valid one as `ModelLoad`.
+#[test]
+fn stub_router_rejects_bad_extract_options_before_the_load_check() {
+    let router = stub();
+    let err = router
+        .extract_token_embedding_with_options(
+            0,
+            ExtractTokenOptions {
+                target_dim: Some(0),
+                l2_normalize: false,
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(err, HybridError::InvalidConfig(_)), "{err:?}");
+
+    let err = router
+        .extract_token_embedding_with_options(0, ExtractTokenOptions::for_projector_forward())
+        .unwrap_err();
+    assert!(matches!(err, HybridError::ModelLoad { .. }), "{err:?}");
 }
 
 #[test]
@@ -374,7 +478,7 @@ fn extract_f16_neg_zero_keeps_sign_bit_at_native_length() {
         HIDDEN,
     );
     let path = write_temp_file(&checkpoint, "f16-neg-zero");
-    let mut router =
+    let router =
         MoeRouter::load_with_mode(path.to_str().unwrap(), 8, 1, RoutingMode::StubUniform).unwrap();
     let embedding = router.extract_token_embedding(0).unwrap();
     assert_eq!(embedding.len(), HIDDEN);
@@ -455,10 +559,10 @@ fn gguf_and_safetensors_bind_the_same_normalized_weights() {
 
     let gguf_path = write_temp_file(&gguf, "equiv-gguf");
     let st_path = write_temp_file_with_extension(&safetensors, "equiv-st", "safetensors");
-    let mut gguf_router =
+    let gguf_router =
         MoeRouter::load_with_mode(gguf_path.to_str().unwrap(), 0, 1, RoutingMode::DenseSim)
             .unwrap();
-    let mut st_router =
+    let st_router =
         MoeRouter::load_with_mode(st_path.to_str().unwrap(), 0, 1, RoutingMode::DenseSim).unwrap();
 
     assert_eq!(gguf_router.architecture(), st_router.architecture());
@@ -682,7 +786,7 @@ fn bound_safetensors_router_ignores_later_file_rewrites() {
         ],
     );
     let path = write_temp_file_with_extension(&bytes, "bound-st", "safetensors");
-    let mut router =
+    let router =
         MoeRouter::load_with_mode(path.to_str().unwrap(), 0, 1, RoutingMode::DenseSim).unwrap();
     let row = router.extract_token_embedding(1).unwrap();
     let mut embedding = vec![0.0f32; hidden];
@@ -739,4 +843,149 @@ fn safetensors_bytes(metadata: &[(&str, &str)], tensors: &[(&str, &[usize], &[u8
     out.extend_from_slice(&json);
     out.extend_from_slice(&data);
     out
+}
+
+/// One 32-wide, 4-token checkpoint for the error-class table below.
+fn small_checkpoint(label: &str, hidden: usize, expert_count: u32) -> PathBuf {
+    const VOCAB: usize = 4;
+    let bytes = build_test_gguf_with_expert_count(
+        vec![
+            (
+                "blk.0.ffn_gate_inp.weight",
+                vec![hidden, 64],
+                GGML_TYPE_F32,
+                vec![0u8; hidden * 64 * size_of::<f32>()],
+            ),
+            (
+                "token_embd.weight",
+                vec![hidden, VOCAB],
+                GGML_TYPE_F32,
+                vec![0u8; hidden * VOCAB * size_of::<f32>()],
+            ),
+        ],
+        32,
+        hidden,
+        expert_count,
+    );
+    write_temp_file(&bytes, label)
+}
+
+/// The same bad input must yield one variant per failure class across
+/// attention / FFN / block / LM / MoE (RM-2365).
+#[test]
+fn same_failure_class_yields_one_variant_across_layers() {
+    use crate::tensor::Tensor;
+    use crate::transformer::block::FeedForward;
+    use crate::transformer::{
+        MultiHeadAttention, TransformerBlock, TransformerConfig, TransformerLM,
+    };
+
+    // Class 1: input hidden width != dim -> DimMismatch { axis: 1 }.
+    let wrong = Tensor::zeros(&[2, 9]);
+    let width_errors = [
+        MultiHeadAttention::new(8, 2)
+            .try_forward(&wrong)
+            .unwrap_err(),
+        FeedForward::new(8, 16).try_forward(&wrong).unwrap_err(),
+        TransformerBlock::new(8, 2, 16)
+            .try_forward(&wrong)
+            .unwrap_err(),
+    ];
+    for err in width_errors {
+        assert!(
+            matches!(
+                err,
+                HybridError::DimMismatch {
+                    axis: 1,
+                    expected: 8,
+                    got: 9,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    // Class 2: zero extent -> ZeroWidth.
+    let mut zero_cfg = TransformerConfig::tiny();
+    zero_cfg.ff_dim = 0;
+    let zero_path = small_checkpoint("zero-hidden", 0, 64);
+    let zero_errors = [
+        MultiHeadAttention::try_new(0, 1).err().unwrap(),
+        FeedForward::try_new(0, 4).err().unwrap(),
+        TransformerBlock::try_new(8, 2, 0).err().unwrap(),
+        TransformerLM::try_new(zero_cfg).err().unwrap(),
+        MoeRouter::load_with_mode(zero_path.to_str().unwrap(), 8, 2, RoutingMode::DenseSim)
+            .err()
+            .unwrap(),
+    ];
+    for (i, err) in zero_errors.iter().enumerate() {
+        // The MoE row reports the checkpoint-side equivalent (the metadata
+        // `embedding_length` is zero), which is a load failure, not a panic.
+        if i < 4 {
+            assert!(matches!(err, HybridError::ZeroWidth { .. }), "{err:?}");
+        } else {
+            assert!(
+                matches!(
+                    err,
+                    HybridError::UnsupportedFormat(msg) if msg.contains("must be greater than 0")
+                ),
+                "{err:?}"
+            );
+        }
+    }
+
+    // Class 3: out-of-vocabulary id -> TokenIndex.
+    let mut cfg = TransformerConfig::tiny();
+    cfg.vocab_size = 4;
+    let lm = TransformerLM::try_new(cfg).unwrap();
+    let oov_path = small_checkpoint("oov", 32, 64);
+    let router =
+        MoeRouter::load_with_mode(oov_path.to_str().unwrap(), 8, 2, RoutingMode::StubUniform)
+            .unwrap();
+    for err in [
+        lm.try_forward(&[4]).unwrap_err(),
+        router.extract_token_embedding(4).unwrap_err(),
+    ] {
+        assert!(
+            matches!(
+                err,
+                HybridError::TokenIndex {
+                    index: 4,
+                    vocab_size: 4
+                }
+            ),
+            "{err:?}"
+        );
+    }
+    let _ = remove_file(&zero_path);
+    let _ = remove_file(&oov_path);
+}
+
+#[test]
+fn num_experts_over_checkpoint_is_rejected_with_invalid_config() {
+    // The check runs before the gate decode / embedding copy in
+    // `bind_router_weights`; the variant is unchanged.
+    let path = small_checkpoint("experts-over", 32, 4);
+    let err = MoeRouter::load_with_mode(path.to_str().unwrap(), 5, 1, RoutingMode::DenseSim)
+        .err()
+        .unwrap();
+    assert!(matches!(err, HybridError::InvalidConfig(_)), "{err:?}");
+    let _ = remove_file(&path);
+}
+
+#[test]
+fn expert_count_is_checked_before_binding() {
+    // A binder that would fail with ModelLoad must never run when the count
+    // is over the checkpoint; binding-first order would surface ModelLoad.
+    let bind_fail = || -> Result<()> {
+        Err(HybridError::ModelLoad {
+            path: "p".into(),
+            reason: "bind ran".into(),
+        })
+    };
+    let err = bind_after_expert_count_check(5, 4, bind_fail).unwrap_err();
+    assert!(matches!(err, HybridError::InvalidConfig(_)), "{err:?}");
+    let err = bind_after_expert_count_check(4, 4, bind_fail).unwrap_err();
+    assert!(matches!(err, HybridError::ModelLoad { .. }), "{err:?}");
 }

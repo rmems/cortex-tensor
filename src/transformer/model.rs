@@ -30,19 +30,33 @@ reference_serde!(
 );
 
 impl TransformerConfig {
-    fn validate_wire(&self) -> Result<()> {
-        if self.dim == 0 || self.num_heads == 0 || !self.dim.is_multiple_of(self.num_heads) {
-            return Err(CortexError::InvalidConfig(
-                "invalid transformer head configuration".into(),
-            ));
-        }
-        if self.vocab_size == 0 || self.ff_dim == 0 || self.max_seq_len == 0 {
-            return Err(CortexError::InvalidConfig(
-                "vocab_size, ff_dim, and max_seq_len must be nonzero".into(),
-            ));
+    pub(crate) fn validate_wire(&self) -> Result<()> {
+        self.validate()
+    }
+
+    /// Single validation used by both the constructors and the wire
+    /// (deserialize) path, so the same bad config yields the same error.
+    ///
+    /// Zero extents are [`CortexError::ZeroWidth`] whose `axis` is the
+    /// field's declaration index (`vocab_size` 0, `dim` 1, `num_heads` 2,
+    /// `num_layers` 3, `ff_dim` 4, `max_seq_len` 5). `num_layers == 0` is
+    /// allowed. A `num_heads` that does not divide `dim` is
+    /// [`CortexError::InvalidConfig`].
+    pub fn validate(&self) -> Result<()> {
+        const OP: &str = "TransformerConfig::validate";
+        super::check_head_config(OP, self.dim, self.num_heads, 1, 2)?;
+        for (axis, v) in [
+            (0, self.vocab_size),
+            (4, self.ff_dim),
+            (5, self.max_seq_len),
+        ] {
+            if v == 0 {
+                return Err(CortexError::ZeroWidth { op: OP, axis });
+            }
         }
         Ok(())
     }
+
     /// A small config for testing (~2M params).
     pub fn tiny() -> Self {
         Self {
@@ -144,7 +158,7 @@ reference_serde!(TransformerLM, ModelWire {
 impl TransformerLM {
     pub(crate) fn validate_wire(&self) -> Result<()> {
         let cfg = &self.config;
-        cfg.validate_wire()?;
+        cfg.validate()?;
         expect_shape(&self.tok_embed, &[cfg.vocab_size, cfg.dim])?;
         expect_shape(&self.pos_embed, &[cfg.max_seq_len, cfg.dim])?;
         expect_shape(&self.final_ln_w, &[cfg.dim])?;
@@ -176,8 +190,9 @@ impl TransformerLM {
         unwrap_compat(Self::try_new(cfg), "TransformerLM::new")
     }
 
-    /// Fallible constructor: returns [`CortexError::InvalidConfig`] when
-    /// any model extent is zero or `cfg.num_heads` does not divide `cfg.dim`, and
+    /// Fallible constructor: returns [`CortexError::ZeroWidth`] when
+    /// any model extent is zero, [`CortexError::InvalidConfig`] when
+    /// `cfg.num_heads` does not divide `cfg.dim`, and
     /// [`CortexError::SizeOverflow`] when a configured shape is not
     /// representable.
     pub fn try_new(cfg: TransformerConfig) -> Result<Self> {
@@ -195,16 +210,9 @@ impl TransformerLM {
         cfg: TransformerConfig,
         rng: &mut R,
     ) -> Result<Self> {
-        // Validate the head config up front: with num_layers == 0 the block
-        // iterator below never runs, so per-block validation alone would
-        // accept invalid configs.
-        if cfg.dim == 0 || cfg.num_heads == 0 || !cfg.dim.is_multiple_of(cfg.num_heads) {
-            return Err(CortexError::InvalidConfig(format!(
-                "TransformerLM: dim ({}) and num_heads ({}) must be nonzero, and num_heads must divide dim",
-                cfg.dim, cfg.num_heads
-            )));
-        }
-        cfg.validate_wire()?;
+        // Validate up front: with num_layers == 0 the block iterator below
+        // never runs, so per-block validation alone would accept bad configs.
+        cfg.validate()?;
         let scale = 0.02;
         let blocks: Vec<TransformerBlock> = (0..cfg.num_layers)
             .map(|_| TransformerBlock::try_new_with_rng(cfg.dim, cfg.num_heads, cfg.ff_dim, rng))
@@ -284,9 +292,19 @@ impl TransformerLM {
     /// `u32`), and [`CortexError::TokenIndex`] for out-of-vocabulary ids.
     pub(crate) fn embed_tokens(&self, token_ids: &[u32]) -> Result<Tensor> {
         let seq_len = token_ids.len();
-        if seq_len > self.config.max_seq_len {
+        // `config` and `pos_embed` are both `pub`; bound by the table that is
+        // actually indexed so a raised `max_seq_len` still reports a length
+        // error rather than a misleading `TokenIndex` from the lookup.
+        let max_pos = self
+            .pos_embed
+            .shape()
+            .first()
+            .copied()
+            .unwrap_or(0)
+            .min(self.config.max_seq_len);
+        if seq_len > max_pos {
             return Err(CortexError::InputLengthMismatch {
-                expected: self.config.max_seq_len,
+                expected: max_pos,
                 got: seq_len,
             });
         }
@@ -310,12 +328,18 @@ impl TransformerLM {
     /// public weight fields. Equals [`TransformerConfig::estimated_params`]
     /// for a model built from its config.
     pub fn param_count(&self) -> usize {
-        self.tok_embed.numel()
-            + self.pos_embed.numel()
-            + self.blocks.iter().map(stored_block_params).sum::<usize>()
-            + self.final_ln_w.numel()
-            + self.final_ln_b.numel()
-            + self.lm_head.numel()
+        let blocks = self
+            .blocks
+            .iter()
+            .fold(0usize, |acc, b| acc.saturating_add(stored_block_params(b)));
+        super::sum_numel([
+            &self.tok_embed,
+            &self.pos_embed,
+            &self.final_ln_w,
+            &self.final_ln_b,
+            &self.lm_head,
+        ])
+        .saturating_add(blocks)
     }
 }
 
@@ -430,7 +454,7 @@ mod tests {
         cfg.num_heads = 0;
         assert!(matches!(
             TransformerLM::try_new(cfg),
-            Err(CortexError::InvalidConfig(_))
+            Err(CortexError::ZeroWidth { axis: 2, .. })
         ));
     }
 
@@ -441,7 +465,7 @@ mod tests {
         cfg.num_heads = 0;
         assert!(matches!(
             TransformerLM::try_new(cfg.clone()),
-            Err(CortexError::InvalidConfig(_))
+            Err(CortexError::ZeroWidth { axis: 2, .. })
         ));
         cfg.num_heads = 3;
         assert!(matches!(
@@ -527,5 +551,113 @@ mod tests {
             TransformerLM::try_new(cfg),
             Err(CortexError::SizeOverflow { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod error_consistency_tests {
+    use super::*;
+    use crate::transformer::{MultiHeadAttention, TransformerBlock};
+
+    fn cfg() -> TransformerConfig {
+        TransformerConfig {
+            vocab_size: 4,
+            dim: 8,
+            num_heads: 2,
+            num_layers: 1,
+            ff_dim: 16,
+            max_seq_len: 4,
+        }
+    }
+
+    #[test]
+    fn constructor_and_wire_share_one_config_error() {
+        let mut bad = cfg();
+        bad.num_heads = 3;
+        let ctor = TransformerLM::try_new(bad.clone()).err().unwrap();
+        let wire = bad.validate().unwrap_err();
+        assert_eq!(ctor.to_string(), wire.to_string());
+        assert!(matches!(wire, CortexError::InvalidConfig(_)));
+        // Attention and block constructors report the same text.
+        let attn = MultiHeadAttention::try_new(8, 3).err().unwrap();
+        let block = TransformerBlock::try_new(8, 3, 16).err().unwrap();
+        assert_eq!(attn.to_string(), wire.to_string());
+        assert_eq!(block.to_string(), wire.to_string());
+    }
+
+    #[test]
+    fn zero_extents_are_zero_width() {
+        for (axis, edit) in [
+            (
+                0usize,
+                (|c: &mut TransformerConfig| c.vocab_size = 0) as fn(&mut TransformerConfig),
+            ),
+            (1, |c| c.dim = 0),
+            (2, |c| c.num_heads = 0),
+            (4, |c| c.ff_dim = 0),
+            (5, |c| c.max_seq_len = 0),
+        ] {
+            let mut c = cfg();
+            edit(&mut c);
+            assert!(
+                matches!(c.validate(), Err(CortexError::ZeroWidth { axis: a, .. }) if a == axis),
+                "axis {axis}"
+            );
+        }
+    }
+
+    #[test]
+    fn attention_wire_zero_heads_is_zero_width_like_the_constructor() {
+        let mut attn = MultiHeadAttention::try_new(8, 2).unwrap();
+        attn.num_heads = 0;
+        assert!(matches!(
+            attn.validate_wire(),
+            Err(CortexError::ZeroWidth { axis: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn attention_forward_zero_heads_is_zero_width_like_the_constructor() {
+        let mut attn = MultiHeadAttention::try_new(8, 2).unwrap();
+        attn.num_heads = 0;
+        let x = crate::tensor::Tensor::zeros(&[2, 8]);
+        assert!(matches!(
+            attn.try_forward(&x),
+            Err(CortexError::ZeroWidth { axis: 1, .. })
+        ));
+        // Nonzero heads that do not tile `dim` stay `InvalidConfig`.
+        attn.num_heads = 3;
+        assert!(matches!(
+            attn.try_forward(&x),
+            Err(CortexError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn position_bound_follows_the_table_actually_indexed() {
+        let mut model = TransformerLM::try_new(cfg()).unwrap();
+        model.config.max_seq_len = 100; // pub field raised past the 4-row table
+        let err = model.try_forward(&[0, 1, 2, 3, 0]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CortexError::InputLengthMismatch {
+                    expected: 4,
+                    got: 5
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn param_counts_cannot_overflow_on_pub_fields() {
+        let mut attn = MultiHeadAttention::try_new(8, 2).unwrap();
+        attn.dim = usize::MAX / 2;
+        let _ = attn.param_count();
+        let mut block = TransformerBlock::try_new(8, 2, 16).unwrap();
+        block.dim = usize::MAX / 2;
+        block.attn.dim = usize::MAX / 2;
+        let _ = block.param_count();
     }
 }

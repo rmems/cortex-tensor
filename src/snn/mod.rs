@@ -297,8 +297,8 @@ where
     /// the boost stays monotone; `0.0` makes routing purely ANN-driven while
     /// the backend still steps and shapes the hidden state. For a finite gate
     /// the score `gate + spike_boost * activity` saturates at `f32::MAX`
-    /// instead of overflowing to `+Inf`; a `±Inf` gate keeps its value, so the
-    /// boost never turns a finite score infinite or a `-Inf` gate into NaN.
+    /// instead of overflowing to `+Inf`; gate scores are finite (±Inf is rejected
+    /// with `SnnInvalidStimulus`), so the boost never produces NaN.
     pub fn with_spike_boost(mut self, spike_boost: f32) -> Result<Self> {
         if !spike_boost.is_finite() || spike_boost < 0.0 {
             return Err(CortexError::InvalidConfig(format!(
@@ -317,12 +317,21 @@ where
     /// Shared forward path. `frozen` selects [`SnnBackend::step_frozen`].
     fn forward_impl(&mut self, embedding: &[f32], frozen: bool) -> Result<crate::moe::MoeOutput> {
         let gate_scores = self.router.gate_scores(embedding)?;
-        // Fail closed before the backend consumes a tick.
+        // Fail closed before the encoder or backend consumes a tick.
         crate::moe::reject_nan_routing_scores(&gate_scores)?;
+        // Unlike plain `MoeRouter`, ±Inf is not rankable here: backends such
+        // as neuromod reject non-finite stimulus, and that would surface after
+        // the encoder state had already advanced.
+        if let Some((channel, &value)) = gate_scores
+            .iter()
+            .enumerate()
+            .find(|(_, v)| v.is_infinite())
+        {
+            return Err(CortexError::SnnInvalidStimulus { channel, value });
+        }
 
-        // Encoders may inject NaN stimuli; validate before the backend
-        // consumes a tick so the whole forward stays fail-closed. ±Inf is
-        // rankable per the finite-value policy and passes through.
+        // Encoders may inject non-finite stimuli; validate before the backend
+        // consumes a tick so the whole forward stays fail-closed.
         // The one-channel-per-expert invariant is checked in `new`, but
         // `channels()` is re-read every tick (a backend may be resized through
         // `backend_mut`, and user backends need not be constant-width).
@@ -341,6 +350,10 @@ where
             return Err(CortexError::SnnNan {
                 stage: "encoder stimulus",
             });
+        }
+        if let Some((channel, &value)) = stimulus.iter().enumerate().find(|(_, v)| v.is_infinite())
+        {
+            return Err(CortexError::SnnInvalidStimulus { channel, value });
         }
         let step_out = if frozen {
             self.backend.step_frozen(&stimulus)?
@@ -368,8 +381,8 @@ where
         // Additive boost: monotone in activity for any logit sign (issue #93).
         // Both factors are finite and >= 0, so the bonus is finite once its
         // product is capped; a finite gate plus that bonus is then saturated
-        // at f32::MAX so it can never become +Inf, while a ±Inf gate keeps its
-        // sign (bonus >= 0, so -Inf + bonus cannot be NaN).
+        // at f32::MAX so it can never become +Inf (gates are finite here: ±Inf
+        // is rejected above).
         let routing_scores: Vec<f32> = (0..num_experts)
             .map(|expert_id| {
                 let gate = gate_scores[expert_id];

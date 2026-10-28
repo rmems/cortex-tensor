@@ -84,6 +84,45 @@ pub(crate) fn add_row_bias(
     Ok(())
 }
 
+/// Single head-configuration predicate shared by every constructor and wire
+/// validator, so one bad input yields one error variant and one message.
+///
+/// A zero `dim` or `num_heads` is [`CortexError::ZeroWidth`] (`axis` is the
+/// argument/field position the caller passes in); a non-dividing
+/// `num_heads` is [`CortexError::InvalidConfig`].
+pub(crate) fn check_head_config(
+    op: &'static str,
+    dim: usize,
+    num_heads: usize,
+    dim_axis: usize,
+    heads_axis: usize,
+) -> crate::error::Result<()> {
+    use crate::error::CortexError;
+    if dim == 0 {
+        return Err(CortexError::ZeroWidth { op, axis: dim_axis });
+    }
+    if num_heads == 0 {
+        return Err(CortexError::ZeroWidth {
+            op,
+            axis: heads_axis,
+        });
+    }
+    if !dim.is_multiple_of(num_heads) {
+        return Err(CortexError::InvalidConfig(format!(
+            "num_heads ({num_heads}) must divide dim ({dim})"
+        )));
+    }
+    Ok(())
+}
+
+/// Sum of tensor element counts. Saturates instead of overflowing, so a
+/// parameter count over `pub` fields can never panic or wrap.
+pub(crate) fn sum_numel<'a>(tensors: impl IntoIterator<Item = &'a crate::tensor::Tensor>) -> usize {
+    tensors
+        .into_iter()
+        .fold(0usize, |acc, t| acc.saturating_add(t.numel()))
+}
+
 pub mod attention;
 pub mod block;
 pub mod model;

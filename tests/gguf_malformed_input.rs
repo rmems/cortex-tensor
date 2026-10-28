@@ -207,7 +207,7 @@ fn well_formed() -> Vec<u8> {
 #[test]
 fn well_formed_fixture_loads_and_extracts() {
     let file = TempGguf::write(&well_formed(), "well-formed");
-    let mut router = MoeRouter::load_with_mode(file.as_str(), 0, 0, RoutingMode::DenseSim).unwrap();
+    let router = MoeRouter::load_with_mode(file.as_str(), 0, 0, RoutingMode::DenseSim).unwrap();
     assert_eq!(router.hidden_size(), HIDDEN);
     assert_eq!(router.num_experts(), EXPERTS);
     let row = router.extract_token_embedding(1).unwrap();
@@ -375,7 +375,7 @@ fn misaligned_tensor_offsets_never_reach_unsafe_alignment_assumptions() {
     let file = TempGguf::write(&bytes, "misaligned-offsets");
 
     match MoeRouter::load_with_mode(file.as_str(), 0, 0, RoutingMode::DenseSim) {
-        Ok(mut router) => {
+        Ok(router) => {
             let row = router.extract_token_embedding(3).unwrap();
             let expected: Vec<f32> = (3 * HIDDEN..4 * HIDDEN).map(|i| i as f32).collect();
             assert_eq!(

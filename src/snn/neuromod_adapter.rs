@@ -174,7 +174,24 @@ impl NeuromodNetwork {
     ) -> Result<SnnStepOutput> {
         result
             .map(|spikes| SnnStepOutput { spikes })
-            .map_err(|err| CortexError::SnnBackend(err.to_string()))
+            .map_err(|err| match err {
+                neuromod::StepError::InputLenMismatch { expected, got } => {
+                    CortexError::InputLengthMismatch { expected, got }
+                }
+                neuromod::StepError::NonFiniteStimulus { index, class } => {
+                    // neuromod reports only the class, not the sample.
+                    let value = match class {
+                        neuromod::NonFiniteClass::PosInfinity => f32::INFINITY,
+                        neuromod::NonFiniteClass::NegInfinity => f32::NEG_INFINITY,
+                        _ => f32::NAN,
+                    };
+                    CortexError::SnnInvalidStimulus {
+                        channel: index,
+                        value,
+                    }
+                }
+                other => CortexError::SnnBackend(other.to_string()),
+            })
     }
 }
 
