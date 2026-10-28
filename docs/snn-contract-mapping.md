@@ -61,7 +61,7 @@ the pinned tree.
 | `MoeOutput { expert_weights, selected_experts, hidden: Vec<f32> }` | `SpikingRouteOutput { route, fired_neurons, num_neurons, hidden_gain: f32 }` | same boosted softmax weights and selection; scaled hidden state here, scalar gain there (plus entropy and fired IDs there) |
 | `NeuromodNetwork` (`new(num_lif, num_izh, num_channels)`, `from_network`, `with_seed`) | `NeuromodSnn` (`with_seed(channels, neurons, seed)`, `identity_wired(channels, seed)`, `reseed`) | both wrap `neuromod` 0.7; wiring/reset differences below |
 | `AxonEncoder` (`axon-encoder` feature) | — | cortex-tensor-only; no counterpart, out of parity scope |
-| `CortexError::{SnnBackend, SnnChannelMismatch, SnnNan, SnnInvalidStimulus, SnnSpikeOutOfRange, SnnDuplicateSpike, SnnReadoutLength, SnnInvalidReadout}` | `HybridError::{SnnStep, ConfigMismatch, NonFinite, SnnSpikeOutOfRange, SnnDuplicateSpike, InputLengthMismatch, SnnInvalidReadout}` | same failure conditions except the ±Inf stimulus policy (item 6); both hosts reject NaN before the tick and validate spikes/readouts after it; both adapters map `neuromod::StepError` structurally — here `InputLenMismatch` → `InputLengthMismatch` and `NonFiniteStimulus` → `SnnInvalidStimulus`, the rest stay `SnnBackend` (RM-2364) |
+| `CortexError::{SnnBackend, SnnChannelMismatch, SnnNan, SnnInvalidStimulus, SnnSpikeOutOfRange, SnnDuplicateSpike, InputLengthMismatch, SnnReadoutLength, SnnInvalidReadout}` | `HybridError::{SnnStep, ConfigMismatch, NonFinite, SnnSpikeOutOfRange, SnnDuplicateSpike, InputLengthMismatch, SnnInvalidReadout}` | same failure conditions except the ±Inf stimulus policy (item 6); both hosts reject NaN before the tick and validate spikes/readouts after it. `neuromod::StepError` mapping: here `InputLenMismatch` → `InputLengthMismatch` and `NonFiniteStimulus` → `SnnInvalidStimulus`, the rest stay `SnnBackend` (RM-2364); hybrid-fusion maps `InputLenMismatch` → `InputLengthMismatch` and every other variant, `NonFiniteStimulus` included, to `SnnStep` |
 
 ## Intentional differences
 
@@ -102,8 +102,10 @@ own side; this document records the boundary.
    always seed strictly positive weights, so its rejection path and its
    64 MiB matrix budget are covered by that crate's in-crate tests, not by
    the cross-crate gate. Its adapter maps `neuromod::StepError`
-   exhaustively to typed `HybridError` variants; this crate's adapter maps
-   the two structural cases and keeps the rest in `SnnBackend` (RM-2364).
+   exhaustively (`InputLenMismatch` → `InputLengthMismatch`, every other
+   variant → `SnnStep`); this crate's adapter maps the two structural
+   cases (`InputLenMismatch` → `InputLengthMismatch`, `NonFiniteStimulus`
+   → `SnnInvalidStimulus`) and keeps the rest in `SnnBackend` (RM-2364).
 
 6. **±Inf stimulus policy.** `SpikingMoeRouter::forward` / `forward_frozen`
    reject a ±Inf gate score, or a ±Inf encoded stimulus sample, with
@@ -126,7 +128,7 @@ All four fixes exist on **both** sides; the parity tests keep it that way:
 | #91 never-spiking channel rejection + drivable identity wiring | `NeuromodNetwork::checked` / `new` (PR #131) | `NeuromodSnn::from_network` (`pub(crate)`) + seeded constructors (PR #65) |
 | #92 real frozen step + truthful `caller_rng` | `step_frozen_with_rng`, `with_seed`/`set_seed`, `caller_rng` reflects the installed seed (PR #131) | `step_frozen_with_rng`, always-owned seeded RNG, `frozen_evaluation` + `caller_rng` features (PR #65) |
 | #92-style held-out never runs the learning path | trait contract: backends without a frozen path may delegate | trait default fails closed + host capability gate |
-| #93 additive spike boost on gate logits (`gate + spike_boost × activity`, saturating at `f32::MAX`, `±Inf` gates keep their value) | `SpikingMoeRouter` | `SpikingExpertRouter` (PR #65) |
+| #93 additive spike boost on gate logits (`gate + spike_boost × activity`, saturating at `f32::MAX`, `±Inf` gates keep their value — though RM-2364 now rejects a ±Inf *gate score* in this crate's router before the boost runs, item 6) | `SpikingMoeRouter` | `SpikingExpertRouter` (PR #65) |
 | #93 bounded hidden gain (activity normalized to the tick peak, silent-tick fallback) | same formula | same formula |
 
 ## Consequences
