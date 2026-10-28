@@ -45,10 +45,14 @@ reference_serde!(
 
 impl MultiHeadAttention {
     pub(super) fn validate_wire(&self) -> Result<()> {
-        if self.dim == 0
-            || self.num_heads == 0
-            || self.num_heads.checked_mul(self.head_dim) != Some(self.dim)
-        {
+        super::check_head_config(
+            "MultiHeadAttention::validate_wire",
+            self.dim,
+            self.num_heads,
+            0,
+            1,
+        )?;
+        if self.num_heads.checked_mul(self.head_dim) != Some(self.dim) {
             return Err(CortexError::InvalidConfig(
                 "attention head dimensions disagree".into(),
             ));
@@ -69,8 +73,9 @@ impl MultiHeadAttention {
         unwrap_compat(Self::try_new(dim, num_heads), "MultiHeadAttention::new")
     }
 
-    /// Fallible constructor: returns [`CortexError::InvalidConfig`] when
-    /// `num_heads` is zero or does not evenly divide `dim`.
+    /// Fallible constructor: returns [`CortexError::ZeroWidth`] when `dim`
+    /// or `num_heads` is zero, and [`CortexError::InvalidConfig`] when
+    /// `num_heads` does not evenly divide `dim`.
     pub fn try_new(dim: usize, num_heads: usize) -> Result<Self> {
         Self::try_new_with_rng(dim, num_heads, &mut rand::rng())
     }
@@ -87,11 +92,7 @@ impl MultiHeadAttention {
         num_heads: usize,
         rng: &mut R,
     ) -> Result<Self> {
-        if dim == 0 || num_heads == 0 || !dim.is_multiple_of(num_heads) {
-            return Err(CortexError::InvalidConfig(format!(
-                "MultiHeadAttention: dim ({dim}) and num_heads ({num_heads}) must be nonzero, and num_heads must divide dim"
-            )));
-        }
+        super::check_head_config("MultiHeadAttention::try_new", dim, num_heads, 0, 1)?;
         let head_dim = dim / num_heads;
         let scale = 1.0 / (dim as f32).sqrt();
         Ok(Self {
@@ -142,7 +143,14 @@ impl MultiHeadAttention {
         // `nh * hd == dim` and `[1, dim]` bias invariants that `try_new`
         // establishes. The head-reshape helpers below index on those
         // invariants, so check them before any slicing.
-        if nh == 0 || nh.checked_mul(hd) != Some(self.dim) {
+        if nh == 0 {
+            // Same variant as `try_new` and `validate_wire` for zero heads.
+            return Err(CortexError::ZeroWidth {
+                op: "MultiHeadAttention::try_forward",
+                axis: 1,
+            });
+        }
+        if nh.checked_mul(hd) != Some(self.dim) {
             return Err(CortexError::InvalidConfig(format!(
                 "MultiHeadAttention: num_heads ({nh}) * head_dim ({hd}) != dim ({})",
                 self.dim
@@ -198,8 +206,13 @@ impl MultiHeadAttention {
     }
 
     /// Returns flattened parameter count for this layer.
+    ///
+    /// Summed from the `numel()` of the stored tensors (saturating), so it
+    /// tracks the `pub` weight fields and cannot overflow.
     pub fn param_count(&self) -> usize {
-        4 * self.dim * self.dim + 4 * self.dim
+        super::sum_numel([
+            &self.wq, &self.wb_q, &self.wk, &self.wb_k, &self.wv, &self.wb_v, &self.wo, &self.wb_o,
+        ])
     }
 }
 

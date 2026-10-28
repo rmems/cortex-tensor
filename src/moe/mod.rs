@@ -70,6 +70,21 @@ pub struct MoeOutput {
     pub hidden: Vec<f32>,
 }
 
+/// Rejects `num_experts` beyond the checkpoint before running `bind`, which
+/// decodes the gate and copies the whole token-embedding payload.
+fn bind_after_expert_count_check<T>(
+    effective_num_experts: usize,
+    checkpoint_experts: usize,
+    bind: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if effective_num_experts > checkpoint_experts {
+        return Err(HybridError::InvalidConfig(format!(
+            "num_experts ({effective_num_experts}) exceeds checkpoint expert_count ({checkpoint_experts})"
+        )));
+    }
+    bind()
+}
+
 impl MoeRouter {
     /// Load a checkpoint and route through its gate weights.
     ///
@@ -92,22 +107,19 @@ impl MoeRouter {
         }
 
         let (metadata, mut checkpoint, adapter) = Self::probe_and_map(model_path)?;
-        let bound_gate = checkpoint.bind_router_weights(
-            &adapter.token_embedding_tensor,
-            &adapter.routing_tensor,
-            model_path,
-        )?;
         let effective_num_experts = if num_experts == 0 {
             metadata.num_experts
         } else {
             num_experts
         };
-        if effective_num_experts > metadata.num_experts {
-            return Err(HybridError::InvalidConfig(format!(
-                "num_experts ({effective_num_experts}) exceeds checkpoint expert_count ({})",
-                metadata.num_experts
-            )));
-        }
+        let bound_gate =
+            bind_after_expert_count_check(effective_num_experts, metadata.num_experts, || {
+                checkpoint.bind_router_weights(
+                    &adapter.token_embedding_tensor,
+                    &adapter.routing_tensor,
+                    model_path,
+                )
+            })?;
 
         let effective_top_k = if top_k == 0 {
             metadata.expert_used_count.max(1).min(effective_num_experts)

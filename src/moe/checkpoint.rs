@@ -193,9 +193,9 @@ impl MappedCheckpoint {
         let view = self.tensor_view(tensor_name, path)?;
         let (vocab, hidden) = token_embedding_dims(&view, tensor_name, path)?;
         if token_id >= vocab {
-            return Err(HybridError::InputLengthMismatch {
-                expected: vocab,
-                got: token_id,
+            return Err(HybridError::TokenIndex {
+                index: token_id,
+                vocab_size: vocab,
             });
         }
         let bytes = self.payload(tensor_name, path)?;
@@ -501,12 +501,35 @@ fn map_parser_error(err: ParserError) -> HybridError {
             reason: source.to_string(),
         },
         ParserError::InvalidLayout { path, reason } => HybridError::ModelLoad { path, reason },
+        // The four variants below carry the offending file's `path`; keep it
+        // structured like `Io` / `InvalidLayout` so a caller matching
+        // `ModelLoad` to detect a bad file sees them too.
+        ParserError::LimitExceeded {
+            path,
+            limit,
+            declared,
+            budget,
+        } => HybridError::ModelLoad {
+            path,
+            reason: format!("parse limit {limit} exceeded: declared {declared}, budget {budget}"),
+        },
+        ParserError::HostSizeOverflow { path, field, value } => HybridError::ModelLoad {
+            path,
+            reason: format!("field {field} value {value} does not fit usize"),
+        },
+        ParserError::DuplicateTensorOwnership { name, shards, path } => HybridError::ModelLoad {
+            path,
+            reason: format!(
+                "duplicate tensor ownership for '{name}' across shards {}",
+                shards.join(", ")
+            ),
+        },
+        ParserError::MissingShard { shard, path } => HybridError::ModelLoad {
+            path,
+            reason: format!("missing shard '{shard}'"),
+        },
         ParserError::UnsupportedFormat { .. }
         | ParserError::FeatureDisabled { .. }
-        | ParserError::LimitExceeded { .. }
-        | ParserError::HostSizeOverflow { .. }
-        | ParserError::DuplicateTensorOwnership { .. }
-        | ParserError::MissingShard { .. }
         | ParserError::ExpertOutOfRange { .. } => HybridError::UnsupportedFormat(err.to_string()),
     }
 }
@@ -730,7 +753,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             err,
-            HybridError::InputLengthMismatch { expected, got } if expected == d1 && got == d1
+            HybridError::TokenIndex { index, vocab_size } if index == d1 && vocab_size == d1
         ));
         let _ = std::fs::remove_file(path);
     }
@@ -824,7 +847,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             err,
-            HybridError::InputLengthMismatch { expected, got } if expected == vocab && got == vocab
+            HybridError::TokenIndex { index, vocab_size } if index == vocab && vocab_size == vocab
         ));
 
         // The bound-router copy serves the same rows from the retained payload.
@@ -902,7 +925,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             err,
-            HybridError::InputLengthMismatch { expected, got } if expected == vocab && got == 5
+            HybridError::TokenIndex { index, vocab_size } if vocab_size == vocab && index == 5
         ));
         let _ = std::fs::remove_file(path);
     }
@@ -939,7 +962,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             err,
-            HybridError::InputLengthMismatch { expected, got } if expected == 2 && got == 2
+            HybridError::TokenIndex { index, vocab_size } if index == 2 && vocab_size == 2
         ));
         let _ = std::fs::remove_file(path);
     }
@@ -1139,5 +1162,46 @@ mod tests {
         }
         out.extend_from_slice(&payload);
         out
+    }
+}
+
+#[cfg(test)]
+mod parser_error_mapping_tests {
+    use super::*;
+    use engram_parser::{HostSizeField, ParseLimitKind};
+
+    #[test]
+    fn path_carrying_parser_errors_surface_as_model_load() {
+        let errs = [
+            ParserError::LimitExceeded {
+                path: "m.gguf".into(),
+                limit: ParseLimitKind::KvCount,
+                declared: 10,
+                budget: 5,
+            },
+            ParserError::HostSizeOverflow {
+                path: "m.gguf".into(),
+                field: HostSizeField::KvCount,
+                value: u64::MAX,
+            },
+            ParserError::DuplicateTensorOwnership {
+                name: "t".into(),
+                shards: vec!["a".into(), "b".into()],
+                path: "m.gguf".into(),
+            },
+            ParserError::MissingShard {
+                shard: "s".into(),
+                path: "m.gguf".into(),
+            },
+        ];
+        for err in errs {
+            match map_parser_error(err) {
+                HybridError::ModelLoad { path, reason } => {
+                    assert_eq!(path, "m.gguf");
+                    assert!(!reason.is_empty());
+                }
+                other => panic!("expected ModelLoad, got {other:?}"),
+            }
+        }
     }
 }

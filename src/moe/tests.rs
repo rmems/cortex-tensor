@@ -740,3 +740,148 @@ fn safetensors_bytes(metadata: &[(&str, &str)], tensors: &[(&str, &[usize], &[u8
     out.extend_from_slice(&data);
     out
 }
+
+/// One 32-wide, 4-token checkpoint for the error-class table below.
+fn small_checkpoint(label: &str, hidden: usize, expert_count: u32) -> PathBuf {
+    const VOCAB: usize = 4;
+    let bytes = build_test_gguf_with_expert_count(
+        vec![
+            (
+                "blk.0.ffn_gate_inp.weight",
+                vec![hidden, 64],
+                GGML_TYPE_F32,
+                vec![0u8; hidden * 64 * size_of::<f32>()],
+            ),
+            (
+                "token_embd.weight",
+                vec![hidden, VOCAB],
+                GGML_TYPE_F32,
+                vec![0u8; hidden * VOCAB * size_of::<f32>()],
+            ),
+        ],
+        32,
+        hidden,
+        expert_count,
+    );
+    write_temp_file(&bytes, label)
+}
+
+/// The same bad input must yield one variant per failure class across
+/// attention / FFN / block / LM / MoE (RM-2365).
+#[test]
+fn same_failure_class_yields_one_variant_across_layers() {
+    use crate::tensor::Tensor;
+    use crate::transformer::block::FeedForward;
+    use crate::transformer::{
+        MultiHeadAttention, TransformerBlock, TransformerConfig, TransformerLM,
+    };
+
+    // Class 1: input hidden width != dim -> DimMismatch { axis: 1 }.
+    let wrong = Tensor::zeros(&[2, 9]);
+    let width_errors = [
+        MultiHeadAttention::new(8, 2)
+            .try_forward(&wrong)
+            .unwrap_err(),
+        FeedForward::new(8, 16).try_forward(&wrong).unwrap_err(),
+        TransformerBlock::new(8, 2, 16)
+            .try_forward(&wrong)
+            .unwrap_err(),
+    ];
+    for err in width_errors {
+        assert!(
+            matches!(
+                err,
+                HybridError::DimMismatch {
+                    axis: 1,
+                    expected: 8,
+                    got: 9,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    // Class 2: zero extent -> ZeroWidth.
+    let mut zero_cfg = TransformerConfig::tiny();
+    zero_cfg.ff_dim = 0;
+    let zero_path = small_checkpoint("zero-hidden", 0, 64);
+    let zero_errors = [
+        MultiHeadAttention::try_new(0, 1).err().unwrap(),
+        FeedForward::try_new(0, 4).err().unwrap(),
+        TransformerBlock::try_new(8, 2, 0).err().unwrap(),
+        TransformerLM::try_new(zero_cfg).err().unwrap(),
+        MoeRouter::load_with_mode(zero_path.to_str().unwrap(), 8, 2, RoutingMode::DenseSim)
+            .err()
+            .unwrap(),
+    ];
+    for (i, err) in zero_errors.iter().enumerate() {
+        // The MoE row reports the checkpoint-side equivalent (the metadata
+        // `embedding_length` is zero), which is a load failure, not a panic.
+        if i < 4 {
+            assert!(matches!(err, HybridError::ZeroWidth { .. }), "{err:?}");
+        } else {
+            assert!(
+                matches!(
+                    err,
+                    HybridError::UnsupportedFormat(msg) if msg.contains("must be greater than 0")
+                ),
+                "{err:?}"
+            );
+        }
+    }
+
+    // Class 3: out-of-vocabulary id -> TokenIndex.
+    let mut cfg = TransformerConfig::tiny();
+    cfg.vocab_size = 4;
+    let lm = TransformerLM::try_new(cfg).unwrap();
+    let oov_path = small_checkpoint("oov", 32, 64);
+    let router =
+        MoeRouter::load_with_mode(oov_path.to_str().unwrap(), 8, 2, RoutingMode::StubUniform)
+            .unwrap();
+    for err in [
+        lm.try_forward(&[4]).unwrap_err(),
+        router.extract_token_embedding(4).unwrap_err(),
+    ] {
+        assert!(
+            matches!(
+                err,
+                HybridError::TokenIndex {
+                    index: 4,
+                    vocab_size: 4
+                }
+            ),
+            "{err:?}"
+        );
+    }
+    let _ = remove_file(&zero_path);
+    let _ = remove_file(&oov_path);
+}
+
+#[test]
+fn num_experts_over_checkpoint_is_rejected_with_invalid_config() {
+    // The check runs before the gate decode / embedding copy in
+    // `bind_router_weights`; the variant is unchanged.
+    let path = small_checkpoint("experts-over", 32, 4);
+    let err = MoeRouter::load_with_mode(path.to_str().unwrap(), 5, 1, RoutingMode::DenseSim)
+        .err()
+        .unwrap();
+    assert!(matches!(err, HybridError::InvalidConfig(_)), "{err:?}");
+    let _ = remove_file(&path);
+}
+
+#[test]
+fn expert_count_is_checked_before_binding() {
+    // A binder that would fail with ModelLoad must never run when the count
+    // is over the checkpoint; binding-first order would surface ModelLoad.
+    let bind_fail = || -> Result<()> {
+        Err(HybridError::ModelLoad {
+            path: "p".into(),
+            reason: "bind ran".into(),
+        })
+    };
+    let err = bind_after_expert_count_check(5, 4, bind_fail).unwrap_err();
+    assert!(matches!(err, HybridError::InvalidConfig(_)), "{err:?}");
+    let err = bind_after_expert_count_check(4, 4, bind_fail).unwrap_err();
+    assert!(matches!(err, HybridError::ModelLoad { .. }), "{err:?}");
+}
