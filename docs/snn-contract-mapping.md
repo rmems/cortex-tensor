@@ -61,7 +61,7 @@ the pinned tree.
 | `MoeOutput { expert_weights, selected_experts, hidden: Vec<f32> }` | `SpikingRouteOutput { route, fired_neurons, num_neurons, hidden_gain: f32 }` | same boosted softmax weights and selection; scaled hidden state here, scalar gain there (plus entropy and fired IDs there) |
 | `NeuromodNetwork` (`new(num_lif, num_izh, num_channels)`, `from_network`, `with_seed`) | `NeuromodSnn` (`with_seed(channels, neurons, seed)`, `identity_wired(channels, seed)`, `reseed`) | both wrap `neuromod` 0.7; wiring/reset differences below |
 | `AxonEncoder` (`axon-encoder` feature) | — | cortex-tensor-only; no counterpart, out of parity scope |
-| `CortexError::{SnnBackend, SnnChannelMismatch, SnnNan, SnnSpikeOutOfRange, SnnDuplicateSpike, SnnReadoutLength, SnnInvalidReadout}` | `HybridError::{SnnStep, ConfigMismatch, NonFinite, SnnSpikeOutOfRange, SnnDuplicateSpike, InputLengthMismatch, SnnInvalidReadout}` | same failure conditions, different vocabularies; both hosts reject NaN before the tick and validate spikes/readouts after it |
+| `CortexError::{SnnBackend, SnnChannelMismatch, SnnNan, SnnInvalidStimulus, SnnSpikeOutOfRange, SnnDuplicateSpike, SnnReadoutLength, SnnInvalidReadout}` | `HybridError::{SnnStep, ConfigMismatch, NonFinite, SnnSpikeOutOfRange, SnnDuplicateSpike, InputLengthMismatch, SnnInvalidReadout}` | same failure conditions except the ±Inf stimulus policy (item 6); both hosts reject NaN before the tick and validate spikes/readouts after it; both adapters map `neuromod::StepError` structurally — here `InputLenMismatch` → `InputLengthMismatch` and `NonFiniteStimulus` → `SnnInvalidStimulus`, the rest stay `SnnBackend` (RM-2364) |
 
 ## Intentional differences
 
@@ -101,8 +101,21 @@ own side; this document records the boundary.
    (no `neuromod` type may cross its public API) and its public constructors
    always seed strictly positive weights, so its rejection path and its
    64 MiB matrix budget are covered by that crate's in-crate tests, not by
-   the cross-crate gate. Its adapter also has an exhaustive `StepError`
-   mapping.
+   the cross-crate gate. Its adapter maps `neuromod::StepError`
+   exhaustively to typed `HybridError` variants; this crate's adapter maps
+   the two structural cases and keeps the rest in `SnnBackend` (RM-2364).
+
+6. **±Inf stimulus policy.** `SpikingMoeRouter::forward` / `forward_frozen`
+   reject a ±Inf gate score, or a ±Inf encoded stimulus sample, with
+   `SnnInvalidStimulus` **before** the encoder or backend runs; NaN keeps
+   `NanRoutingScore` / `SnnNan` (RM-2364, #155). `SpikingExpertRouter`
+   ranks ±Inf gate logits — its finite-value policy rejects only NaN
+   pre-tick — and passes the encoded ±Inf stimulus to the backend, whose
+   own preflight rejects it (`neuromod::StepError::NonFiniteStimulus`
+   mapped to a `HybridError` variant) after the encoder has advanced. Both
+   hosts fail closed on ±Inf; they differ in the rejecting layer (router
+   preflight here, backend preflight there), in the error variant, and in
+   whether the encoder consumes a tick. The parity tests assert all three.
 
 ## Fix parity (#91–#93)
 

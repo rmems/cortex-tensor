@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `snn` module docs and README now point at the mapping. No behavior changes:
   the #91–#93 fixes (additive spike boost, bounded hidden gain, `step_frozen`
   parity, never-spiking neuron rejection) were already present on this side.
+  The mapping also folds in RM-2364 / #155: `NeuromodNetwork` now maps
+  `neuromod::StepError` structurally (`InputLenMismatch` → `InputLengthMismatch`,
+  `NonFiniteStimulus` → the new `CortexError::SnnInvalidStimulus`), and the ±Inf
+  pre-tick rejection is recorded as intentional difference 6 (hybrid-fusion's
+  router ranks ±Inf and lets the backend preflight reject it).
 
 ### Fixed
 
