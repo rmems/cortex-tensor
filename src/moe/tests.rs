@@ -282,16 +282,16 @@ fn test_adapter_resolve_routing_invalid_orientation() {
     let _ = remove_file(path);
 }
 
-#[test]
-fn extract_token_embedding_returns_native_hidden_size() {
+/// Minimal loaded router over a 32-wide, 4-token F32 token embedding and a
+/// 64-expert F32 gate. Returns the temp path so the caller can clean up.
+fn native_hidden_router(label: &str) -> (PathBuf, MoeRouter) {
     const HIDDEN: usize = 32;
     const VOCAB: usize = 4;
     let mut payload = Vec::with_capacity(HIDDEN * VOCAB * size_of::<f32>());
-    for token in 0..VOCAB {
+    for _token in 0..VOCAB {
         for dim in 0..HIDDEN {
             payload.extend_from_slice(&(dim as f32).to_le_bytes());
         }
-        let _ = token;
     }
     let gate_payload = vec![0u8; HIDDEN * 64 * size_of::<f32>()];
     let checkpoint = build_test_gguf(
@@ -318,10 +318,17 @@ fn extract_token_embedding_returns_native_hidden_size() {
         32,
         HIDDEN,
     );
-    let path = write_temp_file(&checkpoint, "native-hidden-32");
+    let path = write_temp_file(&checkpoint, label);
     let router =
         MoeRouter::load_with_mode(path.to_str().unwrap(), 8, 2, RoutingMode::StubUniform).unwrap();
     assert_eq!(router.hidden_size(), HIDDEN);
+    (path, router)
+}
+
+#[test]
+fn extract_token_embedding_returns_native_hidden_size() {
+    const HIDDEN: usize = 32;
+    let (path, router) = native_hidden_router("native-hidden-32");
 
     let embedding = router.extract_token_embedding(0).unwrap();
     assert_eq!(embedding.len(), HIDDEN);
@@ -340,6 +347,103 @@ fn extract_token_embedding_returns_native_hidden_size() {
     assert!((norm - 1.0).abs() <= 1e-5);
 
     let _ = remove_file(path);
+}
+
+/// RM-2362: `num_experts` sizes the stub's expert weights and synthetic gate
+/// scores, so a value past the ceiling is a typed error instead of a
+/// `Vec::with_capacity(usize::MAX)` capacity-overflow panic (or an
+/// `handle_alloc_error` abort for a merely huge value) at first `forward`.
+#[test]
+fn stub_router_rejects_num_experts_above_cap_in_both_modes() {
+    for mode in [RoutingMode::StubUniform, RoutingMode::DenseSim] {
+        for num_experts in [MAX_STUB_EXPERTS + 1, 1 << 31, usize::MAX] {
+            let err = MoeRouter::load_with_mode("", num_experts, 1, mode)
+                .err()
+                .expect("stub router must reject num_experts above the cap");
+            assert!(
+                matches!(err, HybridError::InvalidConfig(_)),
+                "{mode:?} num_experts={num_experts}: {err:?}"
+            );
+        }
+    }
+}
+
+/// The ceiling itself stays usable, including the `DenseSim` synthetic-score
+/// loop and the `route_top_k` sort that run over the whole expert range.
+#[test]
+fn stub_router_accepts_num_experts_at_the_cap_in_both_modes() {
+    let embedding = vec![0.0f32; EMBEDDING_DIM];
+
+    let uniform =
+        MoeRouter::load_with_mode("", MAX_STUB_EXPERTS, 4, RoutingMode::StubUniform).unwrap();
+    assert_eq!(uniform.num_experts(), MAX_STUB_EXPERTS);
+    let out = uniform.forward(&embedding).unwrap();
+    assert_eq!(out.expert_weights.len(), MAX_STUB_EXPERTS);
+    assert_eq!(out.selected_experts, vec![0, 1, 2, 3]);
+
+    let dense = MoeRouter::load_with_mode("", MAX_STUB_EXPERTS, 4, RoutingMode::DenseSim).unwrap();
+    let out = dense.forward(&embedding).unwrap();
+    assert_eq!(out.expert_weights.len(), MAX_STUB_EXPERTS);
+    assert_eq!(out.selected_experts, vec![0, 1, 2, 3]);
+}
+
+/// RM-2362: resampling allocates `target_dim` values, so `Some(0)` (an empty
+/// row that only failed later as `InputLengthMismatch`) and anything past the
+/// ceiling are rejected before the allocation.
+#[test]
+fn extract_token_embedding_rejects_zero_and_unbounded_target_dim() {
+    let (path, router) = native_hidden_router("target-dim-bounds");
+
+    for target_dim in [0usize, MAX_TARGET_DIM + 1, 1 << 31, usize::MAX] {
+        let err = router
+            .extract_token_embedding_with_options(
+                0,
+                ExtractTokenOptions {
+                    target_dim: Some(target_dim),
+                    l2_normalize: true,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, HybridError::InvalidConfig(_)),
+            "target_dim={target_dim}: {err:?}"
+        );
+    }
+
+    let at_cap = router
+        .extract_token_embedding_with_options(
+            0,
+            ExtractTokenOptions {
+                target_dim: Some(MAX_TARGET_DIM),
+                l2_normalize: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(at_cap.len(), MAX_TARGET_DIM);
+
+    let _ = remove_file(path);
+}
+
+/// Options are validated before router state, so a stub router reports the
+/// bad `target_dim` as `InvalidConfig` and a valid one as `ModelLoad`.
+#[test]
+fn stub_router_rejects_bad_extract_options_before_the_load_check() {
+    let router = stub();
+    let err = router
+        .extract_token_embedding_with_options(
+            0,
+            ExtractTokenOptions {
+                target_dim: Some(0),
+                l2_normalize: false,
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(err, HybridError::InvalidConfig(_)), "{err:?}");
+
+    let err = router
+        .extract_token_embedding_with_options(0, ExtractTokenOptions::for_projector_forward())
+        .unwrap_err();
+    assert!(matches!(err, HybridError::ModelLoad { .. }), "{err:?}");
 }
 
 #[test]

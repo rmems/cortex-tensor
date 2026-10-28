@@ -35,7 +35,7 @@ use self::routing::{
 };
 use crate::error::{HybridError, Result};
 pub use crate::types::RoutingMode;
-pub use crate::types::{EMBEDDING_DIM, ExtractTokenOptions};
+pub use crate::types::{EMBEDDING_DIM, ExtractTokenOptions, MAX_STUB_EXPERTS, MAX_TARGET_DIM};
 
 pub(crate) use self::routing::{reject_nan_routing_scores, route_top_k};
 
@@ -144,6 +144,16 @@ impl MoeRouter {
         top_k: usize,
         routing_mode: RoutingMode,
     ) -> Result<Self> {
+        // The stub sizes `expert_weights` and the synthetic gate scores from
+        // this value, so it is bounded here rather than at first `forward`.
+        // `usize::MAX` would otherwise reach `Vec::with_capacity` as a
+        // capacity-overflow panic and a merely huge value as an
+        // `handle_alloc_error` abort.
+        if num_experts > MAX_STUB_EXPERTS {
+            return Err(HybridError::InvalidConfig(format!(
+                "stub router num_experts ({num_experts}) exceeds MAX_STUB_EXPERTS ({MAX_STUB_EXPERTS})"
+            )));
+        }
         let inferred_experts = num_experts.max(1);
         let inferred_top_k = top_k.max(1).min(inferred_experts);
         Ok(Self {
@@ -192,11 +202,30 @@ impl MoeRouter {
     }
 
     /// Dequantize a token row, optionally resampling and/or L2-normalizing.
+    ///
+    /// Returns [`HybridError::InvalidConfig`] when
+    /// [`ExtractTokenOptions::target_dim`] is `Some(0)` (an empty row that only
+    /// fails later as [`HybridError::InputLengthMismatch`]) or greater than
+    /// [`MAX_TARGET_DIM`]. Resampling allocates the requested length, so the
+    /// bound keeps a caller-supplied `usize` from reaching
+    /// `Vec::with_capacity` as a capacity-overflow panic.
     pub fn extract_token_embedding_with_options(
         &self,
         token_id: usize,
         options: ExtractTokenOptions,
     ) -> Result<Vec<f32>> {
+        if let Some(target_dim) = options.target_dim {
+            if target_dim == 0 {
+                return Err(HybridError::InvalidConfig(
+                    "ExtractTokenOptions.target_dim must be greater than 0".into(),
+                ));
+            }
+            if target_dim > MAX_TARGET_DIM {
+                return Err(HybridError::InvalidConfig(format!(
+                    "ExtractTokenOptions.target_dim ({target_dim}) exceeds MAX_TARGET_DIM ({MAX_TARGET_DIM})"
+                )));
+            }
+        }
         let adapter = self
             .adapter
             .as_ref()
