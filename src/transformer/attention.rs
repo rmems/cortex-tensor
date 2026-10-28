@@ -143,7 +143,14 @@ impl MultiHeadAttention {
         // `nh * hd == dim` and `[1, dim]` bias invariants that `try_new`
         // establishes. The head-reshape helpers below index on those
         // invariants, so check them before any slicing.
-        if nh == 0 || nh.checked_mul(hd) != Some(self.dim) {
+        if nh == 0 {
+            // Same variant as `try_new` and `validate_wire` for zero heads.
+            return Err(CortexError::ZeroWidth {
+                op: "MultiHeadAttention::try_forward",
+                axis: 1,
+            });
+        }
+        if nh.checked_mul(hd) != Some(self.dim) {
             return Err(CortexError::InvalidConfig(format!(
                 "MultiHeadAttention: num_heads ({nh}) * head_dim ({hd}) != dim ({})",
                 self.dim

@@ -617,6 +617,23 @@ mod error_consistency_tests {
     }
 
     #[test]
+    fn attention_forward_zero_heads_is_zero_width_like_the_constructor() {
+        let mut attn = MultiHeadAttention::try_new(8, 2).unwrap();
+        attn.num_heads = 0;
+        let x = crate::tensor::Tensor::zeros(&[2, 8]);
+        assert!(matches!(
+            attn.try_forward(&x),
+            Err(CortexError::ZeroWidth { axis: 1, .. })
+        ));
+        // Nonzero heads that do not tile `dim` stay `InvalidConfig`.
+        attn.num_heads = 3;
+        assert!(matches!(
+            attn.try_forward(&x),
+            Err(CortexError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
     fn position_bound_follows_the_table_actually_indexed() {
         let mut model = TransformerLM::try_new(cfg()).unwrap();
         model.config.max_seq_len = 100; // pub field raised past the 4-row table
