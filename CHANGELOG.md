@@ -18,6 +18,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - engram-parser `LimitExceeded`, `HostSizeOverflow`, `DuplicateTensorOwnership` and `MissingShard` surface as `ModelLoad { path, reason }` (were `UnsupportedFormat(String)` without the path).
   - A checkpoint with `embedding_length == 0` is rejected by adapter resolution with `UnsupportedFormat`, like `expert_count == 0`.
 
+### Docs
+
+- **SNN step-contract mapping with hybrid-fusion** (RM-2360): new
+  `docs/snn-contract-mapping.md` records the direction decision — each crate
+  keeps its own traits (this crate stays ANN+SNN capable, decision RM-2206;
+  the plan to fold `src/snn` into hybrid-fusion was abandoned unmerged) — the
+  full trait-set mapping (`SnnBackend` ↔ `SpikingNetwork`,
+  `SnnEncoder`/`SnnDecoder` ↔ `SpikeEncoder`/`SpikeDecoder`,
+  `SpikingMoeRouter` ↔ `SpikingExpertRouter`, `NeuromodNetwork` ↔
+  `NeuromodSnn`), every intentional difference (width axes, decoder
+  fallibility and sizing, reset/replay semantics, output shape, adapter
+  boundary), and the #91–#93 fix-parity table. The twin document is
+  hybrid-fusion's ADR 0002; cross-crate parity tests in hybrid-fusion's
+  `smoke/cortex-neuromod` package (which pins this crate past the fix series,
+  RM-2208) run the same seeded inputs through both trait sets in CI. The
+  `snn` module docs and README now point at the mapping. No behavior changes:
+  the #91–#93 fixes (additive spike boost, bounded hidden gain, `step_frozen`
+  parity, never-spiking neuron rejection) were already present on this side.
+  The mapping also folds in RM-2364 / #155: `NeuromodNetwork` now maps
+  `neuromod::StepError` structurally (`InputLenMismatch` → `InputLengthMismatch`,
+  `NonFiniteStimulus` → the new `CortexError::SnnInvalidStimulus`), and the ±Inf
+  pre-tick rejection is recorded as intentional difference 6 (hybrid-fusion's
+  router ranks ±Inf and lets the backend preflight reject it).
+
 ### Fixed
 
 - `MultiHeadAttention::param_count`, `FeedForward::param_count`, `TransformerBlock::param_count` and `TransformerLM::param_count` sum tensor `numel()` with saturating adds, so no combination of `pub` fields can panic (debug) or wrap (release).

@@ -107,7 +107,13 @@ Supported token-row dtypes, dequantized by engram-parser: `F32`, `F16`, `Q8_0`, 
 ### `snn`
 
 Hybrid execution/interchange contract — cortex stays ANN/SNN-capable without
-embedding neuron dynamics.
+embedding neuron dynamics. This contract has a documented twin in
+[`hybrid-fusion`](https://github.com/rmems/hybrid-fusion) (`SpikingNetwork`,
+`SpikeEncoder`/`SpikeDecoder`, `SpikingExpertRouter`, `NeuromodSnn`) for that
+crate's orchestrator role; the mapping between the two trait sets lives in
+[`docs/snn-contract-mapping.md`](docs/snn-contract-mapping.md) and is enforced
+by cross-crate parity tests in hybrid-fusion's `smoke/cortex-neuromod` package
+(decision RM-2206 / RM-2360).
 
 | Item | Purpose |
 |---|---|
