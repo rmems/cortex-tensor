@@ -50,10 +50,16 @@ pub fn try_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
                 let j_end = (j0 + TILE).min(n);
                 let p_end = (p0 + TILE).min(k1);
                 for i in i0..i_end {
-                    for p in p0..p_end {
-                        let a_ip = ad[i * k1 + p];
-                        for j in j0..j_end {
-                            out[i * n + j] += a_ip * bd[p * n + j];
+                    // Hoist the row slices out of the j-loop so the inner
+                    // loop has no per-element bounds checks and can
+                    // auto-vectorise. Summation order is unchanged, so the
+                    // result is bit-identical to the indexed form.
+                    let orow = &mut out[i * n + j0..i * n + j_end];
+                    let arow = &ad[i * k1 + p0..i * k1 + p_end];
+                    for (p, &a_ip) in (p0..p_end).zip(arow) {
+                        let brow = &bd[p * n + j0..p * n + j_end];
+                        for (o, &b_pj) in orow.iter_mut().zip(brow) {
+                            *o += a_ip * b_pj;
                         }
                     }
                 }
@@ -141,11 +147,15 @@ pub fn try_batched_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
             0
         };
         let o_off = checked_mul3(bi, m, n, &out_shape)?;
+        // Same slice-hoisting as `try_matmul`: bounds checks happen once per
+        // row, not per element, and the summation order is unchanged.
         for i in 0..m {
-            for p in 0..k {
-                let a_ip = ad[a_off + i * k + p];
-                for j in 0..n {
-                    out[o_off + i * n + j] += a_ip * bd[b_off + p * n + j];
+            let orow = &mut out[o_off + i * n..o_off + (i + 1) * n];
+            let arow = &ad[a_off + i * k..a_off + (i + 1) * k];
+            for (p, &a_ip) in arow.iter().enumerate() {
+                let brow = &bd[b_off + p * n..b_off + (p + 1) * n];
+                for (o, &b_pj) in orow.iter_mut().zip(brow) {
+                    *o += a_ip * b_pj;
                 }
             }
         }
