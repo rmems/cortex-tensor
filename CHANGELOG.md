@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - engram-parser `LimitExceeded`, `HostSizeOverflow`, `DuplicateTensorOwnership` and `MissingShard` surface as `ModelLoad { path, reason }` (were `UnsupportedFormat(String)` without the path).
   - A checkpoint with `embedding_length == 0` is rejected by adapter resolution with `UnsupportedFormat`, like `expert_count == 0`.
 
+### Performance
+
+- **Slice-based matmul inner loops** (RM-2090 / #102): `try_matmul` and
+  `try_batched_matmul` hoist the output, `a` and `b` row slices out of the
+  inner loop, so it runs without per-element bounds checks and
+  auto-vectorises. Summation order is unchanged, so outputs are bitwise
+  identical (goldens unaffected). `try_matmul` on 256×512×512 runs about 1.9×
+  faster in release builds (26.7 ms → 13.7 ms here). Small and medium batched
+  shapes gain 1.3-1.8×; large untiled batched shapes are memory-bound and
+  show no clear change.
+
 ### Docs
 
 - **SNN step-contract mapping with hybrid-fusion** (RM-2360): new
