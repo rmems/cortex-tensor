@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use super::finite::{layer_norm_row, rms_norm_row};
+use super::finite::{layer_norm_row, rms_norm_row, validate_norm_eps};
 use super::{Tensor, try_alloc_filled};
 use crate::error::{CortexError, Result, unwrap_compat};
 
@@ -179,7 +179,7 @@ pub fn try_layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> R
             axis: 1,
         });
     }
-    check_eps(eps)?;
+    let eps64 = validate_norm_eps(eps)?;
     expect_dim("layer_norm", 0, cols, weight.numel())?;
     expect_dim("layer_norm", 0, cols, bias.numel())?;
 
@@ -188,7 +188,6 @@ pub fn try_layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> R
     let xd = x.data();
     let wd = weight.data();
     let bd = bias.data();
-    let eps64 = f64::from(eps);
 
     for r in 0..rows {
         let off = r * cols;
@@ -228,14 +227,13 @@ pub fn try_rms_norm(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
             axis: 1,
         });
     }
-    check_eps(eps)?;
+    let eps64 = validate_norm_eps(eps)?;
     expect_dim("rms_norm", 0, cols, weight.numel())?;
 
     let out_shape = [rows, cols];
     let mut out = alloc_zeros(&out_shape)?;
     let xd = x.data();
     let wd = weight.data();
-    let eps64 = f64::from(eps);
 
     for r in 0..rows {
         let off = r * cols;
@@ -244,14 +242,22 @@ pub fn try_rms_norm(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
     Tensor::try_from_vec(out, &out_shape)
 }
 
-/// Softmax along the last axis of a 1-D or 2-D tensor.
+/// Softmax along the last axis of a rank-0, rank-1, or rank-2 tensor (each
+/// row independently for rank 2).
 ///
 /// See [`super::finite`] for the NaN / `±Inf` / all-masked policy.
+///
+/// # Panics
+///
+/// Panics if the rank is greater than 2. Prefer [`try_softmax`] in new code.
 pub fn softmax(x: &Tensor) -> Tensor {
-    x.softmax_last()
+    unwrap_compat(try_softmax(x), "softmax")
 }
 
-/// Fallible softmax along the last axis. Rejects rank `> 2`.
+/// Fallible softmax along the last axis.
+///
+/// Returns [`CortexError::RankMismatch`] with `expected: 2` when the rank is
+/// greater than 2, matching the other rank-checked ops.
 pub fn try_softmax(x: &Tensor) -> Result<Tensor> {
     x.try_softmax_last()
 }
@@ -339,14 +345,6 @@ fn expect_dim(op: &'static str, axis: usize, expected: usize, got: usize) -> Res
         })
     } else {
         Ok(())
-    }
-}
-
-fn check_eps(eps: f32) -> Result<()> {
-    if eps.is_finite() && eps > 0.0 {
-        Ok(())
-    } else {
-        Err(CortexError::InvalidEpsilon { eps })
     }
 }
 
