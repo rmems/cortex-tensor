@@ -6,7 +6,7 @@ use crate::tensor::Tensor;
 use crate::tensor::finite::softmax_row;
 use crate::tensor::ops::{try_batched_matmul, try_matmul};
 
-/// Multi-head self-attention (replaces candle-nn attention layers).
+/// Multi-head self-attention for the CPU reference backend.
 ///
 /// Implements scaled dot-product attention with causal masking.
 /// Weights are stored as dense matrices; no external framework needed.
