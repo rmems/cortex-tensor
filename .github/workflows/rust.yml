@@ -144,6 +144,10 @@ jobs:
     name: msrv (1.97.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # rust-toolchain.toml (1.99.0) outranks `rustup default`; the env var
+      # outranks the file, so every step really runs on 1.97.1.
+      RUSTUP_TOOLCHAIN: 1.97.1
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
@@ -157,6 +161,7 @@ jobs:
         key: msrv
     - name: Check default, candle and burn features at MSRV
       run: |
+        rustc --version
         cargo check --all-targets
         cargo check --all-targets --features candle
         cargo check --all-targets --features burn
