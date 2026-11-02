@@ -255,9 +255,7 @@ impl Tensor {
                 "randn: mean ({mean}) must be finite and std ({std}) must be finite and >= 0"
             )));
         }
-        let numel = checked_numel(shape)?;
-        check_f32_alloc(numel, shape)?;
-        let _ = try_compute_strides(shape)?;
+        let numel = checked_alloc_len(shape)?;
         let mut data = try_reserve_f32(numel, shape)?;
         // Box-Muller: each (u1, u2) pair yields two independent samples.
         while data.len() < numel {
@@ -668,25 +666,29 @@ impl Tensor {
             .unwrap_or(0)
     }
 
-    /// Softmax along the last axis (1-D, 0-D, or each row of a 2-D tensor).
+    /// Softmax along the last axis (0-D, 1-D, or each row of a 2-D tensor).
     ///
-    /// See [`finite`] for the NaN / `±Inf` / all-masked policy. Panics if the
-    /// rank is greater than 2; use [`Self::try_softmax_last`] to recover.
+    /// See [`finite`] for the NaN / `±Inf` / all-masked policy.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the rank is greater than 2. Prefer
+    /// [`Self::try_softmax_last`] in new code.
     pub fn softmax_last(&self) -> Self {
-        self.try_softmax_last()
-            .unwrap_or_else(|err| panic!("{err}"))
+        unwrap_compat(self.try_softmax_last(), "Tensor::softmax_last")
     }
 
     /// Fallible softmax along the last axis.
     ///
-    /// Returns [`CortexError::InvalidConfig`] when `ndim > 2`.
+    /// Returns [`CortexError::RankMismatch`] with `expected: 2` when
+    /// `ndim > 2`, matching the other rank-checked ops.
     pub fn try_softmax_last(&self) -> Result<Self> {
         self.check_storage()?;
         if self.ndim() > 2 {
-            return Err(CortexError::InvalidConfig(format!(
-                "softmax_last: max 2-D, got rank {}",
-                self.ndim()
-            )));
+            return Err(CortexError::RankMismatch {
+                expected: 2,
+                got: self.ndim(),
+            });
         }
         if self.ndim() <= 1 {
             let mut data = vec![0.0f32; self.data.len()];
@@ -841,13 +843,23 @@ pub(crate) fn try_reserve_f32(numel: usize, shape: &[usize]) -> Result<Vec<f32>>
     Ok(data)
 }
 
-/// Checks numel, layout and row-major strides for `shape`, then allocates a
-/// zero-initialised buffer fallibly. Shared by the constructors and the ops
-/// that produce a fresh output tensor.
-pub(crate) fn try_alloc_filled(shape: &[usize], val: f32) -> Result<Vec<f32>> {
+/// Element count of a fresh `f32` buffer for `shape`, after proving the
+/// count, its byte layout, and the row-major strides are all representable.
+///
+/// Every path that allocates a new buffer from a shape (constructors, `randn`,
+/// and the ops that produce a fresh output) goes through this check before
+/// reserving storage with [`try_reserve_f32`].
+pub(crate) fn checked_alloc_len(shape: &[usize]) -> Result<usize> {
     let numel = checked_numel(shape)?;
     check_f32_alloc(numel, shape)?;
     let _ = try_compute_strides(shape)?;
+    Ok(numel)
+}
+
+/// Allocates a buffer for `shape` filled with `val`, fallibly. Shared by the
+/// constructors and the ops that produce a fresh output tensor.
+pub(crate) fn try_alloc_filled(shape: &[usize], val: f32) -> Result<Vec<f32>> {
+    let numel = checked_alloc_len(shape)?;
     let mut data = try_reserve_f32(numel, shape)?;
     data.resize(numel, val);
     Ok(data)
@@ -1014,7 +1026,28 @@ mod tests {
     fn test_softmax_last_rejects_rank_3() {
         let t = Tensor::from_vec(vec![1.0; 8], &[2, 2, 2]);
         let err = t.try_softmax_last().unwrap_err();
-        assert!(matches!(err, CortexError::InvalidConfig(_)));
+        assert!(matches!(
+            err,
+            CortexError::RankMismatch {
+                expected: 2,
+                got: 3
+            }
+        ));
+        let err = crate::tensor::ops::try_softmax(&t).unwrap_err();
+        assert!(matches!(
+            err,
+            CortexError::RankMismatch {
+                expected: 2,
+                got: 3
+            }
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "Tensor::softmax_last")]
+    fn test_softmax_last_panic_carries_migration_hint() {
+        let t = Tensor::from_vec(vec![1.0; 8], &[2, 2, 2]);
+        let _ = t.softmax_last();
     }
 
     #[test]

@@ -94,9 +94,10 @@ pub(super) fn softmax(scores: &[f32]) -> Vec<f32> {
 /// This helper is pure: the same `(scores, top_k)` pair always yields the same
 /// `Result`. Softmax and normalization kernels are unchanged here.
 ///
-/// Callers must rank these raw scores *before* softmax. Softmax currently maps
-/// a non-finite exponential sum to uniform weights, which would otherwise
-/// hide NaN / `+Inf` from this helper.
+/// Callers must rank these raw scores *before* softmax. Softmax fills a row
+/// containing NaN with NaN and collapses `+Inf` scores to an equal split, so
+/// ranking its output would lose the NaN rejection and the order among the
+/// finite scores.
 pub(super) fn top_k_indices(scores: &[f32], top_k: usize) -> Result<Vec<usize>> {
     reject_nan_routing_scores(scores)?;
 

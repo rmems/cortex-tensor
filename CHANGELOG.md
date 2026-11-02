@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `MappedCheckpoint::extract_token_embedding` (and `MoeRouter::extract_token_embedding*`) return `TokenIndex { index, vocab_size }` for an out-of-vocabulary id (was `InputLengthMismatch`).
   - engram-parser `LimitExceeded`, `HostSizeOverflow`, `DuplicateTensorOwnership` and `MissingShard` surface as `ModelLoad { path, reason }` (were `UnsupportedFormat(String)` without the path).
   - A checkpoint with `embedding_length == 0` is rejected by adapter resolution with `UnsupportedFormat`, like `expert_count == 0`.
+- **Breaking (error variants, RM-2097 / #109):** `Tensor::try_softmax_last` and `ops::try_softmax` return `RankMismatch { expected: 2, got }` for rank `> 2` (was `InvalidConfig("softmax_last: max 2-D, …")`), matching every other rank-checked op. The panicking `softmax_last` / `ops::softmax` wrappers now go through the shared compatibility panic, so the message names the API (`Tensor::softmax_last` / `softmax`) and points at the `try_*` replacement.
+
+### Refactored
+
+- **Tensor helper consolidation (RM-2097 / #109):** `try_layer_norm` / `try_rms_norm` validate `eps` through the public `finite::validate_norm_eps` (the private duplicate is gone). `ReferenceExecutor`'s embedding stage and `TransformerLM` share one crate-private `embed_tokens`, so the stage path now also bounds the sequence by `min(pos_embed rows, max_seq_len)`. Fresh `f32` buffers sized by a shape go through one crate-private `checked_alloc_len`. The unreachable "degenerate partition → uniform" branch in the softmax row kernel is a `debug_assert!`; with a finite max the partition is always in `[1, n]`, and the README and MoE routing docs no longer describe that fallback.
 
 ### Docs
 
