@@ -11,6 +11,9 @@ updates:
     labels:
       - "dependencies"
       - "cargo"
+    groups:
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
@@ -23,12 +26,6 @@ updates:
     labels:
       - "dependencies"
       - "github-actions"
-
-  # Julia (for parity with other rmems repos using Julia)
-  - package-ecosystem: "julia"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "deps(julia)"
+    groups:
+      github-actions:
+        patterns: ["*"]

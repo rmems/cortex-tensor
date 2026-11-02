@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### CI
+
+- **Feature matrix, MSRV job, semver-checks, workflow hygiene** (RM-2103): per-feature clippy and test runs (default, no-default, `neuromod`, `axon-encoder`, `candle`, `burn`); `rust-version` lowered from 1.99.0 to the verified floor 1.97.1 (set by `engram-parser` 0.3.0; `neuromod` needs 1.98.1, `axon-encoder` needs 1.99.0) with an `msrv` job guarding it, while the development toolchain stays pinned to 1.99.0; `cargo semver-checks` against the newest `v*` tag (skipped until one exists); `pull-requests: write` moved to a separate reviewdog job; added `concurrency`, `timeout-minutes` and `rust-cache`; dependabot drops the dead `julia` entry and groups github-actions and cargo minor/patch updates.
+
 ### Changed (breaking: error variants)
 
 - **Breaking (error variants, RM-2365 / #150):** the same failure class now returns one stable variant across layers. Callers matching the old variants must update:
