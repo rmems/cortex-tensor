@@ -406,7 +406,7 @@ fn main() -> cortex_tensor::Result<()> {
 
 ## Status
 
-Rust edition 2024, MSRV 1.99.0. Public API is pre-1.0.
+Rust edition 2024, MSRV 1.97.1 (default, `candle` and `burn` features; `neuromod` and `axon-encoder` need 1.98.1). Development toolchain is pinned to 1.99.0. Public API is pre-1.0.
 
 Linked work, not implemented by the boundary-reset docs:
 
