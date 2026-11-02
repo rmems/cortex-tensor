@@ -883,3 +883,344 @@ fn npz_roundtrip_through_zip_facade() {
     assert_eq!(by_name.len(), 1);
     let _ = std::fs::remove_file(&path);
 }
+
+// ── #148: typed errors for bad shapes, aligned with ReferenceExecutor ──────
+
+const DIM: usize = 2;
+const EYE: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+
+fn eye_linear() -> LinearWeights<'static> {
+    LinearWeights {
+        weight: &EYE,
+        in_dim: DIM,
+        out_dim: DIM,
+        bias: None,
+    }
+}
+
+/// A Candle executor with one bound stage per tensor-input stage kind.
+fn tensor_stage_executor() -> (CandleExecutor, Vec<AnnStage>) {
+    let mut exec = CandleExecutor::new();
+    let ones = [1.0f32; DIM];
+    let zeros = [0.0f32; DIM];
+    exec.bind_attention(
+        stage_id("attention"),
+        AttentionWeights {
+            q: eye_linear(),
+            k: eye_linear(),
+            v: eye_linear(),
+            o: eye_linear(),
+            num_heads: 1,
+        },
+    )
+    .unwrap();
+    exec.bind_layer_norm(
+        stage_id("layer_norm"),
+        LayerNormWeights {
+            weight: &ones,
+            bias: &zeros,
+            eps: 1e-5,
+        },
+    )
+    .unwrap();
+    exec.bind_rms_norm(
+        stage_id("rms_norm"),
+        RmsNormWeights {
+            weight: &ones,
+            eps: 1e-5,
+        },
+    )
+    .unwrap();
+    exec.bind_dense_mlp(
+        stage_id("dense_mlp"),
+        MlpWeights {
+            up: eye_linear(),
+            down: eye_linear(),
+        },
+    )
+    .unwrap();
+    exec.bind_gated_mlp(
+        stage_id("gated_mlp"),
+        GatedMlpWeights {
+            gate: eye_linear(),
+            up: eye_linear(),
+            down: eye_linear(),
+        },
+    )
+    .unwrap();
+    exec.bind_readout(stage_id("readout"), eye_linear())
+        .unwrap();
+    let stages = vec![
+        descriptor("attention", StageKind::Attention),
+        descriptor(
+            "layer_norm",
+            StageKind::Normalization {
+                kind: NormKind::Layer,
+            },
+        ),
+        descriptor(
+            "rms_norm",
+            StageKind::Normalization {
+                kind: NormKind::Rms,
+            },
+        ),
+        descriptor(
+            "dense_mlp",
+            StageKind::Mlp {
+                kind: MlpKind::Dense,
+            },
+        ),
+        descriptor(
+            "gated_mlp",
+            StageKind::Mlp {
+                kind: MlpKind::Gated,
+            },
+        ),
+        descriptor("readout", StageKind::Readout),
+    ];
+    (exec, stages)
+}
+
+fn hidden(shape: &[usize]) -> cortex_tensor::adapter::CandleTensor {
+    let numel = shape.iter().product();
+    import_hidden_state(&HiddenState {
+        data: (0..numel).map(|i| i as f32 * 0.25 - 0.5).collect(),
+        shape: shape.to_vec(),
+    })
+    .unwrap()
+}
+
+/// Rank 0, 1, and 4+ are rejected before Candle runs, with the same
+/// `RankMismatch { expected: 2, got }` the reference executor returns. LayerNorm
+/// and RmsNorm used to accept rank 1 (Candle's `ops::layer_norm` does), while
+/// Readout/MLP surfaced Candle's matmul error as `Msg`.
+#[test]
+fn bad_rank_inputs_return_rank_mismatch_on_every_tensor_stage() {
+    let (mut exec, stages) = tensor_stage_executor();
+    for shape in [vec![], vec![DIM], vec![1, 1, 1, DIM], vec![1, 1, 1, 1, DIM]] {
+        let input = hidden(&shape);
+        for stage in &stages {
+            let err = exec
+                .execute(stage, &[StageInput::Tensor(&input)])
+                .unwrap_err();
+            match &err {
+                CortexError::StageFailed { stage_id, source } => {
+                    assert_eq!(stage_id, stage.id.as_str());
+                    assert!(
+                        matches!(
+                            **source,
+                            CortexError::RankMismatch { expected: 2, got } if got == shape.len()
+                        ),
+                        "{} rank {}: {err:?}",
+                        stage.id,
+                        shape.len()
+                    );
+                }
+                other => panic!("{} rank {}: {other:?}", stage.id, shape.len()),
+            }
+        }
+    }
+}
+
+/// Rank 3 stays a Candle-only batch extension on every stage kind, including
+/// an empty batch, which used to fail inside `Linear::forward` with an opaque
+/// `Msg` while `[0, dim]` succeeded.
+#[test]
+fn rank3_inputs_including_empty_batch_are_accepted() {
+    let (mut exec, stages) = tensor_stage_executor();
+    for shape in [[2, 3, DIM], [0, 3, DIM], [2, 0, DIM]] {
+        let input = hidden(&shape);
+        for stage in &stages {
+            let out = exec
+                .execute(stage, &[StageInput::Tensor(&input)])
+                .unwrap_or_else(|err| panic!("{} {shape:?}: {err:?}", stage.id));
+            assert_eq!(out.shape(), &shape, "{}", stage.id);
+        }
+    }
+    // The empty rank-2 case keeps working too.
+    let input = hidden(&[0, DIM]);
+    for stage in &stages {
+        let out = exec
+            .execute(stage, &[StageInput::Tensor(&input)])
+            .unwrap_or_else(|err| panic!("{} [0, dim]: {err:?}", stage.id));
+        assert_eq!(out.shape(), &[0, DIM], "{}", stage.id);
+    }
+}
+
+#[test]
+fn add_shape_mismatch_is_typed() {
+    let mut exec = CandleExecutor::new();
+    let lhs = hidden(&[2, DIM]);
+    let rhs = hidden(&[3, DIM]);
+    let err = exec
+        .execute(
+            &descriptor("add", StageKind::Add),
+            &[StageInput::Tensor(&lhs), StageInput::Tensor(&rhs)],
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            CortexError::StageFailed { stage_id, source }
+                if stage_id == "add"
+                    && matches!(
+                        &**source,
+                        CortexError::ShapeMismatch { expected, got }
+                            if expected == &[2, DIM] && got == &[3, DIM]
+                    )
+        ),
+        "{err:?}"
+    );
+}
+
+/// The same bad-shape inputs through both executors give the same
+/// `CortexError` discriminant, both at the top level and for the wrapped cause.
+/// Gated MLP is Candle-only and rank 3 is a Candle-only extension, so neither
+/// is compared here.
+#[test]
+fn reference_and_candle_reject_bad_shapes_with_same_variant() {
+    use cortex_tensor::ReferenceExecutor;
+    use cortex_tensor::stage::ReferenceStageParams;
+    use cortex_tensor::transformer::MultiHeadAttention;
+    use cortex_tensor::transformer::block::FeedForward;
+    use std::mem::discriminant;
+
+    let attn = MultiHeadAttention::try_new_seeded(DIM, 1, 7).unwrap();
+    let ffn = FeedForward::try_new_seeded(DIM, DIM, 7).unwrap();
+    let ones = Tensor::try_ones(&[DIM]).unwrap();
+    let zeros = Tensor::try_zeros(&[DIM]).unwrap();
+    let lm_head = Tensor::try_from_vec(EYE.to_vec(), &[DIM, DIM]).unwrap();
+    let mut reference = ReferenceExecutor::new()
+        .bind(
+            stage_id("attention"),
+            ReferenceStageParams::Attention(&attn),
+        )
+        .bind(
+            stage_id("layer_norm"),
+            ReferenceStageParams::Normalization {
+                weight: &ones,
+                bias: Some(&zeros),
+                eps: 1e-5,
+                kind: NormKind::Layer,
+            },
+        )
+        .bind(
+            stage_id("rms_norm"),
+            ReferenceStageParams::Normalization {
+                weight: &ones,
+                bias: None,
+                eps: 1e-5,
+                kind: NormKind::Rms,
+            },
+        )
+        .bind(stage_id("dense_mlp"), ReferenceStageParams::Mlp(&ffn))
+        .bind(
+            stage_id("readout"),
+            ReferenceStageParams::Readout { lm_head: &lm_head },
+        );
+    let (mut candle, stages) = tensor_stage_executor();
+    let stages: Vec<_> = stages
+        .into_iter()
+        .filter(|stage| stage.id.as_str() != "gated_mlp")
+        .collect();
+
+    let assert_same = |label: &str, reference: CortexError, candle: CortexError| {
+        assert_eq!(
+            discriminant(&reference),
+            discriminant(&candle),
+            "{label}: reference {reference:?} vs candle {candle:?}"
+        );
+        if let (
+            CortexError::StageFailed { source: r, .. },
+            CortexError::StageFailed { source: c, .. },
+        ) = (&reference, &candle)
+        {
+            assert_eq!(
+                discriminant(&**r),
+                discriminant(&**c),
+                "{label}: reference {reference:?} vs candle {candle:?}"
+            );
+        }
+        // Same stage ids and payloads, so the whole error matches.
+        assert_eq!(format!("{reference:?}"), format!("{candle:?}"), "{label}");
+    };
+
+    for shape in [vec![], vec![DIM], vec![1, 1, 1, DIM]] {
+        let numel = shape.iter().product();
+        let x = Tensor::try_from_vec(vec![0.5; numel], &shape).unwrap();
+        let candle_x = import_reference(&x).unwrap();
+        for stage in &stages {
+            let r = reference
+                .execute(stage, &[StageInput::Tensor(&x)])
+                .unwrap_err();
+            let c = candle
+                .execute(stage, &[StageInput::Tensor(&candle_x)])
+                .unwrap_err();
+            assert_same(&format!("{} {shape:?}", stage.id), r, c);
+        }
+    }
+
+    let add = descriptor("add", StageKind::Add);
+    let a = Tensor::try_zeros(&[2, DIM]).unwrap();
+    let b = Tensor::try_zeros(&[3, DIM]).unwrap();
+    let (ca, cb) = (import_reference(&a).unwrap(), import_reference(&b).unwrap());
+    let r = reference
+        .execute(&add, &[StageInput::Tensor(&a), StageInput::Tensor(&b)])
+        .unwrap_err();
+    let c = candle
+        .execute(&add, &[StageInput::Tensor(&ca), StageInput::Tensor(&cb)])
+        .unwrap_err();
+    assert_same("add", r, c);
+}
+
+/// Both hidden-state import paths now share the tensor crate's `checked_numel`
+/// (zero-axis short-circuit, `SizeOverflow` on overflow). Candle additionally
+/// rejects zero-sized shapes whose non-zero prefix or suffix overflows: candle
+/// 0.11 multiplies every extent and panicked on them (`[0, usize::MAX, 2]` used
+/// to reach that panic).
+#[test]
+fn hidden_state_import_overflow_is_size_overflow_on_both_paths() {
+    use cortex_tensor::ReferenceExecutor;
+    use cortex_tensor::stage::HiddenStateBuffer;
+
+    let overflowing = vec![usize::MAX, 2];
+    let reference = ReferenceExecutor::import_hidden(&HiddenStateBuffer {
+        data: Vec::new(),
+        shape: overflowing.clone(),
+        dtype: DType::F32,
+    })
+    .unwrap_err();
+    assert!(
+        matches!(
+            &reference,
+            CortexError::StageFailed { source, .. }
+                if matches!(**source, CortexError::SizeOverflow { .. })
+        ),
+        "{reference:?}"
+    );
+    let candle = import_hidden_state(&HiddenState {
+        data: Vec::new(),
+        shape: overflowing,
+    })
+    .unwrap_err();
+    assert!(
+        matches!(candle, CortexError::SizeOverflow { .. }),
+        "{candle:?}"
+    );
+
+    for shape in [
+        vec![usize::MAX, usize::MAX, 0],
+        vec![0, usize::MAX, usize::MAX],
+        vec![0, usize::MAX, 2],
+    ] {
+        let err = import_hidden_state(&HiddenState {
+            data: Vec::new(),
+            shape: shape.clone(),
+        })
+        .unwrap_err();
+        assert!(
+            matches!(&err, CortexError::SizeOverflow { shape: got } if got == &shape),
+            "{shape:?}: {err:?}"
+        );
+    }
+}

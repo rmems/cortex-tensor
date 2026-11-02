@@ -295,23 +295,6 @@ pub trait ExternalAdapterMarker: AnnExecutor {
     fn import_hidden(&self, buffer: &HiddenStateBuffer) -> Result<Self::Tensor>;
 }
 
-/// Checked element count for a hidden-state shape.
-pub(crate) fn checked_numel(shape: &[usize]) -> Result<usize> {
-    if shape.contains(&0) {
-        return Ok(0);
-    }
-    shape.iter().try_fold(1usize, |acc, &dim| {
-        acc.checked_mul(dim)
-            .ok_or_else(|| CortexError::StageFailed {
-                stage_id: "hidden_state".to_string(),
-                source: Box::new(CortexError::ShapeMismatch {
-                    expected: shape.to_vec(),
-                    got: vec![dim],
-                }),
-            })
-    })
-}
-
 /// Build the reference backend's adapter capability report from its ANN report.
 pub(crate) fn reference_adapter_capabilities(ann: AnnCapabilities) -> AdapterCapabilities {
     let unsupported_tags = all_stage_tags()
@@ -492,7 +475,13 @@ pub(crate) fn require_f32_buffer(buffer: &HiddenStateBuffer) -> Result<()> {
             got: buffer.dtype.to_string(),
         });
     }
-    let numel = checked_numel(&buffer.shape)?;
+    // Shared with the tensor constructors and the Candle adapter: a zero axis
+    // short-circuits to 0, and overflow is `SizeOverflow`.
+    let numel =
+        crate::tensor::checked_numel(&buffer.shape).map_err(|err| CortexError::StageFailed {
+            stage_id: "hidden_state".to_string(),
+            source: Box::new(err),
+        })?;
     if buffer.data.len() != numel {
         return Err(CortexError::StageFailed {
             stage_id: "hidden_state".to_string(),
