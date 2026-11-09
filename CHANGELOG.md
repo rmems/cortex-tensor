@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### CI
+
+- **Feature matrix, MSRV job, semver-checks, workflow hygiene** (RM-2103): per-feature clippy and test runs (default, no-default, `neuromod`, `axon-encoder`, `candle`, `burn`); `rust-version` lowered from 1.99.0 to the verified floor 1.97.1 (set by `engram-parser` 0.3.0; `neuromod` needs 1.98.1, `axon-encoder` needs 1.99.0) with an `msrv` job guarding it, while the development toolchain stays pinned to 1.99.0; `cargo semver-checks` against the newest `v*` tag (skipped until one exists); `pull-requests: write` moved to a separate reviewdog job; added `concurrency`, `timeout-minutes` and `rust-cache`; dependabot drops the dead `julia` entry and groups github-actions and cargo minor/patch updates.
+
+### Refactored
+
+- **Tensor helper consolidation (RM-2097 / #109):** `try_layer_norm` / `try_rms_norm` validate `eps` through the public `finite::validate_norm_eps` (the private duplicate is gone). `ReferenceExecutor`'s embedding stage and `TransformerLM` share one crate-private `embed_tokens`, so the stage path now also bounds the sequence by `min(pos_embed rows, max_seq_len)`. Fresh `f32` buffers sized by a shape go through one crate-private `checked_alloc_len`. The unreachable "degenerate partition → uniform" branch in the softmax row kernel is a `debug_assert!`; with a finite max the partition is always in `[1, n]`, and the README and MoE routing docs no longer describe that fallback.
+
+### Performance
+
+- **Slice-based matmul inner loops** (RM-2090 / #102): `try_matmul` and
+  `try_batched_matmul` hoist the output, `a` and `b` row slices out of the
+  inner loop, so it runs without per-element bounds checks and
+  auto-vectorises. Summation order is unchanged, so outputs are bitwise
+  identical (goldens unaffected). `try_matmul` on 256×512×512 runs about 1.9×
+  faster in release builds (26.7 ms → 13.7 ms here). Small and medium batched
+  shapes gain 1.3-1.8×; large untiled batched shapes are memory-bound and
+  show no clear change.
+
 ### Added
 
 - Golden tests that freeze the deterministic CPU reference backend (`tests/reference_goldens.rs`, comparator in `tests/support/golden.rs`) and `tests/fixtures/REFERENCE_GOLDENS.md`, which records the inputs, tolerances and comparison rules adapters can reuse. Tests only; no behavior change (RM-1826, #73).
@@ -38,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `MappedCheckpoint::extract_token_embedding` (and `MoeRouter::extract_token_embedding*`) return `TokenIndex { index, vocab_size }` for an out-of-vocabulary id (was `InputLengthMismatch`).
   - engram-parser `LimitExceeded`, `HostSizeOverflow`, `DuplicateTensorOwnership` and `MissingShard` surface as `ModelLoad { path, reason }` (were `UnsupportedFormat(String)` without the path).
   - A checkpoint with `embedding_length == 0` is rejected by adapter resolution with `UnsupportedFormat`, like `expert_count == 0`.
+- **Breaking (error variants, RM-2097 / #109):** `Tensor::try_softmax_last` and `ops::try_softmax` return `RankMismatch { expected: 2, got }` for rank `> 2` (was `InvalidConfig("softmax_last: max 2-D, …")`), matching every other rank-checked op. The panicking `softmax_last` / `ops::softmax` wrappers now go through the shared compatibility panic, so the message names the API (`Tensor::softmax_last` / `softmax`) and points at the `try_*` replacement.
 - `MoeRouter::forward`, `extract_token_embedding` and `extract_token_embedding_with_options` take `&self` instead of `&mut self`. None of them mutated the router, so existing callers keep compiling and a loaded router can now be shared by reference (RM-2098).
 - `MultiHeadAttention::try_forward` scales and causal-softmaxes the scores in place on the `try_batched_matmul` output (one `[nh, seq, seq]` buffer instead of four, with an O(seq) scratch row), and every linear layer in attention and `FeedForward` adds its bias in place via a shared crate-private `add_row_bias` instead of tiling it into a `[seq, dim]` tensor plus a `try_add` copy. Each element sees the same operations in the same order, so outputs are bit-identical; no public API changes. This also removes the `scale`/softmax copies that could still abort on allocation failure (#103, RM-2091).
 - **Init behaviour change (issue 101):** `FeedForward` `w2` (`[ff_dim, dim]`) is now scaled by `1/sqrt(ff_dim)` instead of `1/sqrt(dim)`, so default-constructed FFN output variance stays near the input's instead of growing with `ff_dim / dim`. `Tensor::try_randn` now returns `InvalidConfig` unless `mean` is finite and `std` is finite and >= 0, and uses both Box-Muller outputs per draw without clamping the tails. Random streams differ from earlier releases.
@@ -52,7 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `RoutingMode` serde now emits the canonical snake_case slug wire form (`stub_uniform`, `dense_sim`) instead of PascalCase. Legacy PascalCase payloads still deserialize through explicit aliases (RM-1518).
 - **Breaking:** `RoutingMode::default()` is now `DenseSim` (was `SpikingSim`) (RM-1824).
 - **Breaking:** `SnnEncoder::encode` takes `&mut self` and returns `Result<Vec<f32>>` (real encoders are stateful — one call is one backend tick, not failure-atomic — and encodings that cannot fit the channel space error instead of silently truncating). `SnnEncoder::reset` (no-op default; `AxonEncoder` delegates to `Encoder::reset`) is invoked by `SpikingMoeRouter::reset` so encoder and backend epochs reset together.
-- MSRV / toolchain target: Rust 1.99.0 (`rust-version` in `Cargo.toml`, `rust-toolchain.toml`, CI, and `.agents/setup`).
+- MSRV floor: `rust-version` 1.97.1 in `Cargo.toml` (engram-parser 0.3.0; feature-specific floors documented in CI). Development toolchain stays pinned to 1.99.0 in `rust-toolchain.toml`, CI, and `.agents/setup` (RM-2103).
 - Crate package excludes agent, CI, coverage, and `rust-toolchain.toml` paths. Superseded by the `include` allow list above (#116), which ships only sources, licenses, README, and CHANGELOG; `tests/` no longer ships.
 - Softmax (tensor last-axis, attention, MoE routing) is max-subtracted with explicit NaN, `+Inf` split, and all-`-Inf` uniform behavior; partition sums use `f64`, then an `f32` residual so rows of length `≤ 4096` stay within `SOFTMAX_SUM_TOLERANCE` (RM-1354).
 - LayerNorm, RMSNorm, and L2 routing normalize accumulate moments in `f64` so large finite magnitudes stay finite; affine overflow saturates to `±f32::MAX` (RM-1354).

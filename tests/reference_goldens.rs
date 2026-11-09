@@ -681,7 +681,10 @@ fn checked_errors_are_structured_not_panic_expectations() {
     ));
     assert!(matches!(
         try_softmax(&t(&[1, 1, 1], &[1.])),
-        Err(CortexError::InvalidConfig(_))
+        Err(CortexError::RankMismatch {
+            expected: 2,
+            got: 3
+        })
     ));
     let w = t(&[2], &[1., 1.]);
     let b = t(&[2], &[0., 0.]);
