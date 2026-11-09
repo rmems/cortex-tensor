@@ -23,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Tensor helper consolidation (RM-2097 / #109):** `try_layer_norm` / `try_rms_norm` validate `eps` through the public `finite::validate_norm_eps` (the private duplicate is gone). `ReferenceExecutor`'s embedding stage and `TransformerLM` share one crate-private `embed_tokens`, so the stage path now also bounds the sequence by `min(pos_embed rows, max_seq_len)`. Fresh `f32` buffers sized by a shape go through one crate-private `checked_alloc_len`. The unreachable "degenerate partition → uniform" branch in the softmax row kernel is a `debug_assert!`; with a finite max the partition is always in `[1, n]`, and the README and MoE routing docs no longer describe that fallback.
 
+### Performance
+
+- **Slice-based matmul inner loops** (RM-2090 / #102): `try_matmul` and
+  `try_batched_matmul` hoist the output, `a` and `b` row slices out of the
+  inner loop, so it runs without per-element bounds checks and
+  auto-vectorises. Summation order is unchanged, so outputs are bitwise
+  identical (goldens unaffected). `try_matmul` on 256×512×512 runs about 1.9×
+  faster in release builds (26.7 ms → 13.7 ms here). Small and medium batched
+  shapes gain 1.3-1.8×; large untiled batched shapes are memory-bound and
+  show no clear change.
+
 ### Docs
 
 - **SNN step-contract mapping with hybrid-fusion** (RM-2360): new
