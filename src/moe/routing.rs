@@ -61,7 +61,10 @@ pub(super) fn checkpoint_gate_scores(
 }
 
 pub(super) fn synthetic_gate_scores(num_experts: usize, embedding: &[f32]) -> Vec<f32> {
-    let width = embedding.len().max(1);
+    if embedding.is_empty() {
+        return vec![0.0; num_experts];
+    }
+    let width = embedding.len();
     let chunk = (width / num_experts.max(1)).max(1);
     let mut gate_scores = Vec::with_capacity(num_experts);
     for expert_id in 0..num_experts {
@@ -160,12 +163,15 @@ pub(super) fn resample_embedding(input: &[f32], target_len: usize) -> Vec<f32> {
         return vec![input.iter().sum::<f32>() / input.len() as f32];
     }
 
-    let scale = (input.len() - 1) as f32 / (target_len - 1) as f32;
+    let last = input.len() - 1;
+    let scale = last as f32 / (target_len - 1) as f32;
     let mut out = Vec::with_capacity(target_len);
     for idx in 0..target_len {
         let source = idx as f32 * scale;
-        let lo = source.floor() as usize;
-        let hi = source.ceil().min((input.len() - 1) as f32) as usize;
+        // Past 2^24 elements `last as f32` can round up to `input.len()`, so
+        // the bound is applied to the integer index, not in `f32`.
+        let lo = (source.floor() as usize).min(last);
+        let hi = (source.ceil() as usize).min(last);
         if lo == hi {
             out.push(input[lo]);
             continue;
@@ -255,6 +261,28 @@ mod tests {
         assert_eq!(out.len(), 8);
         assert!((out[0] - 0.0).abs() < 1e-6);
         assert!((out[7] + 1.0).abs() < 1e-6);
+    }
+
+    /// `(len - 1) as f32` rounds up to `len` for this length (2^24 + 3 is a
+    /// tie that rounds to even, 2^24 + 4), so the last sample's `f32` index
+    /// used to land one past the end and panic. Reachable through
+    /// `MoeRouter::extract_token_embedding_with_options` on a checkpoint whose
+    /// hidden size exceeds 2^24.
+    #[test]
+    fn resample_embedding_long_input_does_not_index_past_the_end() {
+        let len = (1usize << 24) + 4;
+        assert_eq!((len - 1) as f32, len as f32);
+        let mut input = vec![0.0f32; len];
+        input[0] = -3.0;
+        input[len - 1] = 7.0;
+        let out = resample_embedding(&input, 2);
+        assert_eq!(out, vec![-3.0, 7.0]);
+    }
+
+    #[test]
+    fn synthetic_gate_scores_on_empty_embedding_are_zero() {
+        assert_eq!(synthetic_gate_scores(3, &[]), vec![0.0; 3]);
+        assert!(synthetic_gate_scores(0, &[]).is_empty());
     }
 
     /// Gate value `100 * expert + dim` so every cell is distinguishable, laid
