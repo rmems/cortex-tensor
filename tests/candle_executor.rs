@@ -1047,6 +1047,105 @@ fn rank3_inputs_including_empty_batch_are_accepted() {
     }
 }
 
+/// Projections with distinct input, intermediate, and output widths.
+fn non_square_projection_executor() -> (CandleExecutor, Vec<AnnStage>) {
+    let mut exec = CandleExecutor::new();
+    let up = LinearWeights {
+        weight: &[1.0; 8],
+        in_dim: 2,
+        out_dim: 4,
+        bias: None,
+    };
+    let down = LinearWeights {
+        weight: &[1.0; 12],
+        in_dim: 4,
+        out_dim: 3,
+        bias: None,
+    };
+    exec.bind_readout(
+        stage_id("readout"),
+        LinearWeights {
+            weight: &[1.0; 6],
+            in_dim: 2,
+            out_dim: 3,
+            bias: None,
+        },
+    )
+    .unwrap();
+    exec.bind_dense_mlp(stage_id("dense_mlp"), MlpWeights { up, down })
+        .unwrap();
+    exec.bind_gated_mlp(
+        stage_id("gated_mlp"),
+        GatedMlpWeights { gate: up, up, down },
+    )
+    .unwrap();
+    (
+        exec,
+        vec![
+            descriptor("readout", StageKind::Readout),
+            descriptor(
+                "dense_mlp",
+                StageKind::Mlp {
+                    kind: MlpKind::Dense,
+                },
+            ),
+            descriptor(
+                "gated_mlp",
+                StageKind::Mlp {
+                    kind: MlpKind::Gated,
+                },
+            ),
+        ],
+    )
+}
+
+/// Empty projections use the final output width, not the input or MLP width.
+#[test]
+fn empty_non_square_projections_use_output_width() {
+    let (mut exec, stages) = non_square_projection_executor();
+    for shape in [
+        vec![0, 2],
+        vec![0, 3, 2],
+        vec![2, 0, 2],
+        vec![0, usize::MAX / 3, 2],
+    ] {
+        let input = hidden(&shape);
+        let mut expected = shape.clone();
+        *expected.last_mut().unwrap() = 3;
+        for stage in &stages {
+            let output = exec.execute(stage, &[StageInput::Tensor(&input)]).unwrap();
+            assert_eq!(output.shape(), expected, "{} {shape:?}", stage.id);
+            assert!(export_hidden_state(&output).unwrap().data.is_empty());
+        }
+    }
+}
+
+/// A representable empty input may project to an overflowing output stride.
+#[test]
+fn empty_projection_output_stride_overflow_is_typed() {
+    let (mut exec, stages) = non_square_projection_executor();
+    let input = hidden(&[0, usize::MAX / 2, 2]);
+    for stage in &stages {
+        let err = exec
+            .execute(stage, &[StageInput::Tensor(&input)])
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CortexError::StageFailed { stage_id, source }
+                    if stage_id == stage.id.as_str()
+                        && matches!(
+                            &**source,
+                            CortexError::SizeOverflow { shape }
+                                if shape == &[0, usize::MAX / 2, 3]
+                        )
+            ),
+            "{}: {err:?}",
+            stage.id
+        );
+    }
+}
+
 #[test]
 fn add_shape_mismatch_is_typed() {
     let mut exec = CandleExecutor::new();

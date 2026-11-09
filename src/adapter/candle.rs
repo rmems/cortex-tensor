@@ -1102,6 +1102,7 @@ fn run_module(
         // rank-3 batch through its `()` hole, so build the empty output here.
         let mut out_shape = leading.to_vec();
         out_shape.push(out_features);
+        candle_shape_fits(&out_shape).map_err(|err| stage_failed(stage_id, err))?;
         let zeros = Tensor::zeros(out_shape, candle_core::DType::F32, input.inner.device())
             .map_err(|err| fail_candle(stage_id, err))?;
         return finish(stage_id, zeros);
