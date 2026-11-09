@@ -61,7 +61,7 @@ jobs:
     - name: Install llvm-tools-preview
       run: rustup component add llvm-tools-preview
     - name: Install cargo-llvm-cov
-      uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177
+      uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2
       with:
         tool: cargo-llvm-cov
     - name: Generate coverage report
@@ -192,7 +192,7 @@ jobs:
       if: steps.baseline.outputs.tag != ''
     - name: Install cargo-semver-checks
       if: steps.baseline.outputs.tag != ''
-      uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177
+      uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2
       with:
         tool: cargo-semver-checks
     - name: Semver check
@@ -223,7 +223,7 @@ jobs:
       with:
         key: reviewdog
     - name: Setup reviewdog
-      uses: reviewdog/action-setup@ece8286927ac882f28d3dee979d6d93babd197b2
+      uses: reviewdog/action-setup@1fd566bdbbb66e4a525d120dcb66f8391f18c2d9
     # The hard clippy gate lives in `build`; `|| true` only keeps comment
     # delivery problems from failing the PR.
     - name: Clippy with reviewdog (PR comments)
