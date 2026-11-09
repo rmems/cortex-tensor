@@ -201,8 +201,10 @@ impl SnnDecoder for SpikeCountDecoder {
 ///
 /// # Validation
 ///
-/// NaN gate scores and NaN encoder output are rejected before the backend
-/// steps, preserving the fail-closed ordering of the old embedded path.
+/// NaN gate scores, NaN encoder output, and an encoder stimulus whose length
+/// is not the backend channel count ([`CortexError::SnnStimulusLength`]) are
+/// rejected before the backend steps, preserving the fail-closed ordering of
+/// the old embedded path.
 /// After the step, the backend's spike list is checked against its contract
 /// — every index in `0..channels` ([`CortexError::SnnSpikeOutOfRange`]) and
 /// each channel at most once ([`CortexError::SnnDuplicateSpike`]) — and the
@@ -346,6 +348,12 @@ where
             });
         }
         let stimulus = self.encoder.encode(&gate_scores, pre_step_channels)?;
+        if stimulus.len() != pre_step_channels {
+            return Err(CortexError::SnnStimulusLength {
+                expected: pre_step_channels,
+                got: stimulus.len(),
+            });
+        }
         if stimulus.iter().any(|v| v.is_nan()) {
             return Err(CortexError::SnnNan {
                 stage: "encoder stimulus",

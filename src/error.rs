@@ -97,6 +97,11 @@ pub enum CortexError {
     #[error("SNN stimulus at channel {channel} is {value}; expected finite")]
     SnnInvalidStimulus { channel: usize, value: f32 },
 
+    /// An encoder returned a stimulus whose length differs from the backend
+    /// channel count. Raised before the backend ticks.
+    #[error("SNN encoder returned {got} stimulus values for {expected} channels")]
+    SnnStimulusLength { expected: usize, got: usize },
+
     /// A spike addressed a channel the backend width cannot represent.
     #[error("SNN spike at channel {channel} is outside backend width {channels}")]
     SnnSpikeOutOfRange { channel: usize, channels: usize },
