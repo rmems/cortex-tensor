@@ -1002,12 +1002,14 @@ fn run_attention(
     // `Linear::forward` reshapes through a `()` hole that cannot be resolved
     // when the product is zero, so return the empty output directly.
     if batch == 0 || seq == 0 {
-        let zeros = if keep_batch {
-            Tensor::zeros((batch, seq, params.dim), candle_core::DType::F32, device)
+        let out_shape = if keep_batch {
+            vec![batch, seq, params.dim]
         } else {
-            Tensor::zeros((seq, params.dim), candle_core::DType::F32, device)
-        }
-        .map_err(|err| fail_candle(stage_id, err))?;
+            vec![seq, params.dim]
+        };
+        candle_shape_fits(&out_shape).map_err(|err| stage_failed(stage_id, err))?;
+        let zeros = Tensor::zeros(out_shape, candle_core::DType::F32, device)
+            .map_err(|err| fail_candle(stage_id, err))?;
         return finish(stage_id, zeros);
     }
 

@@ -569,3 +569,56 @@ pub use candle::{
 mod burn_adapter;
 #[cfg(feature = "burn")]
 pub use burn_adapter::BurnAdapter;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn buffer(data: Vec<f32>, shape: Vec<usize>) -> HiddenStateBuffer {
+        HiddenStateBuffer {
+            data,
+            shape,
+            dtype: DType::F32,
+        }
+    }
+
+    #[test]
+    fn require_f32_buffer_overflow_is_wrapped_size_overflow() {
+        let err = require_f32_buffer(&buffer(Vec::new(), vec![usize::MAX, 2])).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CortexError::StageFailed { stage_id, source }
+                    if stage_id == "hidden_state"
+                        && matches!(
+                            &**source,
+                            CortexError::SizeOverflow { shape } if shape == &[usize::MAX, 2]
+                        )
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn require_f32_buffer_zero_axis_short_circuits_overflow() {
+        require_f32_buffer(&buffer(Vec::new(), vec![usize::MAX, usize::MAX, 0])).unwrap();
+    }
+
+    #[test]
+    fn require_f32_buffer_length_mismatch_is_shape_mismatch() {
+        require_f32_buffer(&buffer(vec![0.0; 6], vec![2, 3])).unwrap();
+        let err = require_f32_buffer(&buffer(vec![0.0; 5], vec![2, 3])).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CortexError::StageFailed { source, .. }
+                    if matches!(
+                        &**source,
+                        CortexError::ShapeMismatch { expected, got }
+                            if expected == &[2, 3] && got == &[5]
+                    )
+            ),
+            "{err:?}"
+        );
+    }
+}
