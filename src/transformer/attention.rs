@@ -281,6 +281,9 @@ fn transpose_last_two(t: &Tensor) -> Tensor {
 /// `1/(r+1)`). Future slots `r+1..seq` are written as exactly `0.0` and their
 /// scores are never read, so no score value (including `-Inf` overflow of the
 /// whole prefix) can move probability mass onto a future token (issue #94).
+///
+/// The shape assert is an internal invariant: `try_forward` builds `t` from
+/// shapes it has already validated.
 fn causal_scale_softmax_in_place(t: &mut Tensor, scale: f32, nh: usize, seq: usize) {
     assert_eq!(
         t.shape(),
@@ -311,6 +314,9 @@ fn causal_scale_softmax_in_place(t: &mut Tensor, scale: f32, nh: usize, seq: usi
 /// earlier tokens even though their attention weights are exactly zero.
 /// For finite inputs the result is bit-identical to the dense product: the
 /// skipped terms are `±0.0` additions and the accumulation order is unchanged.
+///
+/// The shape asserts are internal invariants, as in
+/// [`causal_scale_softmax_in_place`].
 fn causal_context(attn: &Tensor, v: &Tensor, nh: usize, seq: usize, hd: usize) -> Tensor {
     assert_eq!(
         attn.shape(),

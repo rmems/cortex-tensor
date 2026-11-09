@@ -170,6 +170,12 @@ fn saturate_f32(y: f64) -> f32 {
 ///
 /// `logits` and `out` must have the same length. Crate-internal: callers should
 /// use [`crate::tensor::ops::softmax`] or [`crate::tensor::Tensor::softmax_last`].
+///
+/// # Panics
+///
+/// Panics on a length mismatch. That is an internal invariant: every caller
+/// slices both buffers from the same validated shape, so no public input
+/// reaches the assert.
 pub(crate) fn softmax_row(logits: &[f32], out: &mut [f32]) {
     assert_eq!(
         logits.len(),
@@ -251,6 +257,12 @@ pub(crate) fn softmax_vec(logits: &[f32]) -> Vec<f32> {
 /// `eps` must already have been accepted by [`validate_norm_eps`]. Lengths
 /// must match and `x` must be non-empty; the public path is
 /// [`crate::tensor::ops::try_layer_norm`].
+///
+/// # Panics
+///
+/// Panics on a length mismatch or an empty row. `try_layer_norm` returns
+/// `DimMismatch` / `ZeroWidth` for both before calling this, so the asserts
+/// guard an internal invariant only.
 pub(crate) fn layer_norm_row(x: &[f32], weight: &[f32], bias: &[f32], eps: f64, out: &mut [f32]) {
     assert_eq!(
         x.len(),
@@ -294,6 +306,11 @@ pub(crate) fn layer_norm_row(x: &[f32], weight: &[f32], bias: &[f32], eps: f64, 
 ///
 /// `eps` must already have been accepted by [`validate_norm_eps`]. The public
 /// path is [`crate::tensor::ops::try_rms_norm`].
+///
+/// # Panics
+///
+/// Same internal invariant as [`layer_norm_row`]: `try_rms_norm` rejects a
+/// length mismatch or an empty row before calling this.
 pub(crate) fn rms_norm_row(x: &[f32], weight: &[f32], eps: f64, out: &mut [f32]) {
     assert_eq!(
         x.len(),

@@ -665,6 +665,8 @@ fn expect_arity(
     Ok(())
 }
 
+/// `index` must be in bounds: callers run [`expect_arity`] (or loop over
+/// `0..inputs.len()`) first. The same holds for [`tokens_arg`].
 fn tensor_arg<'a>(
     stage_id: &StageId,
     inputs: &'a [StageInput<'a, CandleTensor>],
