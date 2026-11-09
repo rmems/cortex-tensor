@@ -2,9 +2,11 @@
 name = "cortex-tensor"
 version = "0.1.0"
 edition = "2024"
-# Development toolchain and MSRV are the same pin. Keep this equal to
-# `rust-toolchain.toml` `channel` and the CI / `.agents/setup` install.
-rust-version = "1.99.0"
+# MSRV for dependents: the verified floor, set by `engram-parser` 0.3.0
+# (1.97.1). `neuromod` needs 1.98.1 and `axon-encoder` needs 1.99.0. The development
+# toolchain is pinned separately in `rust-toolchain.toml`; the `msrv` CI job
+# guards this value.
+rust-version = "1.97.1"
 description = "Backend-neutral ANN stage layer and deterministic Vec reference backend for hybrid ANN/SNN systems."
 authors = ["Raul Cardenas Montoya"]
 license = "MIT OR Apache-2.0"
