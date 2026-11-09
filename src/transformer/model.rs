@@ -135,7 +135,7 @@ impl TransformerConfig {
     }
 }
 
-/// Decoder-only transformer language model — candle-free.
+/// Decoder-only transformer language model for the CPU reference backend.
 ///
 /// Architecture: token embedding + positional embedding → N × TransformerBlock → LayerNorm → LM head
 #[derive(Clone)]

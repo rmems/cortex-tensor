@@ -4,11 +4,13 @@ Guidance for coding agents (Amp, Codex, Cursor, Claude Code, and others) working
 
 ## Purpose
 
-`cortex-tensor` is a pure-Rust library of tensor, transformer, and Mixture-of-Experts building blocks
-(see `README.md`). It has no CUDA, no Julia FFI and no framework dependency: the tensor type is a
-contiguous row-major `Vec<f32>` plus a shape. Checkpoint bytes come from `engram-parser` 0.3.0; this crate binds them into MoE routing.
-The design goals in the README (zero GPU coupling, zero framework dependency, small dependency set)
-are constraints: don't add GPU code or heavy ML frameworks.
+`cortex-tensor` is a backend-neutral ANN stage layer (`AnnStage`, `AnnTopology`, `AnnExecutor`) plus a
+deterministic CPU `f32` reference backend: a contiguous row-major `Vec<f32>` tensor, a reference transformer,
+and dense MoE routing (see `README.md`). It has no CUDA, no Julia FFI and no mandatory framework dependency.
+Candle and Burn are optional adapters behind features. Checkpoint bytes come from `engram-parser` 0.3.0; this crate
+binds them into MoE routing. Placement and orchestration belong to `hybrid-fusion`.
+The design goals in the README (zero GPU coupling, no required ML framework, small dependency set)
+are constraints: don't add GPU code or make a heavy ML framework a required dependency.
 
 ## Layout
 
@@ -19,7 +21,7 @@ are constraints: don't add GPU code or heavy ML frameworks.
 | `src/moe/` | MoE router, engram-parser checkpoint binding, adapters, routing |
 | `src/snn/` | Optional SNN backend/encoder adapters |
 | `src/adapter.rs` | External-adapter capability contract; `candle` executor and `burn` policy stub live behind features |
-| `src/stage.rs`, `src/reference_json.rs`, `src/types.rs`, `src/error.rs` | Stage execution, reference serde, shared types, errors |
+| `src/stage.rs`, `src/reference_json.rs`, `src/types.rs` (incl. `RoutingMode`), `src/error.rs` | Stage execution, reference serde, shared types, errors |
 | `tests/` (+ `tests/fixtures/`) | Integration tests (public API compatibility, reference serde, stage execution) |
 
 ## Toolchain
