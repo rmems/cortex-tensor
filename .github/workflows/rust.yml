@@ -9,16 +9,19 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# zizmor/excessive-permissions: default to read-only; steps needing more
-# (e.g. reviewdog PR comments) declare it on the job/step.
+# zizmor/excessive-permissions: read-only by default. Only the reviewdog job
+# declares `pull-requests: write`.
 permissions:
   contents: read
-  # reviewdog posts clippy findings as PR review comments.
-  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
@@ -28,14 +31,16 @@ jobs:
       with:
         persist-credentials: false
 
-    # Hosted images ship rustup; track the latest stable toolchain
-    # explicitly instead of whatever version the image happens to carry.
+    # Hosted images ship rustup. Install the exact toolchain pinned in
+    # rust-toolchain.toml instead of whatever version the image carries.
     - name: Install Rust 1.99.0
       run: |
         rustup toolchain install 1.99.0 --component rustfmt --component clippy
         rustup default 1.99.0
         rustc --version
         cargo --version
+
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
     - name: Build
       run: cargo build --verbose --all-features
@@ -99,16 +104,132 @@ jobs:
         RUSTDOCFLAGS: -D warnings
       run: cargo doc --no-deps
 
-    # reviewdog for inline PR comments from clippy (addresses chore reviewdog integration)
+  # Every feature on its own, plus the default set, must build, pass clippy
+  # and pass tests. `--all-features` in `build` only covers the union.
+  features:
+    name: features (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: default, flags: "" }
+          - { name: no-default, flags: "--no-default-features" }
+          - { name: neuromod, flags: "--no-default-features --features neuromod" }
+          - { name: axon-encoder, flags: "--no-default-features --features axon-encoder" }
+          - { name: candle, flags: "--no-default-features --features candle" }
+          - { name: burn, flags: "--no-default-features --features burn" }
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - name: Install Rust 1.99.0
+      run: |
+        rustup toolchain install 1.99.0 --component clippy
+        rustup default 1.99.0
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        key: features-${{ matrix.name }}
+    - name: Clippy
+      run: cargo clippy --all-targets ${{ matrix.flags }} -- -D warnings
+    - name: Test
+      run: cargo test ${{ matrix.flags }}
+
+  # MSRV policy: the development toolchain stays pinned (rust-toolchain.toml),
+  # but `rust-version` is the verified floor for dependents. 1.97.1 is set by
+  # `engram-parser` 0.3.0. `neuromod` needs 1.98.1 and `axon-encoder` needs 1.99.0, so they
+  # are not covered here; they are built on the pinned toolchain in `features`.
+  msrv:
+    name: msrv (1.97.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # rust-toolchain.toml (1.99.0) outranks `rustup default`; the env var
+      # outranks the file, so every step really runs on 1.97.1.
+      RUSTUP_TOOLCHAIN: 1.97.1
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - name: Install Rust 1.97.1
+      run: |
+        rustup toolchain install 1.97.1 --profile minimal
+        rustup default 1.97.1
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        key: msrv
+    - name: Check default, candle and burn features at MSRV
+      run: |
+        rustc --version
+        cargo check --all-targets
+        cargo check --all-targets --features candle
+        cargo check --all-targets --features burn
+
+  # Breaking changes need a `!` commit. Compares against the newest v* tag;
+  # skipped until one exists (the crate is unreleased).
+  semver:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'pull_request'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Find baseline tag
+      id: baseline
+      run: |
+        tag=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)
+        echo "tag=$tag" >> "$GITHUB_OUTPUT"
+        if [ -z "$tag" ]; then echo "::notice title=semver::No v* tag yet; skipping."; fi
+    - name: Install Rust 1.99.0
+      if: steps.baseline.outputs.tag != ''
+      run: |
+        rustup toolchain install 1.99.0 --profile minimal
+        rustup default 1.99.0
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      if: steps.baseline.outputs.tag != ''
+    - name: Install cargo-semver-checks
+      if: steps.baseline.outputs.tag != ''
+      uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177
+      with:
+        tool: cargo-semver-checks
+    - name: Semver check
+      if: steps.baseline.outputs.tag != ''
+      env:
+        BASELINE: ${{ steps.baseline.outputs.tag }}
+      run: cargo semver-checks --baseline-rev "$BASELINE" --all-features
+
+  # reviewdog posts clippy findings as inline PR comments. Isolated here so
+  # `pull-requests: write` is not granted to the other jobs. Fork PRs get a
+  # read-only token, so the job is limited to same-repo PRs.
+  reviewdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - name: Install Rust 1.99.0
+      run: |
+        rustup toolchain install 1.99.0 --component clippy
+        rustup default 1.99.0
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        key: reviewdog
     - name: Setup reviewdog
       uses: reviewdog/action-setup@ece8286927ac882f28d3dee979d6d93babd197b2
+    # The hard clippy gate lives in `build`; `|| true` only keeps comment
+    # delivery problems from failing the PR.
     - name: Clippy with reviewdog (PR comments)
       env:
         REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        CARGO_INCREMENTAL: 0   # force fresh warnings output (addresses CodeRabbit incremental cache Major)
+        CARGO_INCREMENTAL: 0
       run: |
         cargo clippy --all-targets --all-features --message-format=json | \
           reviewdog -f=clippy -reporter=github-pr-review -level=warning || true
-      # note: || true only for reporter step to not fail PR on comment issues; main clippy above fails hard.
-    # Clippy is intentionally run twice: once as hard gate (-D warnings), second time piped to reviewdog
-    # for inline PR comments (see devin/codacy feedback). This is deliberate and pre-existing pattern.

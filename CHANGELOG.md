@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### CI
+
+- **Feature matrix, MSRV job, semver-checks, workflow hygiene** (RM-2103): per-feature clippy and test runs (default, no-default, `neuromod`, `axon-encoder`, `candle`, `burn`); `rust-version` lowered from 1.99.0 to the verified floor 1.97.1 (set by `engram-parser` 0.3.0; `neuromod` needs 1.98.1, `axon-encoder` needs 1.99.0) with an `msrv` job guarding it, while the development toolchain stays pinned to 1.99.0; `cargo semver-checks` against the newest `v*` tag (skipped until one exists); `pull-requests: write` moved to a separate reviewdog job; added `concurrency`, `timeout-minutes` and `rust-cache`; dependabot drops the dead `julia` entry and groups github-actions and cargo minor/patch updates.
+
 ### Changed (breaking: error variants)
 
 - **Breaking (error variants, RM-2365 / #150):** the same failure class now returns one stable variant across layers. Callers matching the old variants must update:
@@ -23,6 +27,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A non-`f32` Candle tensor returns `StageDTypeMismatch` and a non-CPU one returns `UnsupportedOperation { category: "device" }` (both were `InvalidConfig`), from `export_hidden_state` and stage outputs. The stage id is `hidden_state` at the import/export boundary.
   - Remaining Candle-internal errors are still `Msg`, now prefixed with `candle: `.
   - Hidden-state import uses one crate-private `checked_numel` (zero-axis short-circuit, `SizeOverflow` on overflow) on both paths; the adapter-local copy is gone. `ReferenceExecutor::import_hidden` overflow is now `StageFailed { SizeOverflow }` (was `StageFailed { ShapeMismatch { got: [dim] } }`). `import_hidden_state` also returns `SizeOverflow` for zero-sized shapes whose non-zero extents overflow (for example `[usize::MAX, usize::MAX, 0]` or `[0, usize::MAX, 2]`): candle-core 0.11 multiplies every extent without a zero short-circuit and panics on the overflow (`[0, usize::MAX, 2]` previously reached that panic), so the Candle path keeps rejecting them while the reference path accepts `[usize::MAX, usize::MAX, 0]`.
+- **Breaking (error variants, RM-2097 / #109):** `Tensor::try_softmax_last` and `ops::try_softmax` return `RankMismatch { expected: 2, got }` for rank `> 2` (was `InvalidConfig("softmax_last: max 2-D, …")`), matching every other rank-checked op. The panicking `softmax_last` / `ops::softmax` wrappers now go through the shared compatibility panic, so the message names the API (`Tensor::softmax_last` / `softmax`) and points at the `try_*` replacement.
+
+### Refactored
+
+- **Tensor helper consolidation (RM-2097 / #109):** `try_layer_norm` / `try_rms_norm` validate `eps` through the public `finite::validate_norm_eps` (the private duplicate is gone). `ReferenceExecutor`'s embedding stage and `TransformerLM` share one crate-private `embed_tokens`, so the stage path now also bounds the sequence by `min(pos_embed rows, max_seq_len)`. Fresh `f32` buffers sized by a shape go through one crate-private `checked_alloc_len`. The unreachable "degenerate partition → uniform" branch in the softmax row kernel is a `debug_assert!`; with a finite max the partition is always in `[1, n]`, and the README and MoE routing docs no longer describe that fallback.
+
+### Performance
+
+- **Slice-based matmul inner loops** (RM-2090 / #102): `try_matmul` and
+  `try_batched_matmul` hoist the output, `a` and `b` row slices out of the
+  inner loop, so it runs without per-element bounds checks and
+  auto-vectorises. Summation order is unchanged, so outputs are bitwise
+  identical (goldens unaffected). `try_matmul` on 256×512×512 runs about 1.9×
+  faster in release builds (26.7 ms → 13.7 ms here). Small and medium batched
+  shapes gain 1.3-1.8×; large untiled batched shapes are memory-bound and
+  show no clear change.
 
 ### Docs
 

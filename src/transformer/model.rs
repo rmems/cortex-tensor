@@ -283,44 +283,16 @@ impl TransformerLM {
         )
     }
 
-    /// Token + positional embedding, shared by [`Self::try_hidden_states`] and
-    /// the stage executor's embedding stage so both compute byte-identical
-    /// results.
-    ///
-    /// Returns [`CortexError::InputLengthMismatch`] when the sequence exceeds
-    /// `config.max_seq_len` (or, defensively, when a position index overflows
-    /// `u32`), and [`CortexError::TokenIndex`] for out-of-vocabulary ids.
+    /// Token + positional embedding for this model; delegates to the free
+    /// [`embed_tokens`], which the stage executor's embedding stage also
+    /// calls, so both paths run the same code and stay byte-identical.
     pub(crate) fn embed_tokens(&self, token_ids: &[u32]) -> Result<Tensor> {
-        let seq_len = token_ids.len();
-        // `config` and `pos_embed` are both `pub`; bound by the table that is
-        // actually indexed so a raised `max_seq_len` still reports a length
-        // error rather than a misleading `TokenIndex` from the lookup.
-        let max_pos = self
-            .pos_embed
-            .shape()
-            .first()
-            .copied()
-            .unwrap_or(0)
-            .min(self.config.max_seq_len);
-        if seq_len > max_pos {
-            return Err(CortexError::InputLengthMismatch {
-                expected: max_pos,
-                got: seq_len,
-            });
-        }
-
-        // Token + positional embeddings. `try_from` guards the u32
-        // truncation a literal `as` cast would silently allow.
-        let tok = try_embedding(&self.tok_embed, token_ids)?;
-        let pos_ids: Vec<u32> = (0..seq_len)
-            .map(u32::try_from)
-            .collect::<std::result::Result<_, _>>()
-            .map_err(|_| CortexError::InputLengthMismatch {
-                expected: u32::MAX as usize,
-                got: seq_len,
-            })?;
-        let pos = try_embedding(&self.pos_embed, &pos_ids)?;
-        tok.try_add(&pos)
+        embed_tokens(
+            &self.tok_embed,
+            &self.pos_embed,
+            self.config.max_seq_len,
+            token_ids,
+        )
     }
 
     /// Total number of stored parameters, summed from the `numel()` of every
@@ -370,6 +342,52 @@ fn stored_block_params(block: &TransformerBlock) -> usize {
     .iter()
     .map(|t| t.numel())
     .sum()
+}
+
+/// Token + positional embedding: `tok_embed[ids] + pos_embed[0..len]`.
+///
+/// The single implementation behind [`TransformerLM::try_hidden_states`] and
+/// the reference stage executor's embedding stage.
+///
+/// The sequence is bounded by `min(pos_embed rows, max_seq_len)`: callers can
+/// pass a table and cap that disagree (the model's `config` and `pos_embed`
+/// are both `pub`), and bounding by the table actually indexed reports a
+/// length error rather than a misleading `TokenIndex` from the lookup.
+///
+/// Returns [`CortexError::InputLengthMismatch`] when the sequence exceeds that
+/// bound (or, defensively, when a position index overflows `u32`), and
+/// [`CortexError::TokenIndex`] for out-of-vocabulary ids.
+pub(crate) fn embed_tokens(
+    tok_embed: &Tensor,
+    pos_embed: &Tensor,
+    max_seq_len: usize,
+    token_ids: &[u32],
+) -> Result<Tensor> {
+    let seq_len = token_ids.len();
+    let max_pos = pos_embed
+        .shape()
+        .first()
+        .copied()
+        .unwrap_or(0)
+        .min(max_seq_len);
+    if seq_len > max_pos {
+        return Err(CortexError::InputLengthMismatch {
+            expected: max_pos,
+            got: seq_len,
+        });
+    }
+
+    // `try_from` guards the u32 truncation a literal `as` cast would allow.
+    let tok = try_embedding(tok_embed, token_ids)?;
+    let pos_ids: Vec<u32> = (0..seq_len)
+        .map(u32::try_from)
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|_| CortexError::InputLengthMismatch {
+            expected: u32::MAX as usize,
+            got: seq_len,
+        })?;
+    let pos = try_embedding(pos_embed, &pos_ids)?;
+    tok.try_add(&pos)
 }
 
 #[cfg(test)]
