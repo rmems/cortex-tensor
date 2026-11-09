@@ -17,6 +17,7 @@ use crate::stage::{
     AnnCapabilities, AnnExecutor, AnnStage, DType, MlpKind, NormKind, StageId, StageInput,
     StageKind, StageKindTag, StageTensor, TensorMeta,
 };
+use crate::tensor::checked_numel;
 use candle_core::{Device, Tensor};
 use candle_nn::Module;
 use candle_nn::attention::{AttnMask, flash_attn};
@@ -69,47 +70,75 @@ impl CandleTensor {
         self.inner.dims()
     }
 
-    fn from_candle(inner: Tensor) -> Result<Self> {
-        if inner.dtype() != candle_core::DType::F32 {
-            return Err(CortexError::InvalidConfig(format!(
-                "candle adapter only carries f32 tensors, got {:?}",
-                inner.dtype()
-            )));
-        }
-        if !inner.device().is_cpu() {
-            return Err(CortexError::InvalidConfig(
-                "candle adapter only carries CPU tensors".to_string(),
-            ));
-        }
+    /// Wrap a Candle tensor after checking it is CPU `f32`.
+    ///
+    /// `stage_id` names the stage (or `"hidden_state"` at the import boundary)
+    /// in the typed refusal.
+    fn from_candle(inner: Tensor, stage_id: &str) -> Result<Self> {
+        require_cpu_f32(&inner, stage_id)?;
         let inner = inner.contiguous().map_err(candle_msg)?;
         Ok(Self { inner })
     }
+}
+
+/// Stage id used for refusals at the hidden-state import/export boundary,
+/// matching [`ReferenceExecutor::import_hidden`](crate::stage::ReferenceExecutor::import_hidden).
+const HIDDEN_STATE: &str = "hidden_state";
+
+/// Reject a non-`f32` tensor with [`CortexError::StageDTypeMismatch`] and a
+/// non-CPU tensor with [`CortexError::UnsupportedOperation`] (`category: "device"`).
+fn require_cpu_f32(inner: &Tensor, stage_id: &str) -> Result<()> {
+    if inner.dtype() != candle_core::DType::F32 {
+        return Err(CortexError::StageDTypeMismatch {
+            stage_id: stage_id.to_string(),
+            expected: DType::F32.to_string(),
+            got: inner.dtype().as_str().to_string(),
+        });
+    }
+    if !inner.device().is_cpu() {
+        return Err(CortexError::UnsupportedOperation {
+            backend: CandleExecutor::BACKEND_NAME,
+            stage_id: (stage_id != HIDDEN_STATE).then(|| stage_id.to_string()),
+            category: "device",
+            detail: format!(
+                "candle adapter only carries CPU tensors, got {:?}",
+                inner.device().location()
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Copy `state` into a contiguous CPU `f32` Candle tensor.
 ///
 /// # Errors
 ///
-/// Returns [`CortexError::SizeOverflow`] when the shape product overflows,
-/// [`CortexError::ShapeMismatch`] when `data.len()` disagrees with that
-/// product, or [`CortexError::Msg`] when Candle rejects the buffer.
+/// Returns [`CortexError::SizeOverflow`] when the element count or Candle's
+/// shape arithmetic overflows,
+/// [`CortexError::ShapeMismatch`] when `data.len()` disagrees with the element
+/// count, or a `candle:`-prefixed [`CortexError::Msg`] when Candle rejects the
+/// buffer.
+///
+/// A zero-sized shape whose non-zero prefix overflows `usize` (for example
+/// `[usize::MAX, usize::MAX, 0]`) is accepted by
+/// [`ReferenceExecutor::import_hidden`](crate::stage::ReferenceExecutor::import_hidden)
+/// but returns `SizeOverflow` here: candle-core 0.11 multiplies every extent
+/// without short-circuiting on zero and panics on the overflow.
 pub fn import_hidden_state(state: &HiddenState) -> Result<CandleTensor> {
     let inner = f32_tensor(&state.data, &state.shape, &Device::Cpu)?;
-    CandleTensor::from_candle(inner)
+    CandleTensor::from_candle(inner, HIDDEN_STATE)
 }
 
 /// Copy `tensor` back to row-major `f32` storage.
 ///
 /// # Errors
 ///
-/// Returns [`CortexError::InvalidConfig`] when the tensor is not CPU `f32`,
-/// or [`CortexError::Msg`] when Candle cannot read it back.
+/// Returns [`CortexError::StageDTypeMismatch`] when the tensor is not `f32`,
+/// [`CortexError::UnsupportedOperation`] (`category: "device"`) when it is not
+/// on the CPU, or a `candle:`-prefixed [`CortexError::Msg`] when Candle cannot
+/// read it back.
 pub fn export_hidden_state(tensor: &CandleTensor) -> Result<HiddenState> {
-    if tensor.inner.dtype() != candle_core::DType::F32 || !tensor.inner.device().is_cpu() {
-        return Err(CortexError::InvalidConfig(
-            "candle adapter only exports contiguous CPU f32 tensors".to_string(),
-        ));
-    }
+    require_cpu_f32(&tensor.inner, HIDDEN_STATE)?;
     let flat = tensor
         .inner
         .flatten_all()
@@ -539,9 +568,8 @@ impl AnnExecutor for CandleExecutor {
                     return Err(missing(stage_id));
                 };
                 let norm = norm.clone();
-                run_module(stage_id, inputs, norm.weight().elem_count(), |x| {
-                    norm.forward(x)
-                })
+                let width = norm.weight().elem_count();
+                run_module(stage_id, inputs, width, width, |x| norm.forward(x))
             }
             StageKind::Normalization {
                 kind: NormKind::Rms,
@@ -551,9 +579,8 @@ impl AnnExecutor for CandleExecutor {
                     return Err(missing(stage_id));
                 };
                 let norm = norm.clone();
-                run_module(stage_id, inputs, norm.weight().elem_count(), |x| {
-                    norm.forward(x)
-                })
+                let width = norm.weight().elem_count();
+                run_module(stage_id, inputs, width, width, |x| norm.forward(x))
             }
             StageKind::Mlp {
                 kind: MlpKind::Dense,
@@ -582,7 +609,8 @@ impl AnnExecutor for CandleExecutor {
                 };
                 let linear = linear.clone();
                 let in_dim = linear_in_dim(&linear)?;
-                run_module(stage_id, inputs, in_dim, |x| linear.forward(x))
+                let out_dim = linear_out_dim(&linear)?;
+                run_module(stage_id, inputs, in_dim, out_dim, |x| linear.forward(x))
             }
             StageKind::Add => run_add(stage_id, inputs),
             StageKind::MoeRouter { .. }
@@ -602,8 +630,13 @@ fn missing(stage_id: &StageId) -> CortexError {
     }
 }
 
+/// Residual Candle failure with no typed [`CortexError`] counterpart.
+///
+/// Shape, rank, dtype, and device failures are checked before Candle runs and
+/// reported with typed variants; only Candle-internal errors reach this path.
+/// The `candle: ` prefix identifies the source.
 fn candle_msg(err: candle_core::Error) -> CortexError {
-    CortexError::Msg(err.to_string())
+    CortexError::Msg(format!("candle: {err}"))
 }
 
 fn stage_failed(stage_id: &StageId, err: CortexError) -> CortexError {
@@ -660,13 +693,27 @@ fn tokens_arg<'a>(
     }
 }
 
-fn checked_numel(shape: &[usize]) -> Result<usize> {
+/// Whether candle-core 0.11 can represent `shape` without overflowing.
+///
+/// `Shape::elem_count` multiplies every extent left to right and
+/// `Shape::stride_contiguous` multiplies every extent right to left, neither
+/// short-circuiting on a zero axis, and both panic on overflow in debug
+/// builds. So every prefix and every suffix product must fit in `usize`, even
+/// when [`checked_numel`] is `0`. Returns [`CortexError::SizeOverflow`] otherwise.
+fn candle_shape_fits(shape: &[usize]) -> Result<()> {
+    let overflow = || CortexError::SizeOverflow {
+        shape: shape.to_vec(),
+    };
     shape
         .iter()
         .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
-        .ok_or_else(|| CortexError::SizeOverflow {
-            shape: shape.to_vec(),
-        })
+        .ok_or_else(overflow)?;
+    shape
+        .iter()
+        .rev()
+        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
+        .ok_or_else(overflow)?;
+    Ok(())
 }
 
 fn expect_matrix(data: &[f32], rows: usize, cols: usize) -> Result<()> {
@@ -686,6 +733,7 @@ fn expect_matrix(data: &[f32], rows: usize, cols: usize) -> Result<()> {
 
 fn f32_tensor(data: &[f32], shape: &[usize], device: &Device) -> Result<Tensor> {
     let numel = checked_numel(shape)?;
+    candle_shape_fits(shape)?;
     if data.len() != numel {
         return Err(CortexError::ShapeMismatch {
             expected: shape.to_vec(),
@@ -748,6 +796,15 @@ fn linear_in_dim(linear: &Linear) -> Result<usize> {
             "candle linear weight must be rank 2 [out_dim, in_dim]".to_string(),
         )
     })
+}
+
+fn linear_out_dim(linear: &Linear) -> Result<usize> {
+    match linear.weight().dims() {
+        [out_dim, _] => Ok(*out_dim),
+        _ => Err(CortexError::InvalidConfig(
+            "candle linear weight must be rank 2 [out_dim, in_dim]".to_string(),
+        )),
+    }
 }
 
 fn scale_width(weight: &[f32], eps: f32, op: &'static str) -> Result<usize> {
@@ -838,7 +895,25 @@ fn prepare_attention(device: &Device, weights: &AttentionWeights<'_>) -> Result<
 }
 
 fn finish(stage_id: &StageId, tensor: Tensor) -> Result<CandleTensor> {
-    CandleTensor::from_candle(tensor).map_err(|err| stage_failed(stage_id, err))
+    CandleTensor::from_candle(tensor, stage_id.as_str()).map_err(|err| stage_failed(stage_id, err))
+}
+
+/// Ranks a tensor-input Candle stage accepts: `[seq, dim]` (the reference
+/// layout) or `[batch, seq, dim]`.
+///
+/// Anything else returns [`CortexError::RankMismatch`] with `expected: 2`,
+/// the same variant and payload [`ReferenceExecutor`](crate::stage::ReferenceExecutor)
+/// returns for rank 0, 1, and 4+. Rank 3 is a Candle-only extension; the
+/// reference backend rejects it.
+fn check_stage_rank(stage_id: &StageId, dims: &[usize]) -> Result<()> {
+    if matches!(dims.len(), 2 | 3) {
+        return Ok(());
+    }
+    Err(rank_mismatch(stage_id, dims.len()))
+}
+
+fn rank_mismatch(stage_id: &StageId, got: usize) -> CortexError {
+    stage_failed(stage_id, CortexError::RankMismatch { expected: 2, got })
 }
 
 fn run_embedding(
@@ -910,6 +985,7 @@ fn run_attention(
     expect_arity(stage_id, inputs, 1)?;
     let input = tensor_arg(stage_id, inputs, 0)?;
     let dims = input.inner.dims();
+    check_stage_rank(stage_id, dims)?;
     let (batch, seq, keep_batch) = match dims {
         [seq, dim] => {
             check_dim(stage_id, 1, params.dim, *dim)?;
@@ -919,23 +995,21 @@ fn run_attention(
             check_dim(stage_id, 2, params.dim, *dim)?;
             (*batch, *seq, true)
         }
-        _ => {
-            return Err(stage_failed(
-                stage_id,
-                CortexError::Msg(format!(
-                    "candle attention expects rank 2 [seq, dim] or rank 3 [batch, seq, dim], got rank {}",
-                    dims.len()
-                )),
-            ));
-        }
+        // `check_stage_rank` already rejected every other rank.
+        _ => return Err(rank_mismatch(stage_id, dims.len())),
     };
-    if seq == 0 {
-        let zeros = if keep_batch {
-            Tensor::zeros((batch, 0, params.dim), candle_core::DType::F32, device)
+    // An empty batch or sequence has nothing to attend over. Candle's
+    // `Linear::forward` reshapes through a `()` hole that cannot be resolved
+    // when the product is zero, so return the empty output directly.
+    if batch == 0 || seq == 0 {
+        let out_shape = if keep_batch {
+            vec![batch, seq, params.dim]
         } else {
-            Tensor::zeros((0, params.dim), candle_core::DType::F32, device)
-        }
-        .map_err(|err| fail_candle(stage_id, err))?;
+            vec![seq, params.dim]
+        };
+        candle_shape_fits(&out_shape).map_err(|err| stage_failed(stage_id, err))?;
+        let zeros = Tensor::zeros(out_shape, candle_core::DType::F32, device)
+            .map_err(|err| fail_candle(stage_id, err))?;
         return finish(stage_id, zeros);
     }
 
@@ -996,20 +1070,13 @@ fn run_module(
     stage_id: &StageId,
     inputs: &[StageInput<'_, CandleTensor>],
     in_features: usize,
+    out_features: usize,
     forward: impl FnOnce(&Tensor) -> candle_core::Result<Tensor>,
 ) -> Result<CandleTensor> {
     expect_arity(stage_id, inputs, 1)?;
     let input = tensor_arg(stage_id, inputs, 0)?;
     let dims = input.inner.dims();
-    if dims.is_empty() {
-        return Err(stage_failed(
-            stage_id,
-            CortexError::RankMismatch {
-                expected: 1,
-                got: 0,
-            },
-        ));
-    }
+    check_stage_rank(stage_id, dims)?;
     let last = dims[dims.len() - 1];
     if last == 0 {
         return Err(stage_failed(
@@ -1031,6 +1098,17 @@ fn run_module(
             },
         ));
     }
+    let leading = &dims[..dims.len() - 1];
+    if leading.contains(&0) {
+        // Same reason as attention: `Linear::forward` cannot reshape an empty
+        // rank-3 batch through its `()` hole, so build the empty output here.
+        let mut out_shape = leading.to_vec();
+        out_shape.push(out_features);
+        candle_shape_fits(&out_shape).map_err(|err| stage_failed(stage_id, err))?;
+        let zeros = Tensor::zeros(out_shape, candle_core::DType::F32, input.inner.device())
+            .map_err(|err| fail_candle(stage_id, err))?;
+        return finish(stage_id, zeros);
+    }
     let output = forward(&input.inner).map_err(|err| fail_candle(stage_id, err))?;
     finish(stage_id, output)
 }
@@ -1041,7 +1119,8 @@ fn run_dense_mlp(
     inputs: &[StageInput<'_, CandleTensor>],
 ) -> Result<CandleTensor> {
     let in_dim = linear_in_dim(&params.up)?;
-    run_module(stage_id, inputs, in_dim, |x| {
+    let out_dim = linear_out_dim(&params.down)?;
+    run_module(stage_id, inputs, in_dim, out_dim, |x| {
         let hidden = params.up.forward(x)?;
         let hidden = Activation::NewGelu.forward(&hidden)?;
         params.down.forward(&hidden)
@@ -1054,7 +1133,8 @@ fn run_gated_mlp(
     inputs: &[StageInput<'_, CandleTensor>],
 ) -> Result<CandleTensor> {
     let in_dim = linear_in_dim(&params.gate)?;
-    run_module(stage_id, inputs, in_dim, |x| {
+    let out_dim = linear_out_dim(&params.down)?;
+    run_module(stage_id, inputs, in_dim, out_dim, |x| {
         let gate = params.gate.forward(x)?;
         let up = params.up.forward(x)?;
         let gated = Tensor::cat(&[&gate, &up], candle_core::D::Minus1)?;
@@ -1075,9 +1155,77 @@ fn run_add(stage_id: &StageId, inputs: &[StageInput<'_, CandleTensor>]) -> Resul
     let mut acc = first.inner.clone();
     for index in 1..inputs.len() {
         let rhs = tensor_arg(stage_id, inputs, index)?;
+        if acc.dims() != rhs.inner.dims() {
+            return Err(stage_failed(
+                stage_id,
+                CortexError::ShapeMismatch {
+                    expected: acc.dims().to_vec(),
+                    got: rhs.inner.dims().to_vec(),
+                },
+            ));
+        }
         acc = acc
             .add(&rhs.inner)
             .map_err(|err| fail_candle(stage_id, err))?;
     }
     finish(stage_id, acc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn residual_candle_errors_are_prefixed() {
+        let err = candle_msg(candle_core::Error::Msg("boom".to_string()));
+        assert!(
+            matches!(&err, CortexError::Msg(msg) if msg == "candle: boom"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn non_f32_tensor_is_stage_dtype_mismatch() {
+        let f64_tensor = Tensor::zeros((2, 2), candle_core::DType::F64, &Device::Cpu).unwrap();
+        let err = CandleTensor::from_candle(f64_tensor.clone(), "blocks.0.mlp").unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CortexError::StageDTypeMismatch { stage_id, expected, got }
+                    if stage_id == "blocks.0.mlp" && expected == "f32" && got == "f64"
+            ),
+            "{err:?}"
+        );
+
+        let wrapped = CandleTensor { inner: f64_tensor };
+        let err = export_hidden_state(&wrapped).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CortexError::StageDTypeMismatch { stage_id, got, .. }
+                    if stage_id == HIDDEN_STATE && got == "f64"
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn candle_shape_fits_checks_prefix_and_suffix_products() {
+        assert!(candle_shape_fits(&[2, 3, 4]).is_ok());
+        assert!(candle_shape_fits(&[]).is_ok());
+        assert!(candle_shape_fits(&[usize::MAX, 1, 0]).is_ok());
+        for shape in [
+            [usize::MAX, usize::MAX, 0],
+            [0, usize::MAX, usize::MAX],
+            [0, usize::MAX, 2],
+        ] {
+            assert!(
+                matches!(
+                    candle_shape_fits(&shape),
+                    Err(CortexError::SizeOverflow { .. })
+                ),
+                "{shape:?}"
+            );
+        }
+    }
 }

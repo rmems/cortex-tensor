@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use super::finite::{layer_norm_row, rms_norm_row};
+use super::finite::{layer_norm_row, rms_norm_row, validate_norm_eps};
 use super::{Tensor, try_alloc_filled};
 use crate::error::{CortexError, Result, unwrap_compat};
 
@@ -50,10 +50,16 @@ pub fn try_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
                 let j_end = (j0 + TILE).min(n);
                 let p_end = (p0 + TILE).min(k1);
                 for i in i0..i_end {
-                    for p in p0..p_end {
-                        let a_ip = ad[i * k1 + p];
-                        for j in j0..j_end {
-                            out[i * n + j] += a_ip * bd[p * n + j];
+                    // Hoist the row slices out of the j-loop so the inner
+                    // loop has no per-element bounds checks and can
+                    // auto-vectorise. Summation order is unchanged, so the
+                    // result is bit-identical to the indexed form.
+                    let orow = &mut out[i * n + j0..i * n + j_end];
+                    let arow = &ad[i * k1 + p0..i * k1 + p_end];
+                    for (p, &a_ip) in (p0..p_end).zip(arow) {
+                        let brow = &bd[p * n + j0..p * n + j_end];
+                        for (o, &b_pj) in orow.iter_mut().zip(brow) {
+                            *o += a_ip * b_pj;
                         }
                     }
                 }
@@ -141,11 +147,15 @@ pub fn try_batched_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
             0
         };
         let o_off = checked_mul3(bi, m, n, &out_shape)?;
+        // Same slice-hoisting as `try_matmul`: bounds checks happen once per
+        // row, not per element, and the summation order is unchanged.
         for i in 0..m {
-            for p in 0..k {
-                let a_ip = ad[a_off + i * k + p];
-                for j in 0..n {
-                    out[o_off + i * n + j] += a_ip * bd[b_off + p * n + j];
+            let orow = &mut out[o_off + i * n..o_off + (i + 1) * n];
+            let arow = &ad[a_off + i * k..a_off + (i + 1) * k];
+            for (p, &a_ip) in arow.iter().enumerate() {
+                let brow = &bd[b_off + p * n..b_off + (p + 1) * n];
+                for (o, &b_pj) in orow.iter_mut().zip(brow) {
+                    *o += a_ip * b_pj;
                 }
             }
         }
@@ -179,7 +189,7 @@ pub fn try_layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> R
             axis: 1,
         });
     }
-    check_eps(eps)?;
+    let eps64 = validate_norm_eps(eps)?;
     expect_dim("layer_norm", 0, cols, weight.numel())?;
     expect_dim("layer_norm", 0, cols, bias.numel())?;
 
@@ -188,7 +198,6 @@ pub fn try_layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> R
     let xd = x.data();
     let wd = weight.data();
     let bd = bias.data();
-    let eps64 = f64::from(eps);
 
     for r in 0..rows {
         let off = r * cols;
@@ -228,14 +237,13 @@ pub fn try_rms_norm(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
             axis: 1,
         });
     }
-    check_eps(eps)?;
+    let eps64 = validate_norm_eps(eps)?;
     expect_dim("rms_norm", 0, cols, weight.numel())?;
 
     let out_shape = [rows, cols];
     let mut out = alloc_zeros(&out_shape)?;
     let xd = x.data();
     let wd = weight.data();
-    let eps64 = f64::from(eps);
 
     for r in 0..rows {
         let off = r * cols;
@@ -244,14 +252,22 @@ pub fn try_rms_norm(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
     Tensor::try_from_vec(out, &out_shape)
 }
 
-/// Softmax along the last axis of a 1-D or 2-D tensor.
+/// Softmax along the last axis of a rank-0, rank-1, or rank-2 tensor (each
+/// row independently for rank 2).
 ///
 /// See [`super::finite`] for the NaN / `±Inf` / all-masked policy.
+///
+/// # Panics
+///
+/// Panics if the rank is greater than 2. Prefer [`try_softmax`] in new code.
 pub fn softmax(x: &Tensor) -> Tensor {
-    x.softmax_last()
+    unwrap_compat(try_softmax(x), "softmax")
 }
 
-/// Fallible softmax along the last axis. Rejects rank `> 2`.
+/// Fallible softmax along the last axis.
+///
+/// Returns [`CortexError::RankMismatch`] with `expected: 2` when the rank is
+/// greater than 2, matching the other rank-checked ops.
 pub fn try_softmax(x: &Tensor) -> Result<Tensor> {
     x.try_softmax_last()
 }
@@ -339,14 +355,6 @@ fn expect_dim(op: &'static str, axis: usize, expected: usize, got: usize) -> Res
         })
     } else {
         Ok(())
-    }
-}
-
-fn check_eps(eps: f32) -> Result<()> {
-    if eps.is_finite() && eps > 0.0 {
-        Ok(())
-    } else {
-        Err(CortexError::InvalidEpsilon { eps })
     }
 }
 

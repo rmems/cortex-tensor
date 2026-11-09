@@ -226,11 +226,13 @@ pub(crate) fn softmax_row(logits: &[f32], out: &mut [f32]) {
     for &x in logits {
         sum += (f64::from(x) - max64).exp();
     }
-    if sum == 0.0 || !sum.is_finite() {
-        out.fill(1.0 / n as f32);
-        apply_simplex_residual(out);
-        return;
-    }
+    // Past the NaN, +Inf and all--Inf returns, `max_v` is finite: the max
+    // term contributes `exp(0) = 1` and every other term lies in `[0, 1]`,
+    // so the partition is in `[1, n]` and needs no degenerate fallback.
+    debug_assert!(
+        sum >= 1.0 && sum.is_finite(),
+        "softmax_row: partition {sum} outside [1, n] for finite max {max_v}"
+    );
     for (dst, &x) in out.iter_mut().zip(logits.iter()) {
         *dst = ((f64::from(x) - max64).exp() / sum) as f32;
     }

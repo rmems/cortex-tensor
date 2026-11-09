@@ -38,7 +38,7 @@
 use crate::adapter::{self, require_f32_buffer};
 use crate::error::{CortexError, Result};
 use crate::tensor::Tensor;
-use crate::tensor::ops::{try_embedding, try_layer_norm, try_matmul, try_rms_norm};
+use crate::tensor::ops::{try_layer_norm, try_matmul, try_rms_norm};
 use crate::transformer::block::FeedForward;
 use crate::transformer::{MultiHeadAttention, TransformerLM};
 use std::collections::{BTreeMap, BTreeSet};
@@ -958,6 +958,7 @@ pub enum ReferenceStageParams<'p> {
         /// Position embedding table `[max_seq_len, dim]`.
         pos_embed: &'p Tensor,
         /// Maximum sequence length accepted (matches `TransformerConfig`).
+        /// The effective cap is `min(max_seq_len, pos_embed rows)`.
         max_seq_len: usize,
     },
     /// Multi-head self-attention weights.
@@ -1045,7 +1046,8 @@ impl ReferenceStageParams<'_> {
 /// `ReferenceExecutor` is the reference `f32` backend for [`AnnExecutor`]. It
 /// holds borrowed [`ReferenceStageParams`] keyed by [`StageId`] and, for every
 /// supported stage, delegates to the *same* kernels the monolithic
-/// [`TransformerLM::try_forward`] uses ([`try_embedding`], [`try_layer_norm`],
+/// [`TransformerLM::try_forward`] uses (the shared token + position
+/// embedding built on [`crate::tensor::ops::try_embedding`], [`try_layer_norm`],
 /// [`try_rms_norm`], [`MultiHeadAttention::try_forward`],
 /// [`FeedForward::try_forward`], [`try_matmul`], and [`Tensor::try_add`]). It
 /// reimplements no arithmetic, so running a topology built by
@@ -1159,8 +1161,9 @@ impl<'p> ReferenceExecutor<'p> {
         }
     }
 
-    /// Embedding stage: token + position lookup, matching
-    /// [`TransformerLM::embed_tokens`] exactly.
+    /// Embedding stage: token + position lookup through the same
+    /// [`crate::transformer::model::embed_tokens`] that
+    /// [`TransformerLM::try_hidden_states`] uses.
     fn run_embedding(
         stage_id: &StageId,
         tok_embed: &Tensor,
@@ -1168,29 +1171,8 @@ impl<'p> ReferenceExecutor<'p> {
         max_seq_len: usize,
         token_ids: &[u32],
     ) -> Result<Tensor> {
-        let seq_len = token_ids.len();
-        if seq_len > max_seq_len {
-            return Err(Self::wrap_failure(
-                stage_id,
-                CortexError::InputLengthMismatch {
-                    expected: max_seq_len,
-                    got: seq_len,
-                },
-            ));
-        }
-        let run = || -> Result<Tensor> {
-            let tok = try_embedding(tok_embed, token_ids)?;
-            let pos_ids: Vec<u32> = (0..seq_len)
-                .map(u32::try_from)
-                .collect::<std::result::Result<_, _>>()
-                .map_err(|_| CortexError::InputLengthMismatch {
-                    expected: u32::MAX as usize,
-                    got: seq_len,
-                })?;
-            let pos = try_embedding(pos_embed, &pos_ids)?;
-            tok.try_add(&pos)
-        };
-        run().map_err(|err| Self::wrap_failure(stage_id, err))
+        crate::transformer::model::embed_tokens(tok_embed, pos_embed, max_seq_len, token_ids)
+            .map_err(|err| Self::wrap_failure(stage_id, err))
     }
 
     /// Construct a fully wired executor and matching topology from a model.

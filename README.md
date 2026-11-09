@@ -133,7 +133,7 @@ by cross-crate parity tests in hybrid-fusion's `smoke/cortex-neuromod` package
 | `SnnStepOutput` / `SnnCapabilities` | Per-tick spike output and backend capability reporting for orchestrators (e.g. `hybrid-fusion`). |
 | `SpikingMoeRouter` | Composes `MoeRouter` gate scores with an `SnnBackend`: encode → step → decode → deterministic top-k. Replaces the removed embedded `RoutingMode::SpikingSim`. |
 | `NeuromodNetwork` | `neuromod`-feature adapter over `neuromod::SpikingNetwork` (LIF + Izhikevich, R-STDP). One LIF neuron per channel; `new` seeds identity wiring so every channel can spike. Frozen eval uses neuromod 0.7's `step_frozen`; `with_seed` routes stepping through `step_with_rng` / `step_frozen_with_rng` for deterministic replay (`capabilities().caller_rng` is `true` only then). |
-| `AxonEncoder` | `axon-encoder`-feature adapter over any `axon_encoder::Encoder` (rate, latency, delta, predictive, population). Spikes net to `+1.0`/`-1.0` per channel per tick. |
+| `AxonEncoder` | `axon-encoder`-feature adapter over any `axon_encoder::Encoder` (rate, latency, delta, predictive, population). Each spike contributes `+1.0`/`-1.0` to its channel per tick; repeated spikes accumulate. |
 
 ```toml
 [dependencies]
@@ -368,7 +368,7 @@ a documented semantic reason and independent arithmetic review.
 ### Integration notes (RM-1354)
 
 - **Public API:** Prefer `ops::try_softmax`, `Tensor::try_softmax_last`, `try_layer_norm`, and `try_rms_norm` for rank, shape, `eps`, and allocation checks. Row kernels in `tensor::finite` are crate-internal; they assume valid buffer lengths and (for norms) an `eps` already accepted by `validate_norm_eps`.
-- **Softmax sum tolerance:** After the `f64` partition, an `f32` residual is folded onto the largest mass so finite rows of length `≤ 4096` meet `SOFTMAX_SUM_TOLERANCE` (`1e-5`), including uniform branches (all `-Inf`, degenerate partition).
+- **Softmax sum tolerance:** After the `f64` partition, an `f32` residual is folded onto the largest mass so finite rows of length `≤ 4096` meet `SOFTMAX_SUM_TOLERANCE` (`1e-5`), including the all-`-Inf` uniform branch. With a finite max the `f64` partition lies in `[1, n]`, so there is no degenerate-partition fallback.
 - **Causal attention:** `MultiHeadAttention` runs `softmax_row` over the visible prefix `0..=r` of each query row and writes exact zeros for future slots `r+1..seq` (no additive mask). Future scores are never read, so no score value can leak mass onto a future token. If every visible logit is `-Inf` (for example an overflowing prefix), the shared row policy yields uniform `1/(r+1)` over the visible prefix only. The `attn × V` product also accumulates only value rows `0..=r`, so a NaN/`±Inf` value row at a future position cannot reach earlier tokens through `0.0 * NaN`.
 - **MoE routing:** Gate softmax uses the same row policy. Expert selection ranks **raw** scores before softmax (RM-1355); NaN gate scores return `NanRoutingScore` instead of routing with NaN weights.
 
@@ -417,7 +417,7 @@ fn main() -> cortex_tensor::Result<()> {
 
 ## Status
 
-Rust edition 2024, MSRV 1.99.0. Public API is pre-1.0.
+Rust edition 2024, MSRV 1.97.1 (default, `candle` and `burn` features; `neuromod` needs 1.98.1, `axon-encoder` needs 1.99.0). Development toolchain is pinned to 1.99.0. Public API is pre-1.0.
 
 Linked work, not implemented by the boundary-reset docs:
 
