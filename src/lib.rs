@@ -3,9 +3,10 @@
 //! # cortex-tensor
 //!
 //! Backend-neutral ANN stage layer plus a deterministic `Vec<f32>` reference
-//! backend for hybrid ANN/SNN research. Checkpoint parsing stays in
-//! `engram-parser`. Placement and session orchestration stay in
-//! `hybrid-fusion`. External ML engines are optional adapters, not core types.
+//! backend for hybrid ANN/SNN research. Checkpoint parsing and packed-to-f32
+//! dequantization stay in `engram-parser`; `cortex-tensor` consumes `f32`
+//! tensors. Placement and session orchestration stay in `hybrid-fusion`.
+//! External ML engines are optional adapters, not core types.
 //!
 //! ## Modules
 //!
@@ -15,7 +16,7 @@
 //! | [`adapter`] | External-adapter capability contract, plus optional Candle `AnnExecutor` |
 //! | [`tensor`] | Reference-backend `Tensor`, fallible construction, core ops |
 //! | [`transformer`] | Reference-backend transformer blocks |
-//! | [`moe`] | Reference-backend MoE routing; checkpoints come from `engram-parser` 0.3.0 |
+//! | [`moe`] | Reference-backend MoE routing; `engram-parser` owns packed-to-f32 dequantization and `cortex-tensor` consumes `f32` tensors |
 //! | [`snn`] | SNN execution contract + optional crate-backed adapters |
 //! | [`types`] | Shared types used by `moe` |
 //! | [`error`] | `CortexError` unified error type |

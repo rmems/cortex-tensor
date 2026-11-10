@@ -2,24 +2,26 @@
 
 //! Reference-backend binding over engram-parser checkpoints.
 //!
-//! Format parsing, tensor inventory, raw payloads, and packed dequantization
+//! Format parsing, tensor inventory, raw payloads, and packed-to-f32 dequantization
 //! belong to published `engram-parser` 0.3.0 (`features = ["safetensors"]`;
-//! the `mmap` feature is not enabled). This module does not walk GGUF
-//! headers or Safetensors JSON. `open_checkpoint` chooses the backend.
-//! Malformed input returns that error; there is no in-tree parser to fall
-//! back to. [`MappedCheckpoint::bind_router_weights`] copies the decoded
-//! gate and the token-embedding payload, then drops the engram checkpoint.
-//! A live router does not keep the rest of the file. Mapping policy stays
-//! in engram-parser.
+//! the `mmap` feature is not enabled). `engram-parser` owns packed-to-f32
+//! dequantization and `cortex-tensor` consumes `f32` tensors; this module does not
+//! walk GGUF headers or Safetensors JSON, nor does it implement dequantization
+//! kernels. `open_checkpoint` chooses the backend. Malformed input returns that
+//! error; there is no in-tree parser to fall back to.
+//! [`MappedCheckpoint::bind_router_weights`] copies the decoded gate and the
+//! token-embedding payload, then drops the engram checkpoint. A live router does
+//! not keep the rest of the file. Mapping policy stays in engram-parser.
 //!
 //! # Migration shim
 //! [`MappedCheckpoint`] exists so [`super::MoeRouter`] can keep its load,
 //! token-extract, and gate API while weight selection still lives here.
 //! Remove the shim when callers take an [`engram_parser::Checkpoint`] and
 //! perform this binding outside the crate. Do not add format parsers or
-//! mmap policy here. Token rows call engram's Q8_0, Q5_K, and Q6_K
-//! decoders. IQ3_S stays an explicit error; engram 0.3.0 does not decode
-//! the IQ3_S or IQ3_XXS wire types.
+//! mmap policy here. `engram-parser` owns packed-to-f32 dequantization (token rows
+//! delegate to engram's Q8_0, Q5_K, and Q6_K decoders) and `cortex-tensor`
+//! consumes the resulting `f32` rows. IQ3_S stays an explicit error; engram 0.3.0
+//! does not decode the IQ3_S or IQ3_XXS wire types.
 //!
 //! `Checkpoint::tensor_bytes` does not promise `f32` alignment. Values are
 //! copied with [`f32::from_le_bytes`], so this module has no `unsafe`.
@@ -184,6 +186,8 @@ impl MappedCheckpoint {
         decode_f32(&bytes, elements, path, name)
     }
 
+    /// Extract a token row as `f32`. `engram-parser` owns packed-to-f32
+    /// dequantization; `cortex-tensor` consumes `f32` tensors.
     pub(super) fn extract_token_embedding(
         &self,
         tensor_name: &str,
@@ -329,6 +333,7 @@ fn token_embedding_dims(view: &TensorView, name: &str, path: &str) -> Result<(us
     Ok((view.dims[0], view.dims[1]))
 }
 
+/// Delegate packed row dequantization to `engram-parser`; `cortex-tensor` consumes the resulting `f32` values.
 fn dequantize_row(
     dtype: DType,
     bytes: &[u8],

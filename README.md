@@ -31,7 +31,7 @@ Design boundaries:
 - **Reference backend, not the product surface.** `Tensor` is a contiguous row-major `Vec<f32>`. Public stage contracts (`AnnStage`, `AnnExecutor`) do not name it. New framework-generic numerical features are out of scope unless a conformance or reference test needs them.
 - **No mandatory ML framework.** Default features do not depend on Candle, Burn, `tch`, or `ort`.
 - **No GPU kernels in this crate.** Specialized hybrid GPU kernels belong to `myelin-accelerator`.
-- **Checkpoint parsing is not owned here.** Loading goes through published `engram-parser` 0.3.0 (`features = ["safetensors"]`; `mmap` is off). GGUF and Safetensors share one normalized tensor inventory. This crate binds those weights into the reference backend and does not parse either container.
+- **Checkpoint parsing and dequantization are not owned here.** Loading goes through published `engram-parser` 0.3.0 (`features = ["safetensors"]`; `mmap` is off). GGUF and Safetensors share one normalized tensor inventory. `engram-parser` owns packed-to-f32 dequantization and `cortex-tensor` consumes `f32` tensors. This crate binds those weights into the reference backend and does not parse either container or dequantize packed weights itself.
 - **Orchestration is not owned here.** ANN↔SNN placement stays in [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion). The closed decision not to merge that crate (issue 35) stands.
 
 ## Architecture
@@ -102,7 +102,7 @@ Unversioned pre-1.0 JSON and the older `strides` field must be migrated explicit
 
 Top-k selection ranks finite scores descending and breaks ties by ascending expert ID. NaN scores are rejected (`NanRoutingScore`); `+Inf` ranks above all finite values and `-Inf` below them. The helper is pure: the same `(scores, top_k)` pair always produces the same expert IDs.
 
-Supported token-row dtypes, dequantized by engram-parser: `F32`, `F16`, `Q8_0`, `Q5_K`, `Q6_K`. `IQ3_S` is detected and rejected for token embeddings with a clear error so callers can fall back to `llama.cpp` prompt embeddings. Other IQ3 wire types (`IQ3_XXS` and the rest) fail the same way as any dtype engram-parser 0.3.0 does not decode. Shapes are outermost-first (`[vocab, hidden]` for token rows). Gate weights use that same row-major layout.
+Supported token-row dtypes: `F32`, `F16`, `Q8_0`, `Q5_K`, `Q6_K`. `engram-parser` owns packed-to-f32 dequantization and `cortex-tensor` consumes `f32` tensors. `IQ3_S` is detected and rejected for token embeddings with a clear error so callers can fall back to `llama.cpp` prompt embeddings. Other IQ3 wire types (`IQ3_XXS` and the rest) fail the same way as any dtype engram-parser 0.3.0 does not decode. Shapes are outermost-first (`[vocab, hidden]` for token rows). Gate weights use that same row-major layout.
 
 ### `snn`
 
@@ -200,7 +200,7 @@ execution and hidden-state transfer.
   source the label there, not from cortex.
 - Checkpoint loading uses engram-parser 0.3.0. `MappedCheckpoint` in `src/moe/checkpoint.rs` is a temporary binding shim around `engram_parser::Checkpoint`. Remove it when callers take that trait directly. Do not add format parsers or mmap policy back into this crate.
 
-**Checkpoint substrate (engram-parser 0.3.0, see #47):** GGUF and Safetensors parsing, tensor inventory, raw payloads, and packed Q8_0/Q5_K/Q6_K dequantization live in `engram-parser`. This crate depends on that release with `features = ["safetensors"]` and does not enable `mmap`. `MoeRouter` binds the normalized outermost-first tensors into reference-backend routing, keeps the decoded gate and the token-embedding payload, and releases the rest of the checkpoint. Model topology and tensor-role discovery stay on the engram-parser v0.4 track and are not required here.
+**Checkpoint substrate (engram-parser 0.3.0, see #47):** GGUF and Safetensors parsing, tensor inventory, raw payloads, and packed-to-f32 dequantization (Q8_0, Q5_K, Q6_K) live in `engram-parser`. `engram-parser` owns packed-to-f32 dequantization and `cortex-tensor` consumes `f32` tensors. This crate depends on that release with `features = ["safetensors"]` and does not enable `mmap`. `MoeRouter` binds the normalized outermost-first tensors into reference-backend routing, keeps the decoded gate and the token-embedding payload, and releases the rest of the checkpoint. Model topology and tensor-role discovery stay on the engram-parser v0.4 track and are not required here.
 
 ```toml
 engram-parser = { version = "0.3.0", default-features = false, features = ["safetensors"] }
@@ -211,7 +211,7 @@ engram-parser = { version = "0.3.0", default-features = false, features = ["safe
 - `MoeRouter::load` / `load_with_mode` → `probe_and_map` calls `resolve_adapter` (adapter.rs).
 - `resolve_adapter` reads `{architecture}.*` metadata keys (the arch string is opaque checkpoint data). Numeric metadata may be an integer or a numeric string, so the same keys work for GGUF and Safetensors. It validates the routing tensor (rank-2 F32, one outermost-first dim equal to `hidden_size`, the other ≥ expert count) and token embeddings (F32/F16/Q8_0/Q5_K/Q6_K, shape `[vocab, hidden]`).
 - Routing always uses `routing_tensor` via `checkpoint_gate_scores` (routing.rs) when a checkpoint is loaded.
-- Token-row extraction supports F32/F16/Q8_0/Q5_K/Q6_K through engram-parser dequant. IQ3_S returns an explicit error.
+- Token-row extraction supports F32/F16/Q8_0/Q5_K/Q6_K: `engram-parser` owns packed-to-f32 dequantization and `cortex-tensor` consumes `f32` tensors. IQ3_S returns an explicit error.
 - Checkpoint inventory is reported via `RouterMetadata` / adapter internals. **SAAQ/GPU synapse-source policy is no longer owned here** — it moved downstream to the experimental repos (`corinth-canal` / `grok-ozempic`); see [Migration notes](#migration-notes).
 
 ## Scope / Boundaries
@@ -231,11 +231,12 @@ This crate **owns**:
   `SnnEncoder`/`SnnDecoder` boundary types, `SnnCapabilities`, and
   `SpikingMoeRouter` composing the MoE router with an external SNN backend.
 - Checkpoint adapter and tensor selection on engram-parser's normalized inventory.
-- Reference-backend binding of F32/F16/Q8_0/Q5_K/Q6_K token rows. Packed dequantization is engram-parser's.
+- Reference-backend binding of F32/F16/Q8_0/Q5_K/Q6_K token rows (`engram-parser` owns packed-to-f32 dequantization; `cortex-tensor` consumes `f32` tensors).
 
 This crate **does not own**:
 
 - Checkpoint parsing, GGUF mmap policy, or Safetensors parsing — [`engram-parser`](https://github.com/rmems/engram-parser) 0.3.0 (`safetensors` feature). Issue 47 is the consume that landed here. Model topology / tensor-role discovery remains engram-parser v0.4 and is not an acceptance gate for this binding.
+- Packed-to-f32 dequantization — owned by `engram-parser` (`cortex-tensor` consumes `f32` tensors).
 - ANN↔SNN placement and session orchestration — [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion).
   Issue 35, the decision not to merge hybrid-fusion into this repo, is closed and stands.
 - SNN neuron dynamics.
@@ -280,24 +281,24 @@ doc), #8 (GGUF parser coordination), #9 / #32 (Safetensors provider), and #47
 
 ### Checkpoint boundary (see #8 / #47)
 
-`engram-parser` 0.3.0 owns GGUF and Safetensors parsing. Validated dependency:
+`engram-parser` 0.3.0 owns GGUF and Safetensors parsing, as well as packed-to-f32 dequantization (`cortex-tensor` consumes `f32` tensors). Validated dependency:
 
 ```toml
 engram-parser = { version = "0.3.0", default-features = false, features = ["safetensors"] }
 ```
 
-`mmap` is intentionally not enabled. `open_checkpoint` reads GGUF into memory and serves Safetensors with bounded per-tensor reads. Cortex copies F32 payloads with `f32::from_le_bytes` because the borrowed bytes are not promised to be aligned, so `src/moe/` has no `unsafe`.
+`mmap` is intentionally not enabled. `open_checkpoint` reads GGUF into memory and serves Safetensors with bounded per-tensor reads. `engram-parser` owns packed-to-f32 dequantization and `cortex-tensor` consumes `f32` tensors; this crate does not implement dequantization kernels. Cortex copies F32 payloads with `f32::from_le_bytes` because the borrowed bytes are not promised to be aligned, so `src/moe/` has no `unsafe`.
 
 | Layer | Owner |
 |---|---|
 | GGUF and Safetensors parsing, tensor inventory, raw payloads | `engram-parser` |
-| Packed Q8_0 / Q5_K / Q6_K / IQ3_M dequant | `engram-parser` (this crate calls Q8_0, Q5_K, and Q6_K for token rows) |
+| Packed-to-f32 dequantization (Q8_0 / Q5_K / Q6_K / IQ3_M) | `engram-parser` (`cortex-tensor` consumes `f32` tensors; calls Q8_0, Q5_K, and Q6_K decoders for token rows) |
 | mmap policy | `engram-parser` (`mmap` feature; not used here) |
-| Router weight binding, top-k, adapter selection | `cortex-tensor` (`src/moe/checkpoint.rs`, `adapter.rs`, `routing.rs`) |
+| Router weight binding, top-k, adapter selection, `f32` tensor consumption | `cortex-tensor` (`src/moe/checkpoint.rs`, `adapter.rs`, `routing.rs`) |
 
 `MappedCheckpoint` is a migration shim. Remove it when `MoeRouter` callers take `engram_parser::Checkpoint` directly. Malformed or unsupported files return the engram-parser error. There is no in-tree parser to fall back to.
 
-Q6_K token rows call `engram_parser::dequantize_q6_k`. That is the same live path `corinth-canal` uses (`dequantize_row_q6_k` while extracting a token). IQ3 is not on that path in either crate. `corinth-canal` rejects IQ3_S token embeddings and its `dequantize_iq3_m_tensor` helper is unused. Engram-parser 0.3.0 can decode an internal IQ3_M block layout, not the GGUF wire types IQ3_S or IQ3_XXS, so those embeddings fail here with an explicit error. This crate does not reimplement those decoders or add a format parser. Topology and tensor-role discovery are engram-parser v0.4 and are not required to bind weights.
+`engram-parser` owns packed-to-f32 dequantization; `cortex-tensor` consumes `f32` tensors. Q6_K token rows call `engram_parser::dequantize_q6_k`. That is the same live path `corinth-canal` uses (`dequantize_row_q6_k` while extracting a token). IQ3 is not on that path in either crate. `corinth-canal` rejects IQ3_S token embeddings and its `dequantize_iq3_m_tensor` helper is unused. Engram-parser 0.3.0 can decode an internal IQ3_M block layout, not the GGUF wire types IQ3_S or IQ3_XXS, so those embeddings fail here with an explicit error. This crate does not reimplement those decoders or add a format parser. Topology and tensor-role discovery are engram-parser v0.4 and are not required to bind weights.
 
 ## Install
 

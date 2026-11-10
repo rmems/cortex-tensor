@@ -36,7 +36,7 @@ pub const MAX_TARGET_DIM: usize = 64 * EMBEDDING_DIM;
 /// Optional post-processing when extracting a token row from a checkpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ExtractTokenOptions {
-    /// Resample the dequantized row to this length. `None` keeps checkpoint
+    /// Resample the extracted `f32` row (dequantized by `engram-parser`) to this length. `None` keeps checkpoint
     /// `hidden_size` (the default).
     pub target_dim: Option<usize>,
     /// When true, L2-normalize after optional resampling (default `false`).

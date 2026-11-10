@@ -11,14 +11,16 @@
 //! - `moe/adapter.rs` for checkpoint adapter resolution and tensor selection
 //! - `moe/routing.rs` for routing math and embedding resampling
 //!
-//! GGUF and Safetensors parsing, inventory, and packed dequantization are
-//! owned by `engram-parser` (`features = ["safetensors"]`, validated on
-//! 0.3.0). This crate binds those tensors into reference-backend `f32`
-//! routing. It does not know the container format in the scoring loop.
-//! `MappedCheckpoint` is a temporary shim; see that module for the removal
-//! condition. Token rows call engram's Q8_0, Q5_K, and Q6_K decoders.
-//! IQ3_S / IQ3_XXS stay errors: engram 0.3.0 does not decode those wire
-//! types. Do not reimplement packed dequant here.
+//! GGUF and Safetensors parsing, inventory, and packed-to-f32 dequantization
+//! are owned by `engram-parser` (`features = ["safetensors"]`, validated on
+//! 0.3.0); `cortex-tensor` consumes `f32` tensors. This crate binds those
+//! tensors into reference-backend `f32` routing. It does not know the container
+//! format in the scoring loop. `MappedCheckpoint` is a temporary shim; see that
+//! module for the removal condition. `engram-parser` owns packed-to-f32
+//! dequantization (token rows call engram's Q8_0, Q5_K, and Q6_K decoders) and
+//! `cortex-tensor` consumes the resulting `f32` rows. IQ3_S / IQ3_XXS stay
+//! errors: engram 0.3.0 does not decode those wire types. Do not reimplement
+//! packed dequant here.
 
 mod adapter;
 mod checkpoint;
@@ -196,12 +198,16 @@ impl MoeRouter {
         }
     }
 
-    /// Dequantize the checkpoint token row at native `hidden_size` (no resample, no L2).
+    /// Extract a checkpoint token row as `f32` at native `hidden_size` (no resample, no L2).
+    ///
+    /// `engram-parser` owns packed-to-f32 dequantization; `cortex-tensor` consumes `f32` tensors.
     pub fn extract_token_embedding(&self, token_id: usize) -> Result<Vec<f32>> {
         self.extract_token_embedding_with_options(token_id, ExtractTokenOptions::default())
     }
 
-    /// Dequantize a token row, optionally resampling and/or L2-normalizing.
+    /// Extract a token row as `f32`, optionally resampling and/or L2-normalizing.
+    ///
+    /// `engram-parser` owns packed-to-f32 dequantization; `cortex-tensor` consumes `f32` tensors.
     ///
     /// Returns [`HybridError::InvalidConfig`] when
     /// [`ExtractTokenOptions::target_dim`] is `Some(0)` (an empty row that only

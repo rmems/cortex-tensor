@@ -2,9 +2,10 @@
 
 //! Checkpoint adapter resolution for the reference router.
 //!
-//! Tensor shapes are engram-parser's outermost-first order. A GGUF token
-//! embedding stored as `ne = [hidden, vocab]` is `[vocab, hidden]` here, the
-//! same order a Safetensors header already uses.
+//! `engram-parser` owns packed-to-f32 dequantization and `cortex-tensor`
+//! consumes `f32` tensors. Tensor shapes are engram-parser's outermost-first
+//! order. A GGUF token embedding stored as `ne = [hidden, vocab]` is
+//! `[vocab, hidden]` here, the same order a Safetensors header already uses.
 
 use super::checkpoint::{MappedCheckpoint, TensorKind, TensorView};
 use crate::error::{HybridError, Result};
