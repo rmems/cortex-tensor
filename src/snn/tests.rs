@@ -144,6 +144,32 @@ fn overflowing_encoder_stimulus_is_rejected_before_backend_step() {
     assert_eq!(model.backend().steps, 0);
 }
 
+/// A finite gate can still overflow to ±Inf in the encoder (`gain` scaling),
+/// and that is a separate rejection from the infinite *gate* case above: the
+/// gate scores stay finite, the encoder output does not.
+#[test]
+fn infinite_encoder_stimulus_is_rejected_before_backend_step() {
+    for bad in [f32::INFINITY, f32::NEG_INFINITY] {
+        let router =
+            MoeRouter::load_with_mode("", 8, 2, crate::moe::RoutingMode::DenseSim).unwrap();
+        let mut model = SpikingMoeRouter::new(
+            router,
+            MockBackend::new(8, 0.0),
+            RateEncoder { gain: bad },
+            SpikeCountDecoder,
+        )
+        .unwrap();
+        // The gate scores are finite here (a sum of 1.0s), so only the
+        // encoder output is infinite.
+        let err = model.forward(&[1.0; EMBEDDING_DIM]).unwrap_err();
+        assert!(
+            matches!(err, HybridError::SnnInvalidStimulus { .. }),
+            "got {err:?}"
+        );
+        assert_eq!(model.backend().steps, 0);
+    }
+}
+
 /// Encoder that ignores the requested width and returns `len` zeros.
 struct FixedLengthEncoder(usize);
 
