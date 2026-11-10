@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::stage::{StageKind, StageKindTag};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -75,9 +76,6 @@ pub enum CortexError {
     #[error("input length mismatch: expected {expected}, got {got}")]
     InputLengthMismatch { expected: usize, got: usize },
 
-    #[error("router forward pass failed: {0}")]
-    MoeForward(String),
-
     /// An external SNN backend (e.g. `neuromod`) rejected a step.
     #[error("SNN backend step failed: {0}")]
     SnnBackend(String),
@@ -131,11 +129,15 @@ pub enum CortexError {
     InvalidTopology { reason: String },
 
     /// An executor was asked to run a stage kind its capabilities do not cover.
+    ///
+    /// `kind` is the rejected stage's own descriptor, so a caller can match on
+    /// it (or on [`StageKind::tag`]) instead of parsing text. The message
+    /// renders it through `StageKind`'s `Display`, not `Debug`.
     #[error("backend '{backend}' does not support stage '{stage_id}' of kind {kind}")]
     UnsupportedStage {
         backend: &'static str,
         stage_id: String,
-        kind: String,
+        kind: StageKind,
     },
 
     /// An external adapter refused an operation its capability report does not cover.
@@ -158,13 +160,13 @@ pub enum CortexError {
     #[error("stage '{stage_id}' is missing required parameters")]
     MissingStageParams { stage_id: String },
 
-    /// Parameters are bound for the stage, but for a different stage kind
-    /// (`expected` / `got` are [`crate::stage::StageKindTag`] tokens).
+    /// Parameters are bound for the stage, but for a different stage kind:
+    /// the descriptor asked for `expected`, the binding is for `got`.
     #[error("stage '{stage_id}' has parameters for kind {got}, expected {expected}")]
     StageParamsMismatch {
         stage_id: String,
-        expected: String,
-        got: String,
+        expected: StageKindTag,
+        got: StageKindTag,
     },
 
     /// Parameters are bound for the right stage kind but are internally
@@ -186,6 +188,10 @@ pub enum CortexError {
     StageInputKind { stage_id: String, index: usize },
 
     /// A stage input or output used a dtype the executor does not support.
+    ///
+    /// Both fields stay text on purpose: `expected` lists every accepted
+    /// [`crate::stage::DType`] token, and `got` can name a backend-native
+    /// dtype that `DType` cannot represent (Candle's `f64`, for example).
     #[error("stage '{stage_id}' dtype mismatch: expected {expected}, got {got}")]
     StageDTypeMismatch {
         stage_id: String,
@@ -228,6 +234,8 @@ pub enum CortexError {
         actual_bytes: usize,
     },
 
+    /// A failure with no typed variant. The only producer is the `candle`
+    /// feature, for Candle-internal errors, always prefixed `candle: `.
     #[error("{0}")]
     Msg(String),
 }

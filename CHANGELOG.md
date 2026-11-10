@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (breaking: error variants)
 
+- **Breaking (error variants, RM-2093):** `CortexError` stage errors carry typed fields instead of pre-formatted strings, and one dead variant is gone. Callers constructing or matching these must update:
+  - `CortexError::MoeForward(String)` is removed. Nothing in the crate ever constructed it.
+  - `UnsupportedStage.kind` is the rejected `StageKind` itself (was a `String` holding its `Debug` output), so callers match on the kind or on `kind.tag()` instead of searching text.
+  - `StageParamsMismatch.expected` / `.got` are `StageKindTag` (were `String` copies of the tag tokens).
+  - New `impl Display for StageKind`: the `StageKindTag` token plus the kind's parameters, for example `moe_router(num_experts=4, top_k=2)`, `moe_expert(expert_index=0)`, `custom('name')`. The `UnsupportedStage` message now ends in that form instead of `MoeRouter { num_experts: 4, top_k: 2 }`; the `StageParamsMismatch` message is unchanged.
+  - `Msg(String)` stays: the `candle` feature still returns it for Candle-internal errors (see RM-2363 below). `StageDTypeMismatch.expected` / `.got` stay `String` because `got` can name a backend-native dtype outside `DType`.
 - **Breaking (error variants, RM-2365 / #150):** the same failure class now returns one stable variant across layers. Callers matching the old variants must update:
   - Hidden width != `dim`: `FeedForward::try_forward` returns `DimMismatch { op: "FeedForward::try_forward", axis: 1, .. }` (was `MatmulDim`); `TransformerBlock::try_forward` returns `DimMismatch { op: "TransformerBlock::try_forward", axis: 1, .. }` (was `DimMismatch { op: "layer_norm" }`). `MultiHeadAttention::try_forward` is unchanged.
   - Zero extents: `MultiHeadAttention`, `FeedForward`, `TransformerBlock` and `TransformerLM` constructors and wire validation return `ZeroWidth { op, axis }` (was `InvalidConfig`); `MultiHeadAttention::try_forward` also returns `ZeroWidth { axis: 1 }` for a literal-constructed module with `num_heads == 0`, so the same input yields one variant on every path. `axis` is the argument position (`dim` 0, `num_heads` 1, `ff_dim` 1 for `FeedForward` / 2 for `TransformerBlock`), or the field declaration index for `TransformerConfig` (`vocab_size` 0, `dim` 1, `num_heads` 2, `ff_dim` 4, `max_seq_len` 5). A `num_heads` that does not divide `dim` stays `InvalidConfig`, now with one message shared by every constructor and the wire path.

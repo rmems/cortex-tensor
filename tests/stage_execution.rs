@@ -451,7 +451,13 @@ fn moe_stages_are_rejected_and_rejection_is_atomic() {
         } => {
             assert_eq!(backend, "reference");
             assert_eq!(stage_id, "router");
-            assert!(kind.contains("MoeRouter"), "kind carried: {kind}");
+            assert_eq!(
+                kind,
+                StageKind::MoeRouter {
+                    num_experts: 4,
+                    top_k: 2,
+                }
+            );
         }
         other => panic!("expected UnsupportedStage, got {other:?}"),
     }

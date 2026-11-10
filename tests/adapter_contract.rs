@@ -190,7 +190,7 @@ fn reference_rejects_unsupported_stage_before_touching_inputs() {
         } => {
             assert_eq!(backend, "reference");
             assert_eq!(stage_id, "router");
-            assert!(kind.contains("MoeRouter"), "{kind}");
+            assert_eq!(kind, stage.kind);
         }
         other => panic!("expected UnsupportedStage, got {other:?}"),
     }
@@ -504,7 +504,7 @@ fn burn_feature_stays_a_structured_stub_on_this_toolchain() {
         assert!(matches!(
             err,
             CortexError::UnsupportedStage { backend, stage_id, kind }
-                if backend == "burn" && stage_id == "probe_add" && kind.contains("Add")
+                if backend == "burn" && stage_id == "probe_add" && kind == StageKind::Add
         ));
     }
 }

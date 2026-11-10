@@ -456,7 +456,7 @@ macro_rules! define_policy_stub_adapter {
                 Err($crate::CortexError::UnsupportedStage {
                     backend: $backend,
                     stage_id: stage.id.to_string(),
-                    kind: format!("{:?}", stage.kind),
+                    kind: stage.kind.clone(),
                 })
             }
         }

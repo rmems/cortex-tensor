@@ -13,7 +13,7 @@ use cortex_tensor::adapter::{
 };
 use cortex_tensor::stage::{
     AnnExecutor, AnnStage, AnnTopology, DType, ExternalBindings, MlpKind, NormKind, StageId,
-    StageInput, StageKind, StageSource, StageTensor, run_topology,
+    StageInput, StageKind, StageKindTag, StageSource, StageTensor, run_topology,
 };
 use cortex_tensor::tensor::ops::{try_embedding, try_layer_norm, try_matmul, try_rms_norm};
 use cortex_tensor::{CortexError, Tensor};
@@ -130,13 +130,20 @@ fn unsupported_stage_does_not_drop_bound_params() {
             &[StageInput::Tensor(&hidden)],
         )
         .unwrap_err();
-    assert!(matches!(
-        err,
-        CortexError::UnsupportedStage {
-            backend: "candle",
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            &err,
+            CortexError::UnsupportedStage {
+                backend: "candle",
+                kind: StageKind::MoeRouter {
+                    num_experts: 2,
+                    top_k: 1,
+                },
+                ..
+            }
+        ),
+        "{err:?}"
+    );
 
     let out = exec
         .execute(
@@ -846,7 +853,9 @@ fn params_kind_mismatch_is_reported_as_mismatch_not_missing() {
         matches!(
             &err,
             CortexError::StageParamsMismatch { stage_id, expected, got }
-                if stage_id == "shared" && expected == "layer_norm" && got == "readout"
+                if stage_id == "shared"
+                    && *expected == StageKindTag::LayerNorm
+                    && *got == StageKindTag::Readout
         ),
         "{err}"
     );

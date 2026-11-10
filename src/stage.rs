@@ -263,6 +263,31 @@ impl StageKind {
     }
 }
 
+/// Stable, human-readable form, independent of [`Debug`] formatting: the
+/// [`StageKindTag`] token, followed by the kind's own parameters when it has
+/// any (`moe_router(num_experts=4, top_k=2)`, `moe_expert(expert_index=0)`,
+/// `custom('name')`).
+impl fmt::Display for StageKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let tag = self.tag();
+        match self {
+            StageKind::Embedding
+            | StageKind::Attention
+            | StageKind::Normalization { .. }
+            | StageKind::Mlp { .. }
+            | StageKind::Add
+            | StageKind::Readout => f.write_str(tag.as_str()),
+            StageKind::MoeRouter { num_experts, top_k } => {
+                write!(f, "{tag}(num_experts={num_experts}, top_k={top_k})")
+            }
+            StageKind::MoeExpert { expert_index } => {
+                write!(f, "{tag}(expert_index={expert_index})")
+            }
+            StageKind::Custom { name } => write!(f, "{tag}('{name}')"),
+        }
+    }
+}
+
 /// A validated dotted-path stage identifier.
 ///
 /// A valid id is non-empty and composed of `.`-separated segments, each of
@@ -1433,7 +1458,7 @@ impl<'p> AnnExecutor for ReferenceExecutor<'p> {
             return Err(CortexError::UnsupportedStage {
                 backend: Self::BACKEND_NAME,
                 stage_id: stage_id.to_string(),
-                kind: format!("{:?}", stage.kind),
+                kind: stage.kind.clone(),
             });
         }
 
@@ -1453,8 +1478,8 @@ impl<'p> AnnExecutor for ReferenceExecutor<'p> {
             if params.tag() != stage.kind.tag() {
                 return Err(CortexError::StageParamsMismatch {
                     stage_id: stage_id.to_string(),
-                    expected: stage.kind.tag().as_str().to_string(),
-                    got: params.tag().as_str().to_string(),
+                    expected: stage.kind.tag(),
+                    got: params.tag(),
                 });
             }
             Some(params)
@@ -1546,7 +1571,7 @@ impl<'p> AnnExecutor for ReferenceExecutor<'p> {
             _ => Err(CortexError::UnsupportedStage {
                 backend: Self::BACKEND_NAME,
                 stage_id: stage_id.to_string(),
-                kind: format!("{:?}", stage.kind),
+                kind: stage.kind.clone(),
             }),
         }
     }
@@ -1671,6 +1696,87 @@ mod tests {
                 kind: NormKind::Rms
             }
             .tag()
+        );
+    }
+
+    #[test]
+    fn stage_kind_display_is_tag_token_plus_parameters() {
+        let cases = [
+            (StageKind::Embedding, "embedding"),
+            (StageKind::Attention, "attention"),
+            (
+                StageKind::Normalization {
+                    kind: NormKind::Layer,
+                },
+                "layer_norm",
+            ),
+            (
+                StageKind::Normalization {
+                    kind: NormKind::Rms,
+                },
+                "rms_norm",
+            ),
+            (
+                StageKind::Mlp {
+                    kind: MlpKind::Dense,
+                },
+                "dense_mlp",
+            ),
+            (
+                StageKind::Mlp {
+                    kind: MlpKind::Gated,
+                },
+                "gated_mlp",
+            ),
+            (
+                StageKind::MoeRouter {
+                    num_experts: 4,
+                    top_k: 2,
+                },
+                "moe_router(num_experts=4, top_k=2)",
+            ),
+            (
+                StageKind::MoeExpert { expert_index: 3 },
+                "moe_expert(expert_index=3)",
+            ),
+            (StageKind::Add, "add"),
+            (StageKind::Readout, "readout"),
+            (
+                StageKind::Custom {
+                    name: "probe".to_string(),
+                },
+                "custom('probe')",
+            ),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(kind.to_string(), expected, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn stage_errors_render_kinds_through_display_not_debug() {
+        let unsupported = CortexError::UnsupportedStage {
+            backend: "reference",
+            stage_id: "router".to_string(),
+            kind: StageKind::MoeRouter {
+                num_experts: 4,
+                top_k: 2,
+            },
+        };
+        assert_eq!(
+            unsupported.to_string(),
+            "backend 'reference' does not support stage 'router' of kind \
+             moe_router(num_experts=4, top_k=2)"
+        );
+
+        let mismatch = CortexError::StageParamsMismatch {
+            stage_id: "n".to_string(),
+            expected: StageKindTag::RmsNorm,
+            got: StageKindTag::Readout,
+        };
+        assert_eq!(
+            mismatch.to_string(),
+            "stage 'n' has parameters for kind readout, expected rms_norm"
         );
     }
 
@@ -2006,8 +2112,8 @@ mod tests {
                 got,
             } => {
                 assert_eq!(stage_id, "n");
-                assert_eq!(expected, "rms_norm");
-                assert_eq!(got, "readout");
+                assert_eq!(expected, StageKindTag::RmsNorm);
+                assert_eq!(got, StageKindTag::Readout);
             }
             other => panic!("expected StageParamsMismatch, got {other:?}"),
         }

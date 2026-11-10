@@ -507,8 +507,8 @@ impl CandleExecutor {
         if params.tag() != expected {
             return Err(CortexError::StageParamsMismatch {
                 stage_id: stage_id.to_string(),
-                expected: expected.as_str().to_string(),
-                got: params.tag().as_str().to_string(),
+                expected,
+                got: params.tag(),
             });
         }
         Ok(params)
@@ -537,7 +537,7 @@ impl AnnExecutor for CandleExecutor {
             return Err(CortexError::UnsupportedStage {
                 backend: Self::BACKEND_NAME,
                 stage_id: stage_id.to_string(),
-                kind: format!("{:?}", stage.kind),
+                kind: stage.kind.clone(),
             });
         }
 
@@ -618,7 +618,7 @@ impl AnnExecutor for CandleExecutor {
             | StageKind::Custom { .. } => Err(CortexError::UnsupportedStage {
                 backend: Self::BACKEND_NAME,
                 stage_id: stage_id.to_string(),
-                kind: format!("{:?}", stage.kind),
+                kind: stage.kind.clone(),
             }),
         }
     }
