@@ -269,6 +269,44 @@ fn validate_readout(decoded: &[f32], channels: usize) -> Result<()> {
     Ok(())
 }
 
+/// Validate the gate scores before they reach the encoder. NaN is rejected by
+/// [`crate::moe::reject_nan_routing_scores`]; ±Inf gets its own variant,
+/// because unlike plain `MoeRouter` it is not rankable here: backends such as
+/// neuromod reject non-finite stimulus, and that would surface after the
+/// encoder state had already advanced.
+fn validate_gate_scores(gate_scores: &[f32]) -> Result<()> {
+    if let Some((channel, &value)) = gate_scores
+        .iter()
+        .enumerate()
+        .find(|(_, v)| v.is_infinite())
+    {
+        return Err(CortexError::SnnInvalidStimulus { channel, value });
+    }
+    Ok(())
+}
+
+/// Validate an encoder stimulus against the backend channel width it has to
+/// fill: exactly `channels` entries, none NaN and none infinite. Encoders may
+/// inject non-finite stimuli, so this runs before the backend consumes a tick
+/// and the whole forward stays fail-closed.
+fn validate_stimulus(stimulus: &[f32], channels: usize) -> Result<()> {
+    if stimulus.len() != channels {
+        return Err(CortexError::SnnStimulusLength {
+            expected: channels,
+            got: stimulus.len(),
+        });
+    }
+    if stimulus.iter().any(|v| v.is_nan()) {
+        return Err(CortexError::SnnNan {
+            stage: "encoder stimulus",
+        });
+    }
+    if let Some((channel, &value)) = stimulus.iter().enumerate().find(|(_, v)| v.is_infinite()) {
+        return Err(CortexError::SnnInvalidStimulus { channel, value });
+    }
+    Ok(())
+}
+
 impl<B, E, D> SpikingMoeRouter<B, E, D>
 where
     B: SnnBackend,
@@ -316,53 +354,36 @@ where
         self.spike_boost
     }
 
-    /// Shared forward path. `frozen` selects [`SnnBackend::step_frozen`].
-    fn forward_impl(&mut self, embedding: &[f32], frozen: bool) -> Result<crate::moe::MoeOutput> {
-        let gate_scores = self.router.gate_scores(embedding)?;
-        // Fail closed before the encoder or backend consumes a tick.
-        crate::moe::reject_nan_routing_scores(&gate_scores)?;
-        // Unlike plain `MoeRouter`, ±Inf is not rankable here: backends such
-        // as neuromod reject non-finite stimulus, and that would surface after
-        // the encoder state had already advanced.
-        if let Some((channel, &value)) = gate_scores
-            .iter()
-            .enumerate()
-            .find(|(_, v)| v.is_infinite())
-        {
-            return Err(CortexError::SnnInvalidStimulus { channel, value });
-        }
-
-        // Encoders may inject non-finite stimuli; validate before the backend
-        // consumes a tick so the whole forward stays fail-closed.
+    /// Encode the gate scores into a validated backend stimulus.
+    ///
+    /// Every check runs before the backend ticks, so an invalid encoder
+    /// output fails closed without consuming a step.
+    fn encode_stimulus(&mut self, gate_scores: &[f32], num_experts: usize) -> Result<Vec<f32>> {
         // The one-channel-per-expert invariant is checked in `new`, but
         // `channels()` is re-read every tick (a backend may be resized through
         // `backend_mut`, and user backends need not be constant-width).
         // Re-check it before the tick so `decoded[expert_id]` below cannot
         // index past the readout, and fail closed without consuming a step.
-        let pre_step_channels = self.backend.channels();
-        let num_experts = self.router.num_experts();
-        if pre_step_channels < num_experts {
+        let channels = self.backend.channels();
+        if channels < num_experts {
             return Err(CortexError::SnnChannelMismatch {
                 experts: num_experts,
-                channels: pre_step_channels,
+                channels,
             });
         }
-        let stimulus = self.encoder.encode(&gate_scores, pre_step_channels)?;
-        if stimulus.len() != pre_step_channels {
-            return Err(CortexError::SnnStimulusLength {
-                expected: pre_step_channels,
-                got: stimulus.len(),
-            });
-        }
-        if stimulus.iter().any(|v| v.is_nan()) {
-            return Err(CortexError::SnnNan {
-                stage: "encoder stimulus",
-            });
-        }
-        if let Some((channel, &value)) = stimulus.iter().enumerate().find(|(_, v)| v.is_infinite())
-        {
-            return Err(CortexError::SnnInvalidStimulus { channel, value });
-        }
+        let stimulus = self.encoder.encode(gate_scores, channels)?;
+        validate_stimulus(&stimulus, channels)?;
+        Ok(stimulus)
+    }
+
+    /// Shared forward path. `frozen` selects [`SnnBackend::step_frozen`].
+    fn forward_impl(&mut self, embedding: &[f32], frozen: bool) -> Result<crate::moe::MoeOutput> {
+        let gate_scores = self.router.gate_scores(embedding)?;
+        // Fail closed before the encoder or backend consumes a tick.
+        crate::moe::reject_nan_routing_scores(&gate_scores)?;
+        validate_gate_scores(&gate_scores)?;
+        let num_experts = self.router.num_experts();
+        let stimulus = self.encode_stimulus(&gate_scores, num_experts)?;
         let step_out = if frozen {
             self.backend.step_frozen(&stimulus)?
         } else {
