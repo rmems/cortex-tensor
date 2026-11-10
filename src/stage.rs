@@ -2140,6 +2140,181 @@ mod tests {
     }
 
     #[test]
+    fn add_stage_rejects_empty_inputs_and_shape_mismatch() {
+        let mut exec = ReferenceExecutor::new();
+        let descriptor = stage("sum", StageKind::Add, vec![]);
+        let err = exec.execute(&descriptor, &[]).unwrap_err();
+        assert!(matches!(
+            err,
+            CortexError::StageInputArity {
+                stage_id,
+                expected: 1,
+                got: 0,
+            } if stage_id == "sum"
+        ));
+
+        let a = Tensor::try_from_vec(vec![1.0; 8], &[1, 8]).unwrap();
+        let b = Tensor::try_from_vec(vec![2.0; 4], &[1, 4]).unwrap();
+        let err = exec
+            .execute(
+                &descriptor,
+                &[StageInput::Tensor(&a), StageInput::Tensor(&b)],
+            )
+            .unwrap_err();
+        match err {
+            CortexError::StageFailed { stage_id, source } => {
+                assert_eq!(stage_id, "sum");
+                assert!(matches!(*source, CortexError::ShapeMismatch { .. }));
+            }
+            other => panic!("expected StageFailed wrapping ShapeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_stage_left_folds_three_operands() {
+        let mut exec = ReferenceExecutor::new();
+        let descriptor = stage("sum", StageKind::Add, vec![]);
+        let a = Tensor::try_from_vec(vec![1.0; 4], &[1, 4]).unwrap();
+        let b = Tensor::try_from_vec(vec![2.0; 4], &[1, 4]).unwrap();
+        let c = Tensor::try_from_vec(vec![4.0; 4], &[1, 4]).unwrap();
+        let out = exec
+            .execute(
+                &descriptor,
+                &[
+                    StageInput::Tensor(&a),
+                    StageInput::Tensor(&b),
+                    StageInput::Tensor(&c),
+                ],
+            )
+            .unwrap();
+        assert_eq!(out.data(), &[7.0; 4]);
+    }
+
+    /// Wraps an `f32` reference tensor but reports another dtype in [`StageTensor::meta`].
+    #[derive(Debug, Clone)]
+    struct MisreportedDTypeTensor {
+        inner: Tensor,
+        reported: DType,
+    }
+
+    impl StageTensor for MisreportedDTypeTensor {
+        fn meta(&self) -> TensorMeta {
+            TensorMeta {
+                shape: self.inner.shape().to_vec(),
+                dtype: self.reported,
+            }
+        }
+    }
+
+    struct MisreportingExecutor;
+
+    impl AnnExecutor for MisreportingExecutor {
+        type Tensor = MisreportedDTypeTensor;
+
+        fn capabilities(&self) -> AnnCapabilities {
+            AnnCapabilities {
+                backend_name: "misreport",
+                supported_tags: BTreeSet::from([StageKindTag::Add]),
+                supported_dtypes: BTreeSet::from([DType::F32]),
+                stateful: false,
+            }
+        }
+
+        fn execute(
+            &mut self,
+            _stage: &AnnStage,
+            inputs: &[StageInput<Self::Tensor>],
+        ) -> Result<Self::Tensor> {
+            let StageInput::Tensor(first) =
+                inputs.first().ok_or_else(|| CortexError::StageInputArity {
+                    stage_id: _stage.id.to_string(),
+                    expected: 1,
+                    got: inputs.len(),
+                })?
+            else {
+                return Err(CortexError::StageInputKind {
+                    stage_id: _stage.id.to_string(),
+                    index: 0,
+                });
+            };
+            Ok(MisreportedDTypeTensor {
+                inner: first.inner.clone(),
+                reported: DType::F16,
+            })
+        }
+    }
+
+    #[test]
+    fn run_topology_rejects_unsupported_output_dtype() {
+        let topo = AnnTopology::new(vec![
+            stage(
+                "pass",
+                StageKind::Add,
+                vec![StageSource::External("hidden".to_string())],
+            ),
+            stage(
+                "next",
+                StageKind::Add,
+                vec![StageSource::Stage(StageId::new("pass").unwrap())],
+            ),
+        ])
+        .unwrap();
+        let hidden = Tensor::try_from_vec(vec![1.0; 4], &[1, 4]).unwrap();
+        let ingress = MisreportedDTypeTensor {
+            inner: hidden,
+            reported: DType::F32,
+        };
+        let bindings = ExternalBindings::new()
+            .with_tensor("hidden", &ingress)
+            .unwrap();
+        let mut exec = MisreportingExecutor;
+        let err = run_topology(&mut exec, &topo, &bindings).unwrap_err();
+        match err {
+            CortexError::StageDTypeMismatch {
+                stage_id,
+                expected,
+                got,
+            } => {
+                assert_eq!(stage_id, "pass");
+                assert_eq!(expected, "f32");
+                assert_eq!(got, "f16");
+            }
+            other => panic!("expected StageDTypeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_topology_rms_norm_matches_direct_kernel() {
+        let model = micro_model();
+        let block = &model.blocks[0];
+        let norm_id = StageId::new("rms").unwrap();
+        let eps = ReferenceExecutor::LAYER_NORM_EPS;
+        let mut exec = ReferenceExecutor::new().bind(
+            norm_id.clone(),
+            ReferenceStageParams::Normalization {
+                weight: &block.ln1_w,
+                bias: None,
+                eps,
+                kind: NormKind::Rms,
+            },
+        );
+        let x = Tensor::randn(&[2, model.config.dim], 0.0, 0.1);
+        let topo = AnnTopology::new(vec![stage(
+            "rms",
+            StageKind::Normalization {
+                kind: NormKind::Rms,
+            },
+            vec![StageSource::External("hidden".to_string())],
+        )])
+        .unwrap();
+        let bindings = ExternalBindings::new().with_tensor("hidden", &x).unwrap();
+        let outputs = run_topology(&mut exec, &topo, &bindings).unwrap();
+        let staged = outputs.get(&norm_id).expect("rms output");
+        let direct = try_rms_norm(&x, &block.ln1_w, eps).unwrap();
+        assert_eq!(staged.data(), direct.data());
+    }
+
+    #[test]
     fn execute_reports_wrong_input_kind() {
         // A readout stage expects a Tensor; passing Tokens is a kind mismatch.
         let model = micro_model();

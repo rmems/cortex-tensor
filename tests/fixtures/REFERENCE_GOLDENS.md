@@ -56,7 +56,7 @@ inventory, never silently skipped or coerced to another dtype.
 | Checkpoint-backed gate weights | Existing `moe::tests::test_dense_sim_uses_real_gate_weights` and routing tests use synthetic local GGUF bytes. Checkpoint parsing/resampling/dequant are outside this golden baseline; no downloads needed |
 | Raw-score ranking under softmax underflow; infinities and signed-zero ties | Existing `moe::routing::tests` covers these independently of DenseSim input combination; keep these tests in CI |
 | Structured errors | `checked_errors_are_structured_not_panic_expectations`, plus existing `tensor::ops::tests::try_ops_error_table`, tensor/model unit tests |
-| Stage-executor contracts | Already landed in RM-1822; `stage_execution.rs` owns topology, injected hidden states, dtype/input errors and `UnsupportedStage` for MoE/gated MLP. This baseline deliberately uses the older public tensor/model boundaries |
+| Stage-executor contracts | RM-1822 stage vocabulary plus unit tests in `src/stage.rs` (`run_topology` dtype checks, RMS norm via the executor, Add arity/shape errors, binding collisions) and integration coverage in `tests/stage_execution.rs` (composed `from_transformer` topology vs `TransformerLM::try_forward`, hidden injection, MoE `UnsupportedStage`). Gated MLP and non-`f32` stage dtypes are rejected, not golden-oracled. This baseline deliberately uses the older public tensor/model boundaries |
 | Serde representation | `reference_serde.rs` owns version, shape, signed zero and bounded input contracts; numerical goldens do not replace that wire format |
 
 ## Independent arithmetic
