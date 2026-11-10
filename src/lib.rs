@@ -13,6 +13,7 @@
 //! |--------|------|
 //! | [`stage`] | Backend-neutral ANN stage contracts; [`stage::ReferenceExecutor`] is the reference backend |
 //! | [`adapter`] | External-adapter capability contract, plus optional Candle `AnnExecutor` |
+//! | [`interop`] | Backend-neutral shape/dtype/device/layout metadata and the hidden-state transfer contract |
 //! | [`tensor`] | Reference-backend `Tensor`, fallible construction, core ops |
 //! | [`transformer`] | Reference-backend transformer blocks |
 //! | [`moe`] | Reference-backend MoE routing; checkpoints come from `engram-parser` 0.3.0 |
@@ -26,6 +27,7 @@
 
 pub mod adapter;
 pub mod error;
+pub mod interop;
 pub mod moe;
 pub mod reference_json;
 pub mod snn;
