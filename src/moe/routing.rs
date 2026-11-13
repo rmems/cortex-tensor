@@ -61,7 +61,10 @@ pub(super) fn checkpoint_gate_scores(
 }
 
 pub(super) fn synthetic_gate_scores(num_experts: usize, embedding: &[f32]) -> Vec<f32> {
-    let width = embedding.len().max(1);
+    if embedding.is_empty() {
+        return vec![0.0; num_experts];
+    }
+    let width = embedding.len();
     let chunk = (width / num_experts.max(1)).max(1);
     let mut gate_scores = Vec::with_capacity(num_experts);
     for expert_id in 0..num_experts {
@@ -160,17 +163,28 @@ pub(super) fn resample_embedding(input: &[f32], target_len: usize) -> Vec<f32> {
         return vec![input.iter().sum::<f32>() / input.len() as f32];
     }
 
-    let scale = (input.len() - 1) as f32 / (target_len - 1) as f32;
+    let last = input.len() - 1;
+    // The source position is the exact rational `idx * last / (target_len - 1)`
+    // and is computed in integer space. In `f32` the scale factor loses the
+    // endpoint once `last` exceeds 2^24 (the index rounds, either past the
+    // end or down to the previous element), which drops the final input value
+    // and shifts the interpolation towards the wrong neighbour. `u128` holds
+    // `idx * last` for any `usize` pair on 64-bit targets.
+    let denom = (target_len - 1) as u128;
     let mut out = Vec::with_capacity(target_len);
     for idx in 0..target_len {
-        let source = idx as f32 * scale;
-        let lo = source.floor() as usize;
-        let hi = source.ceil().min((input.len() - 1) as f32) as usize;
-        if lo == hi {
+        let numerator = (idx as u128) * (last as u128);
+        // `numerator / denom` is the lower neighbour and never exceeds `last`.
+        let lo = (numerator / denom) as usize;
+        let remainder = numerator % denom;
+        if remainder == 0 {
             out.push(input[lo]);
             continue;
         }
-        let t = source - lo as f32;
+        // A non-zero remainder means the position is strictly between `lo` and
+        // `lo + 1`, so the upper neighbour is still within the input.
+        let hi = lo + 1;
+        let t = (remainder as f64 / denom as f64) as f32;
         out.push(input[lo] * (1.0 - t) + input[hi] * t);
     }
     out
@@ -255,6 +269,66 @@ mod tests {
         assert_eq!(out.len(), 8);
         assert!((out[0] - 0.0).abs() < 1e-6);
         assert!((out[7] + 1.0).abs() < 1e-6);
+    }
+
+    /// `(len - 1) as f32` rounds up to `len` for this length (2^24 + 3 is a
+    /// tie that rounds to even, 2^24 + 4), so the last sample's `f32` index
+    /// used to land one past the end and panic. Reachable through
+    /// `MoeRouter::extract_token_embedding_with_options` on a checkpoint whose
+    /// hidden size exceeds 2^24.
+    #[test]
+    fn resample_embedding_long_input_does_not_index_past_the_end() {
+        let len = (1usize << 24) + 4;
+        assert_eq!((len - 1) as f32, len as f32);
+        let mut input = vec![0.0f32; len];
+        input[0] = -3.0;
+        input[len - 1] = 7.0;
+        let out = resample_embedding(&input, 2);
+        assert_eq!(out, vec![-3.0, 7.0]);
+    }
+
+    /// The mirror case: `(len - 1) as f32` rounds *down* here (2^24 + 1 is a
+    /// tie that rounds to the even 2^24), so the float path sampled
+    /// `input[len - 2]` for the final output and silently dropped the last
+    /// embedding value.
+    #[test]
+    fn resample_embedding_keeps_the_last_element_when_the_float_index_rounds_down() {
+        let len = (1usize << 24) + 2;
+        assert_eq!((len - 1) as f32, (len - 2) as f32);
+        let mut input = vec![0.0f32; len];
+        input[0] = -3.0;
+        input[len - 1] = 7.0;
+        let out = resample_embedding(&input, 2);
+        assert_eq!(out, vec![-3.0, 7.0]);
+    }
+
+    /// Both endpoints of the input survive the resample, and the samples in
+    /// between are the linear interpolation of their bracketing elements.
+    #[test]
+    fn resample_embedding_preserves_the_endpoints() {
+        let input: Vec<f32> = (0..17).map(|value| value as f32).collect();
+        let out = resample_embedding(&input, 5);
+        assert_eq!(out.first(), Some(&0.0));
+        assert_eq!(out.last(), Some(&16.0));
+        // `idx * 16 / 4` is an integer for every output index, so each sample
+        // is an exact input element here.
+        assert_eq!(out, vec![0.0, 4.0, 8.0, 12.0, 16.0]);
+    }
+
+    /// A non-integer source position interpolates between the bracketing
+    /// input elements.
+    #[test]
+    fn resample_embedding_interpolates_between_neighbours() {
+        let out = resample_embedding(&[0.0, 10.0], 3);
+        assert!((out[0] - 0.0).abs() < 1e-6);
+        assert!((out[1] - 5.0).abs() < 1e-6);
+        assert!((out[2] - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn synthetic_gate_scores_on_empty_embedding_are_zero() {
+        assert_eq!(synthetic_gate_scores(3, &[]), vec![0.0; 3]);
+        assert!(synthetic_gate_scores(0, &[]).is_empty());
     }
 
     /// Gate value `100 * expert + dim` so every cell is distinguishable, laid

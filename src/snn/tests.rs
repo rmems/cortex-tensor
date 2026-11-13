@@ -144,6 +144,81 @@ fn overflowing_encoder_stimulus_is_rejected_before_backend_step() {
     assert_eq!(model.backend().steps, 0);
 }
 
+/// A finite gate can still overflow to ±Inf in the encoder (`gain` scaling),
+/// and that is a separate rejection from the infinite *gate* case above: the
+/// gate scores stay finite, the encoder output does not.
+#[test]
+fn infinite_encoder_stimulus_is_rejected_before_backend_step() {
+    for bad in [f32::INFINITY, f32::NEG_INFINITY] {
+        let router =
+            MoeRouter::load_with_mode("", 8, 2, crate::moe::RoutingMode::DenseSim).unwrap();
+        let mut model = SpikingMoeRouter::new(
+            router,
+            MockBackend::new(8, 0.0),
+            RateEncoder { gain: bad },
+            SpikeCountDecoder,
+        )
+        .unwrap();
+        // The gate scores are finite here (a sum of 1.0s), so only the
+        // encoder output is infinite.
+        let err = model.forward(&[1.0; EMBEDDING_DIM]).unwrap_err();
+        assert!(
+            matches!(err, HybridError::SnnInvalidStimulus { .. }),
+            "got {err:?}"
+        );
+        assert_eq!(model.backend().steps, 0);
+    }
+}
+
+/// Encoder that ignores the requested width and returns `len` zeros.
+struct FixedLengthEncoder(usize);
+
+impl SnnEncoder for FixedLengthEncoder {
+    fn encode(&mut self, _ann_signal: &[f32], _channels: usize) -> Result<Vec<f32>> {
+        Ok(vec![0.0; self.0])
+    }
+}
+
+/// A stimulus of the wrong width breaks the `SnnEncoder` contract. It is
+/// rejected with its own variant before the backend ticks, instead of being
+/// handed to a backend that may index it by channel.
+#[test]
+fn wrong_length_encoder_stimulus_is_rejected_before_backend_step() {
+    let embedding = vec![0.0f32; EMBEDDING_DIM];
+    for got in [0usize, 7, 9] {
+        let router =
+            MoeRouter::load_with_mode("", 8, 2, crate::moe::RoutingMode::DenseSim).unwrap();
+        let mut model = SpikingMoeRouter::new(
+            router,
+            MockBackend::new(8, 0.0),
+            FixedLengthEncoder(got),
+            SpikeCountDecoder,
+        )
+        .unwrap();
+        for frozen in [false, true] {
+            let err = if frozen {
+                model.forward_frozen(&embedding).unwrap_err()
+            } else {
+                model.forward(&embedding).unwrap_err()
+            };
+            assert!(
+                matches!(err, CortexError::SnnStimulusLength { expected: 8, got: g } if g == got),
+                "got {err:?}"
+            );
+        }
+        assert_eq!(model.backend().steps, 0);
+        assert_eq!(model.backend().frozen_steps, 0);
+    }
+    assert_eq!(
+        CortexError::SnnStimulusLength {
+            expected: 8,
+            got: 7
+        }
+        .to_string(),
+        "SNN encoder returned 7 stimulus values for 8 channels"
+    );
+}
+
 /// Issue #89: `SpikingMoeRouter` shares `MoeRouter::gate_scores`, so a
 /// checkpoint gate written in GGUF `ne` order must route the same way through
 /// the spiking path. Expert 5's row is all ones; input `e_0` selects expert 5.

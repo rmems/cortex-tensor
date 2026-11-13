@@ -321,7 +321,7 @@ impl TransformerLM {
 fn stored_block_params(block: &TransformerBlock) -> usize {
     let attn = &block.attn;
     let ffn = &block.ffn;
-    [
+    super::sum_numel([
         &attn.wq,
         &attn.wk,
         &attn.wv,
@@ -338,10 +338,7 @@ fn stored_block_params(block: &TransformerBlock) -> usize {
         &block.ln1_b,
         &block.ln2_w,
         &block.ln2_b,
-    ]
-    .iter()
-    .map(|t| t.numel())
-    .sum()
+    ])
 }
 
 /// Token + positional embedding: `tok_embed[ids] + pos_embed[0..len]`.

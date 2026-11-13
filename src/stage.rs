@@ -1108,6 +1108,10 @@ impl<'p> ReferenceExecutor<'p> {
     }
 
     /// Resolve `inputs[index]` as a tensor, or [`CortexError::StageInputKind`].
+    ///
+    /// `index` must be in bounds: callers run [`Self::expect_arity`] (or loop
+    /// over `0..inputs.len()`) first, which turns a short input list into
+    /// [`CortexError::StageInputArity`]. The same holds for [`Self::tokens_arg`].
     fn tensor_arg<'a>(
         stage_id: &StageId,
         inputs: &'a [StageInput<'a, Tensor>],
