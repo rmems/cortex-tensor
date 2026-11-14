@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Packaging
+
+- **Rename to `cortex-hybrid`** (RM-2479 / #172): the package and repo are renamed because the original crates.io name was already taken by another owner. The lib name stays `cortex_tensor`, so `use cortex_tensor::…` imports are unchanged; dependents write `cortex-hybrid = "…"`. Repository, homepage and docs.rs metadata point at `cortex-hybrid`.
+
 ### CI
 
 - **Feature matrix, MSRV job, semver-checks, workflow hygiene** (RM-2103): per-feature clippy and test runs (default, no-default, `neuromod`, `axon-encoder`, `candle`, `burn`); `rust-version` lowered from 1.99.0 to the verified floor 1.97.1 (set by `engram-parser` 0.3.0; `neuromod` needs 1.98.1, `axon-encoder` needs 1.99.0) with an `msrv` job guarding it, while the development toolchain stays pinned to 1.99.0; `cargo semver-checks` against the newest `v*` tag (skipped until one exists); `pull-requests: write` moved to a separate reviewdog job; added `concurrency`, `timeout-minutes` and `rust-cache`; dependabot drops the dead `julia` entry and groups github-actions and cargo minor/patch updates.
@@ -181,5 +185,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Initial release of cortex-tensor as standalone crate (extracted from corinth-canal).
+- Initial release of cortex-hybrid as standalone crate (extracted from corinth-canal).
 - Tensor, ops, transformer, and MoE (GGUF) modules.

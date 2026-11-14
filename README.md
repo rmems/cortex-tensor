@@ -1,14 +1,14 @@
-# cortex-tensor
+# cortex-hybrid
 
 Backend-neutral ANN stage layer and deterministic reference backend for hybrid ANN/SNN systems. The in-tree `Vec<f32>` tensor, transformer, and dense MoE path are the reference backend used for CI, golden vectors, and conformance. They are not a generic ML framework, and this crate does not rank external engines.
 
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache-blue)](./LICENSE-APACHE-2.0)
-[![codecov](https://codecov.io/gh/rmems/cortex-tensor/branch/main/graph/badge.svg)](https://codecov.io/gh/rmems/cortex-tensor)
+[![codecov](https://codecov.io/gh/rmems/cortex-hybrid/branch/main/graph/badge.svg)](https://codecov.io/gh/rmems/cortex-hybrid)
 
 ## Overview
 
-`cortex-tensor` makes ANN engines usable as interchangeable stage executors inside heterogeneous ANN/SNN plans. It does not compete on generic tensor frameworks, attention kernels, training stacks, or GPU backends.
+`cortex-hybrid` makes ANN engines usable as interchangeable stage executors inside heterogeneous ANN/SNN plans. It does not compete on generic tensor frameworks, attention kernels, training stacks, or GPU backends.
 
 Core owns the stage vocabulary, execution contract, hidden-state ingress/egress, and capability facts. The reference backend is `f32`, CPU-only, and dense. Candle and Burn are optional adapters; their native tensor and device types do not appear in core. Neuron dynamics stay in focused SNN crates behind the `snn` contract.
 
@@ -19,7 +19,7 @@ engram-parser          checkpoint + topology (not this crate)
 hybrid-fusion          placement + orchestration (not merged here)
         |
         v
-cortex-tensor          ANN stage contracts + reference backend
+cortex-hybrid          ANN stage contracts + reference backend
    |        |        |
 reference  candle    burn     + SNN backend contract
 ```
@@ -126,7 +126,7 @@ by cross-crate parity tests in hybrid-fusion's `smoke/cortex-neuromod` package
 
 ```toml
 [dependencies]
-cortex-tensor = { git = "https://github.com/rmems/cortex-tensor", branch = "main", features = ["neuromod"] }
+cortex-hybrid = { git = "https://github.com/rmems/cortex-hybrid", branch = "main", features = ["neuromod"] }
 ```
 
 ```rust
@@ -269,7 +269,7 @@ the `ExternalAdapter` contract. Extraction from corinth-canal is a
 | Crate | Role |
 |-------|------|
 | [`engram-parser`](https://github.com/rmems/engram-parser) | Checkpoint parsing and topology discovery |
-| `cortex-tensor` (this crate) | ANN stage contracts + deterministic reference backend |
+| `cortex-hybrid` (this crate) | ANN stage contracts + deterministic reference backend |
 | [`hybrid-fusion`](https://github.com/rmems/hybrid-fusion) | Placement and session orchestration (separate repo; not merged) |
 | [`neuromod`](https://github.com/rmems/neuromod) | SNN neuron dynamics, behind the optional `neuromod` feature |
 
@@ -293,7 +293,7 @@ engram-parser = { version = "0.3.0", default-features = false, features = ["safe
 | GGUF and Safetensors parsing, tensor inventory, raw payloads | `engram-parser` |
 | Packed Q8_0 / Q5_K / Q6_K / IQ3_M dequant | `engram-parser` (this crate calls Q8_0, Q5_K, and Q6_K for token rows) |
 | mmap policy | `engram-parser` (`mmap` feature; not used here) |
-| Router weight binding, top-k, adapter selection | `cortex-tensor` (`src/moe/checkpoint.rs`, `adapter.rs`, `routing.rs`) |
+| Router weight binding, top-k, adapter selection | `cortex-hybrid` (`src/moe/checkpoint.rs`, `adapter.rs`, `routing.rs`) |
 
 `MappedCheckpoint` is a migration shim. Remove it when `MoeRouter` callers take `engram_parser::Checkpoint` directly. Malformed or unsupported files return the engram-parser error. There is no in-tree parser to fall back to.
 
@@ -301,9 +301,12 @@ Q6_K token rows call `engram_parser::dequantize_q6_k`. That is the same live pat
 
 ## Install
 
+The package is `cortex-hybrid`; the library name stays `cortex_tensor`,
+so `use cortex_tensor::…` imports are unchanged.
+
 ```toml
 [dependencies]
-cortex-tensor = { git = "https://github.com/rmems/cortex-tensor", branch = "main" }
+cortex-hybrid = { git = "https://github.com/rmems/cortex-hybrid", branch = "main" }
 ```
 
 Features (all off by default):

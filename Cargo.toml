@@ -1,5 +1,5 @@
 [package]
-name = "cortex-tensor"
+name = "cortex-hybrid"
 version = "0.1.0"
 edition = "2024"
 # MSRV for dependents: the verified floor, set by `engram-parser` 0.3.0
@@ -10,9 +10,9 @@ rust-version = "1.97.1"
 description = "Backend-neutral ANN stage layer and deterministic Vec reference backend for hybrid ANN/SNN systems."
 authors = ["Raul Cardenas Montoya"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/rmems/cortex-tensor"
-homepage = "https://github.com/rmems/cortex-tensor"
-documentation = "https://docs.rs/cortex-tensor"
+repository = "https://github.com/rmems/cortex-hybrid"
+homepage = "https://github.com/rmems/cortex-hybrid"
+documentation = "https://docs.rs/cortex-hybrid"
 keywords = ["tensor", "transformer", "mixture-of-experts", "snn", "neural-network"]
 categories = ["science", "algorithms"]
 # Not released yet. Remove when a crates.io release is intended (#116).

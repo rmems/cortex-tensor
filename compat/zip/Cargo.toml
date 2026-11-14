@@ -6,7 +6,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 description = "zip 8.6 method facade over zip 9.0.3 so candle-core 0.11 can build after the 8.6.0 yank"
 
-# Detach from the parent cortex-tensor workspace. This package is selected
+# Detach from the parent cortex-hybrid workspace. This package is selected
 # only through the root [patch.crates-io] entry.
 [workspace]
 

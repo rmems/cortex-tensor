@@ -4,7 +4,7 @@ Guidance for coding agents (Amp, Codex, Cursor, Claude Code, and others) working
 
 ## Purpose
 
-`cortex-tensor` is a pure-Rust library of tensor, transformer, and Mixture-of-Experts building blocks
+`cortex-hybrid` is a pure-Rust library of tensor, transformer, and Mixture-of-Experts building blocks
 (see `README.md`). It has no CUDA, no Julia FFI and no framework dependency: the tensor type is a
 contiguous row-major `Vec<f32>` plus a shape. Checkpoint bytes come from `engram-parser` 0.3.0; this crate binds them into MoE routing.
 The design goals in the README (zero GPU coupling, zero framework dependency, small dependency set)
