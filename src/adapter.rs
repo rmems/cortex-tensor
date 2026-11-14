@@ -373,7 +373,7 @@ fn policy_stub_capabilities(
                 DeviceClass::Metal,
             ]),
             notes: vec![format!(
-                "{backend_name} adapter is a structured stub; cortex-tensor v0.3 does not depend on the {framework_name} crate"
+                "{backend_name} adapter is a structured stub; cortex-hybrid v0.3 does not depend on the {framework_name} crate"
             )],
         },
     }
@@ -386,7 +386,7 @@ fn policy_stub_refusal(backend_name: &'static str, framework_name: &'static str)
         stage_id: None,
         category: "policy",
         detail: format!(
-            "{framework_name} is not a dependency of cortex-tensor v0.3; the feature is a structured stub and does not link {framework_name}"
+            "{framework_name} is not a dependency of cortex-hybrid v0.3; the feature is a structured stub and does not link {framework_name}"
         ),
     }
 }

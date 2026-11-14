@@ -867,7 +867,7 @@ fn npz_roundtrip_through_zip_facade() {
     let tensor =
         candle_core::Tensor::from_slice(&[1f32, 2.0, 3.0, 4.0], (2, 2), &candle_core::Device::Cpu)
             .expect("tensor");
-    let path = std::env::temp_dir().join(format!("cortex-tensor-npz-{}.npz", std::process::id()));
+    let path = std::env::temp_dir().join(format!("cortex-hybrid-npz-{}.npz", std::process::id()));
     candle_core::Tensor::write_npz(&[("w", &tensor)], &path).expect("write npz");
     let loaded = candle_core::Tensor::read_npz(&path).expect("read npz");
     assert_eq!(loaded.len(), 1);

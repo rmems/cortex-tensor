@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Amp orb setup for cortex-tensor.
+# Amp orb setup for cortex-hybrid.
 #
 # Amp runs this from the repository root when it builds a project orb snapshot
 # (Debian 12, CPU only: orbs have no GPU). It must finish within 20 minutes and
@@ -51,4 +51,4 @@ rustup default 1.99.0
 # Cargo.lock is gitignored here, so this resolves a fresh (ignored) lockfile.
 cargo fetch
 
-echo "Amp orb setup for cortex-tensor finished."
+echo "Amp orb setup for cortex-hybrid finished."

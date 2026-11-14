@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! # cortex-tensor
+//! # cortex-hybrid
 //!
 //! Backend-neutral ANN stage layer plus a deterministic `Vec<f32>` reference
 //! backend for hybrid ANN/SNN research. Checkpoint parsing stays in

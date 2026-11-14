@@ -29,7 +29,7 @@
 //!
 //! `hybrid-fusion` owns a parallel step contract for its orchestrator role
 //! (`SpikingNetwork`, `SpikeEncoder` / `SpikeDecoder`, `SpikingExpertRouter`,
-//! `NeuromodSnn`). cortex-tensor keeps this one because the crate is meant to
+//! `NeuromodSnn`). cortex-hybrid keeps this one because the crate is meant to
 //! handle both ANN and SNN (decision RM-2206 / RM-2360; the plan to fold this
 //! surface into hybrid-fusion was abandoned unmerged). The two trait sets are
 //! held in sync by the mapping in `docs/snn-contract-mapping.md` (hybrid-fusion

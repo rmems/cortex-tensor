@@ -1,5 +1,5 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
-# CodeRabbit config for rmems/cortex-tensor.
+# CodeRabbit config for rmems/cortex-hybrid.
 language: en-US
 reviews:
   profile: chill

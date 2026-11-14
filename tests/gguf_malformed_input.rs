@@ -151,7 +151,7 @@ struct TempGguf(PathBuf);
 
 impl TempGguf {
     fn write(bytes: &[u8], label: &str) -> Self {
-        let dir = std::env::temp_dir().join("cortex-tensor-malformed-gguf");
+        let dir = std::env::temp_dir().join("cortex-hybrid-malformed-gguf");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!(
             "{label}-{}-{}.gguf",

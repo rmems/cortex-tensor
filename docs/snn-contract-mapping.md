@@ -1,11 +1,11 @@
-# SNN step-contract mapping: cortex-tensor `src/snn` ↔ hybrid-fusion
+# SNN step-contract mapping: cortex-hybrid `src/snn` ↔ hybrid-fusion
 
 - **Status:** Accepted (2026-10-26)
 - **Tracking:** Linear
-  [RM-2360](https://linear.app/rpd-34/issue/RM-2360/snn-keep-cortex-tensors-snn-step-contract-in-sync-with-hybrid-fusions).
+  [RM-2360](https://linear.app/rpd-34/issue/RM-2360/snn-keep-cortex-hybrids-snn-step-contract-in-sync-with-hybrid-fusions).
   Decision context: [RM-2205](https://linear.app/rpd-34/issue/RM-2205)
   (hybrid-fusion became an owner), [RM-2206](https://linear.app/rpd-34/issue/RM-2206)
-  (cortex-tensor **keeps** its SNN code — that crate is meant to handle both
+  (cortex-hybrid **keeps** its SNN code — that crate is meant to handle both
   ANN and SNN; the removal plan, PRs #137 and #141, was closed unmerged).
 - **Twin document:** hybrid-fusion
   [`docs/adr/0002-snn-step-contract-parity.md`](https://github.com/rmems/hybrid-fusion/blob/main/docs/adr/0002-snn-step-contract-parity.md)
@@ -14,13 +14,13 @@
 
 ## Direction
 
-Each crate keeps its own traits — cortex-tensor does not implement or depend
+Each crate keeps its own traits — cortex-hybrid does not implement or depend
 on hybrid-fusion's contract, and hybrid-fusion does not depend on
-cortex-tensor's. The dependency direction forbids it (an orchestrator may
+cortex-hybrid's. The dependency direction forbids it (an orchestrator may
 consume a backend, never the reverse), and the two contracts serve different
 callers:
 
-- **cortex-tensor `src/snn`** is the ANN+SNN reference path inside one crate:
+- **cortex-hybrid `src/snn`** is the ANN+SNN reference path inside one crate:
   `SpikingMoeRouter` composes the concrete `MoeRouter` and returns a
   `MoeOutput` (a scaled hidden state sized by `EMBEDDING_DIM`).
 - **hybrid-fusion's contract** is the orchestrator's pluggable boundary:
@@ -43,7 +43,7 @@ the pinned tree.
 
 ## Mapping
 
-| cortex-tensor | hybrid-fusion | Mapping |
+| cortex-hybrid | hybrid-fusion | Mapping |
 |---|---|---|
 | `SnnBackend::channels()` | `SpikingNetwork::num_channels()` | stimulus width |
 | — (implied: one neuron per channel; `NeuromodNetwork` enforces one LIF per channel) | `SpikingNetwork::num_neurons()` | output population; a **separate axis** in hybrid-fusion |
@@ -60,7 +60,7 @@ the pinned tree.
 | `DEFAULT_SPIKE_BOOST = 1.0`, `with_spike_boost` (finite, ≥ 0) | identical | shared routing constant and validation |
 | `MoeOutput { expert_weights, selected_experts, hidden: Vec<f32> }` | `SpikingRouteOutput { route, fired_neurons, num_neurons, hidden_gain: f32 }` | same boosted softmax weights and selection; scaled hidden state here, scalar gain there (plus entropy and fired IDs there) |
 | `NeuromodNetwork` (`new(num_lif, num_izh, num_channels)`, `from_network`, `with_seed`) | `NeuromodSnn` (`with_seed(channels, neurons, seed)`, `identity_wired(channels, seed)`, `reseed`) | both wrap `neuromod` 0.7; wiring/reset differences below |
-| `AxonEncoder` (`axon-encoder` feature) | — | cortex-tensor-only; no counterpart, out of parity scope |
+| `AxonEncoder` (`axon-encoder` feature) | — | cortex-hybrid-only; no counterpart, out of parity scope |
 | `CortexError::{SnnBackend, SnnChannelMismatch, SnnNan, SnnInvalidStimulus, SnnSpikeOutOfRange, SnnDuplicateSpike, InputLengthMismatch, SnnReadoutLength, SnnInvalidReadout}` | `HybridError::{SnnStep, ConfigMismatch, NonFinite, SnnSpikeOutOfRange, SnnDuplicateSpike, InputLengthMismatch, SnnInvalidReadout}` | same failure conditions except the ±Inf stimulus policy (item 6); both hosts reject NaN before the tick and validate spikes/readouts after it. `neuromod::StepError` mapping: here `InputLenMismatch` → `InputLengthMismatch` and `NonFiniteStimulus` → `SnnInvalidStimulus`, the rest stay `SnnBackend` (RM-2364); hybrid-fusion maps `InputLenMismatch` → `InputLengthMismatch` and every other variant, `NonFiniteStimulus` included, to `SnnStep` |
 
 ## Intentional differences
@@ -123,7 +123,7 @@ own side; this document records the boundary.
 
 All four fixes exist on **both** sides; the parity tests keep it that way:
 
-| Fix | cortex-tensor | hybrid-fusion |
+| Fix | cortex-hybrid | hybrid-fusion |
 |---|---|---|
 | #91 never-spiking channel rejection + drivable identity wiring | `NeuromodNetwork::checked` / `new` (PR #131) | `NeuromodSnn::from_network` (`pub(crate)`) + seeded constructors (PR #65) |
 | #92 real frozen step + truthful `caller_rng` | `step_frozen_with_rng`, `with_seed`/`set_seed`, `caller_rng` reflects the installed seed (PR #131) | `step_frozen_with_rng`, always-owned seeded RNG, `frozen_evaluation` + `caller_rng` features (PR #65) |
@@ -134,7 +134,7 @@ All four fixes exist on **both** sides; the parity tests keep it that way:
 ## Consequences
 
 - No document here may claim hybrid-fusion is the *single* owner of the
-  ANN↔SNN step contract or that this crate is ANN-only. cortex-tensor is
+  ANN↔SNN step contract or that this crate is ANN-only. cortex-hybrid is
   deliberately ANN+SNN capable; that is why this module exists.
 - A change to one contract that should apply to both must now say so: edit
   both crates, both mapping documents, extend the parity tests, and **bump
